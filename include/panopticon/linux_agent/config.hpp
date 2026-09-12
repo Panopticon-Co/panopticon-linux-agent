@@ -19,6 +19,11 @@ struct agent_config {
     std::size_t maximum_event_bytes{};
     std::size_t maximum_batch_bytes{};
     bool response_enabled{};
+    // Transport state is opt-in to retain the one-shot collector mode used by
+    // diagnostics. When identity_path is set, spool_path is mandatory.
+    std::string identity_path;
+    std::string enrollment_token_path;
+    std::string spool_path;
 };
 
 [[nodiscard]] result<agent_config> parse_config(std::string_view contents);
