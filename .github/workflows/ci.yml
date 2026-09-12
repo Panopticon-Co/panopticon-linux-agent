@@ -1,12 +1,19 @@
-name: Deprecated Rust prototype check
-# Retained only to keep the discontinued prototype buildable while the C++20 rebaseline is
-# prepared. It is not evidence of Linux-agent functionality or a release gate.
+name: Linux C++ CI
 on: [push, pull_request]
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  build-and-test:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --check
-      - run: cargo test --all-targets
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install --yes clang
+      - run: cmake -S . -B build-sanitized -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DPANOPTICON_ENABLE_ASAN=ON -DPANOPTICON_ENABLE_UBSAN=ON
+      - run: cmake --build build-sanitized --parallel
+      - run: ctest --test-dir build-sanitized --output-on-failure

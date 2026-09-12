@@ -2,11 +2,12 @@
 Description=Panopticon Linux endpoint agent
 After=network-online.target
 Wants=network-online.target
+
 [Service]
 Type=simple
 User=panopticon
 Group=panopticon
-ExecStart=/usr/bin/panopticon-linux-agent /etc/panopticon-agent/config.toml
+ExecStart=/usr/bin/panopticon-linux-agent
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -14,5 +15,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/panopticon-agent /var/log/panopticon-agent
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+
 [Install]
 WantedBy=multi-user.target
