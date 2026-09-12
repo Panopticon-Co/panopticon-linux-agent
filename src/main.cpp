@@ -94,6 +94,9 @@ int main(int argc, char** argv) {
                 auto receipt = gate.validate_and_mark(received);
                 if (receipt.code == panopticon::linux_agent::receipt_code::succeeded && received.action == panopticon::linux_agent::action_type::kill_process) {
                     if (!panopticon::linux_agent::succeeded(panopticon::linux_agent::terminate_process("/proc", received.process_target))) receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
+                } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded) {
+                    receipt.code = panopticon::linux_agent::receipt_code::unsupported_action;
+                    receipt.summary = "action handler is not available in this agent build";
                 }
                 const auto result = panopticon::linux_agent::serialize_command_result(receipt, settings.maximum_event_bytes);
                 if (panopticon::linux_agent::succeeded(result)) (void)client.submit_command_result(settings.manager_url, std::get<panopticon::linux_agent::enrolled_identity>(identity), std::get<std::string>(result));
