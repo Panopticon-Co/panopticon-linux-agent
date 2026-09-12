@@ -265,7 +265,8 @@ void test_command_parser_accepts_only_closed_manager_envelopes() {
     constexpr std::string_view command_json{
         "{\"command_id\":\"cmd-1\",\"agent_id\":\"agent-1\",\"action\":\"KILL_PROCESS\","
         "\"expires_at\":\"2030-01-02T03:04:05+00:00\",\"target\":{\"pid\":42,\"start_time_ticks\":99},"
-        "\"correlation_id\":\"correlation-1\",\"schema_version\":\"1\",\"host_id\":\"host-1\"}"};
+        "\"correlation_id\":\"correlation-1\",\"created_at\":\"2030-01-01T03:04:05+00:00\","
+        "\"schema_version\":\"1\",\"host_id\":\"host-1\"}"};
     const auto parsed = parse_command_json(command_json);
     require(succeeded(parsed), "canonical Manager command must parse");
     require(std::get<command>(parsed).process_target.pid == 42U, "parser must preserve typed PID");

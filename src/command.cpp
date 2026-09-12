@@ -65,8 +65,11 @@ result<command> parse_command_json(const std::string_view payload) {
     const auto host_id = string_field(payload, "host_id");
     const auto schema_version = string_field(payload, "schema_version");
     const auto action = string_field(payload, "action");
+    const auto correlation_id = string_field(payload, "correlation_id");
+    const auto created_at = utc_timestamp(string_field(payload, "created_at"));
     const auto expiry = utc_timestamp(string_field(payload, "expires_at"));
-    if (!is_valid_identifier(command_id) || !is_valid_identifier(agent_id) || !is_valid_identifier(host_id) || schema_version != "1" || !expiry) {
+    if (!is_valid_identifier(command_id) || !is_valid_identifier(agent_id) || !is_valid_identifier(host_id) ||
+        !is_valid_identifier(correlation_id) || schema_version != "1" || !created_at || !expiry || *created_at >= *expiry) {
         return error{error_code::invalid_input, "command envelope is invalid"};
     }
     action_type action_type_value{};
