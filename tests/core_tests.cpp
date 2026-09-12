@@ -53,6 +53,15 @@ void test_process_identity_accounts_for_pid_reuse() {
     require(process_identity_key(original) != process_identity_key(replacement), "process identities must include start time");
 }
 
+void test_enrolled_identity_is_persisted_atomically() {
+    const auto path = temporary_directory() / "identity" / "agent.token";
+    const enrolled_identity expected{"agent-1", "host-1", "opaque-test-token"};
+    require(succeeded(store_enrolled_identity(path, expected)), "identity should persist");
+    const auto loaded = load_enrolled_identity(path);
+    require(succeeded(loaded), "identity should reload");
+    require(std::get<enrolled_identity>(loaded).bearer_token == expected.bearer_token, "identity token must round-trip");
+}
+
 void test_security_event_evicts_low_priority_work() {
     bounded_priority_queue<int> queue{1U};
     require(queue.try_push(event_priority::low, 1), "low priority item should fit");
@@ -180,6 +189,7 @@ void test_command_gate_rejects_expiry_replay_and_pid_one() {
 int main() {
     try {
         test_process_identity_accounts_for_pid_reuse();
+        test_enrolled_identity_is_persisted_atomically();
         test_security_event_evicts_low_priority_work();
         test_spool_recovers_and_acknowledges_only_its_entries();
         test_spool_quarantines_corrupt_segments();
