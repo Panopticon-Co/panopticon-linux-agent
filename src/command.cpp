@@ -1,6 +1,10 @@
 #include "panopticon/linux_agent/command.hpp"
+#include "panopticon/linux_agent/procfs.hpp"
 
 #include <utility>
+#ifdef __linux__
+#include <signal.h>
+#endif
 
 namespace panopticon::linux_agent {
 
@@ -31,6 +35,27 @@ command_receipt command_gate::validate_and_mark(const command& received) {
 
 bool is_protected_process(const std::uint32_t pid) noexcept {
     return pid <= 1U;
+}
+
+result<bool> terminate_process(const std::filesystem::path& proc_root, const process_identity& target) {
+    if (is_protected_process(target.pid) || target.start_time_ticks == 0U || !is_valid_identifier(target.host_id))
+        return error{error_code::invalid_input, "process target is protected or invalid"};
+#ifndef __linux__
+    (void)proc_root;
+    return error{error_code::unsupported_action, "process termination is available only on Linux"};
+#else
+    // Keep verification bounded even when procfs contains adversarially many entries.
+    constexpr std::size_t maximum_verification_observations{131072U};
+    const auto processes = collect_processes(proc_root, target.host_id, maximum_verification_observations);
+    if (!succeeded(processes)) return std::get<error>(processes);
+    const auto& observations = std::get<std::vector<process_observation>>(processes);
+    const auto found = std::find_if(observations.begin(), observations.end(), [&](const process_observation& observation) {
+        return observation.identity == target;
+    });
+    if (found == observations.end()) return error{error_code::target_mismatch, "process identity no longer matches"};
+    if (kill(static_cast<pid_t>(target.pid), SIGTERM) != 0) return error{error_code::io_failure, "SIGTERM was refused"};
+    return true;
+#endif
 }
 
 }  // namespace panopticon::linux_agent

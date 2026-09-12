@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
 #include <mutex>
 #include <set>
 #include <string>
@@ -64,5 +65,7 @@ private:
 };
 
 [[nodiscard]] bool is_protected_process(std::uint32_t pid) noexcept;
+// Sends SIGTERM only after a fresh procfs observation proves the PID/start-time tuple.
+[[nodiscard]] result<bool> terminate_process(const std::filesystem::path& proc_root, const process_identity& target);
 
 }  // namespace panopticon::linux_agent
