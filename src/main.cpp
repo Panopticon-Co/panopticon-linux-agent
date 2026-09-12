@@ -1,8 +1,10 @@
 #include "panopticon/linux_agent/config.hpp"
+#include "panopticon/linux_agent/command.hpp"
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/host.hpp"
 #include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
+#include "panopticon/linux_agent/replay_ledger.hpp"
 #include "panopticon/linux_agent/spool.hpp"
 #include "panopticon/linux_agent/transport.hpp"
 
@@ -82,5 +84,21 @@ int main(int argc, char** argv) {
     const auto delivered = panopticon::linux_agent::drain_spool(spool, client, settings.manager_url + "/api/v1/ingest",
         std::get<panopticon::linux_agent::enrolled_identity>(identity), settings.queue_capacity, settings.maximum_batch_bytes);
     if (!panopticon::linux_agent::succeeded(delivered)) { std::cerr << "telemetry transport failed\n"; return 1; }
+    if (settings.response_enabled) {
+        panopticon::linux_agent::replay_ledger ledger{std::filesystem::path{settings.spool_path} / "commands", settings.queue_capacity};
+        const auto poll = client.poll_commands(settings.manager_url, std::get<panopticon::linux_agent::enrolled_identity>(identity));
+        if (panopticon::linux_agent::succeeded(poll) && panopticon::linux_agent::succeeded(ledger.load())) {
+            const auto commands = panopticon::linux_agent::parse_command_poll_response(std::get<std::string>(poll), settings.queue_capacity);
+            if (panopticon::linux_agent::succeeded(commands)) for (const auto& received : std::get<std::vector<panopticon::linux_agent::command>>(commands)) {
+                panopticon::linux_agent::command_gate gate{settings.agent_id, settings.host_id, [] { return std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()); }, &ledger};
+                auto receipt = gate.validate_and_mark(received);
+                if (receipt.code == panopticon::linux_agent::receipt_code::succeeded && received.action == panopticon::linux_agent::action_type::kill_process) {
+                    if (!panopticon::linux_agent::succeeded(panopticon::linux_agent::terminate_process("/proc", received.process_target))) receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
+                }
+                const auto result = panopticon::linux_agent::serialize_command_result(receipt, settings.maximum_event_bytes);
+                if (panopticon::linux_agent::succeeded(result)) (void)client.submit_command_result(settings.manager_url, std::get<panopticon::linux_agent::enrolled_identity>(identity), std::get<std::string>(result));
+            }
+        }
+    }
     return 0;
 }
