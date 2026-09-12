@@ -1,6 +1,7 @@
 #include "panopticon/linux_agent/command.hpp"
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/identity.hpp"
+#include "panopticon/linux_agent/network.hpp"
 #include "panopticon/linux_agent/queue.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
 #include "panopticon/linux_agent/spool.hpp"
@@ -110,6 +111,19 @@ void test_internal_normalization_escapes_and_bounds_ndjson() {
     require(!succeeded(serialize_ndjson(std::get<internal_process_event>(normalized), 8U)), "oversized events must be rejected");
 }
 
+void test_proc_net_tcp_parser_is_bounded_and_decodes_endpoints() {
+    constexpr std::string_view table{
+        "  sl  local_address rem_address   st\n"
+        "   0: 0100007F:1F90 020000C0:01BB 01\n"
+        "   1: 00000000:0016 00000000:0000 0A\n"};
+    const auto parsed = parse_proc_net_tcp(table, 1U);
+    require(succeeded(parsed), "TCP table should parse");
+    const auto& connection = std::get<std::vector<network_connection>>(parsed).front();
+    require(connection.local_address == "127.0.0.1" && connection.local_port == 8080U, "local endpoint must decode");
+    require(connection.remote_address == "192.0.0.2" && connection.remote_port == 443U, "remote endpoint must decode");
+    require(connection.state == "established", "TCP state must normalize");
+}
+
 void test_command_gate_rejects_expiry_replay_and_pid_one() {
     command_gate gate{"agent-1", "host-1", [] { return std::chrono::sys_seconds{std::chrono::seconds{100}}; }};
     const auto first = gate.validate_and_mark(valid_command());
@@ -137,6 +151,7 @@ int main() {
         test_spool_quarantines_corrupt_segments();
         test_procfs_is_explicitly_unsupported_off_linux();
         test_internal_normalization_escapes_and_bounds_ndjson();
+        test_proc_net_tcp_parser_is_bounded_and_decodes_endpoints();
         test_command_gate_rejects_expiry_replay_and_pid_one();
     } catch (const std::exception& error) {
         std::cerr << "test failure: " << error.what() << '\n';
