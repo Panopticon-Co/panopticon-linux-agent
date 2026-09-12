@@ -8,6 +8,7 @@
 #endif
 
 namespace panopticon::linux_agent {
+#ifdef PANOPTICON_HAVE_CURL
 namespace {
 std::string batch_id() {
     std::random_device source; std::mt19937_64 generator{source()};
@@ -16,6 +17,7 @@ std::string batch_id() {
     return output.str();
 }
 }
+#endif
 curl_https_client::curl_https_client(const long timeout_seconds, const std::size_t maximum_response_bytes)
     : timeout_seconds_{timeout_seconds}, maximum_response_bytes_{maximum_response_bytes} {}
 
