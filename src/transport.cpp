@@ -2,6 +2,7 @@
 #include <random>
 #include <iomanip>
 #include <sstream>
+#include <mutex>
 
 #ifdef PANOPTICON_HAVE_CURL
 #include <curl/curl.h>
@@ -10,6 +11,12 @@
 namespace panopticon::linux_agent {
 #ifdef PANOPTICON_HAVE_CURL
 namespace {
+std::once_flag curl_initialization;
+bool curl_ready{};
+bool initialize_curl() {
+    std::call_once(curl_initialization, [] { curl_ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK; });
+    return curl_ready;
+}
 std::string batch_id() {
     std::random_device source; std::mt19937_64 generator{source()};
     std::ostringstream output; output << std::hex << std::setfill('0');
@@ -39,6 +46,7 @@ transport_outcome curl_https_client::post_ndjson(const std::string& https_url, c
 #ifndef PANOPTICON_HAVE_CURL
     return transport_outcome::retryable;
 #else
+    if (!initialize_curl()) return transport_outcome::retryable;
     CURL* handle = curl_easy_init(); if (handle == nullptr) return transport_outcome::retryable;
     response_sink sink{maximum_response_bytes_};
     curl_slist* headers = nullptr;
