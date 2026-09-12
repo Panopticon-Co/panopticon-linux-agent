@@ -8,6 +8,7 @@
 #include "panopticon/linux_agent/queue.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
 #include "panopticon/linux_agent/quarantine.hpp"
+#include "panopticon/linux_agent/retry.hpp"
 #include "panopticon/linux_agent/spool.hpp"
 #include "panopticon/linux_agent/transport.hpp"
 
@@ -88,6 +89,13 @@ void test_quarantine_moves_regular_file_and_rejects_symlink() {
     std::error_code error;
     std::filesystem::create_symlink(std::get<quarantine_entry>(quarantined).stored_path, link, error);
     if (!error) require(!succeeded(quarantine_regular_file(directory / "allowed", link, directory / "quarantine")), "symlink must be rejected");
+}
+
+void test_retry_backoff_is_bounded() {
+    const retry_policy policy{std::chrono::milliseconds{100}, std::chrono::milliseconds{1000}, 4U};
+    require(retry_delay(policy, 0U) == std::chrono::milliseconds{100}, "initial retry delay must be used");
+    require(retry_delay(policy, 3U) == std::chrono::milliseconds{800}, "retry delay must grow exponentially");
+    require(retry_delay(policy, 4U) == std::chrono::milliseconds{0}, "retry attempts must be bounded");
 }
 
 void test_security_event_evicts_low_priority_work() {
@@ -235,6 +243,7 @@ int main() {
         test_enrolled_identity_is_persisted_atomically();
         test_audit_and_health_are_bounded_and_secret_free();
         test_quarantine_moves_regular_file_and_rejects_symlink();
+        test_retry_backoff_is_bounded();
         test_security_event_evicts_low_priority_work();
         test_spool_recovers_and_acknowledges_only_its_entries();
         test_transport_drains_only_acknowledged_spool_entries();
