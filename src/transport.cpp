@@ -132,21 +132,40 @@ result<enrolled_identity> curl_https_client::enroll(const std::string& manager_u
 }
 
 result<std::size_t> drain_spool(durable_spool& spool, https_client& client, const std::string& https_url,
-                                const enrolled_identity& identity, const std::size_t maximum_records) {
-    if (https_url.rfind("https://", 0U) != 0U || maximum_records == 0U || !is_valid_identifier(identity.agent_id))
+                                const enrolled_identity& identity, const std::size_t maximum_records,
+                                const std::size_t maximum_batch_bytes) {
+    if (https_url.rfind("https://", 0U) != 0U || maximum_records == 0U || maximum_batch_bytes == 0U || !is_valid_identifier(identity.agent_id))
         return error{error_code::invalid_input, "transport requires HTTPS, an enrolled identity, and a positive limit"};
     const auto entries = spool.pending();
     if (!succeeded(entries)) return std::get<error>(entries);
     std::size_t drained{};
-    for (const auto& entry : std::get<std::vector<std::filesystem::path>>(entries)) {
-        if (drained == maximum_records) break;
-        const auto payload = spool.read(entry);
-        if (!succeeded(payload)) return std::get<error>(payload);
-        const auto outcome = client.post_ndjson(https_url, identity, std::get<std::string>(payload));
+    const auto& pending = std::get<std::vector<std::filesystem::path>>(entries);
+    std::size_t next{};
+    while (next < pending.size() && drained < maximum_records) {
+        std::vector<std::filesystem::path> batch_entries;
+        std::string batch_payload;
+        while (next < pending.size() && batch_entries.size() < maximum_records - drained) {
+            const auto& entry = pending[next];
+            const auto payload = spool.read(entry);
+            if (!succeeded(payload)) return std::get<error>(payload);
+            auto record = std::get<std::string>(payload);
+            if (record.empty() || record.size() > maximum_batch_bytes ||
+                batch_payload.size() > maximum_batch_bytes - record.size() - (record.back() == '\n' ? 0U : 1U)) {
+                if (batch_entries.empty()) return error{error_code::resource_limit, "spool record exceeds transport batch limit"};
+                break;
+            }
+            batch_payload += record;
+            if (batch_payload.back() != '\n') batch_payload.push_back('\n');
+            batch_entries.push_back(entry);
+            ++next;
+        }
+        const auto outcome = client.post_ndjson(https_url, identity, batch_payload);
         if (outcome != transport_outcome::acknowledged) break;
-        const auto acknowledged = spool.acknowledge(entry);
-        if (!succeeded(acknowledged)) return std::get<error>(acknowledged);
-        ++drained;
+        for (const auto& entry : batch_entries) {
+            const auto acknowledged = spool.acknowledge(entry);
+            if (!succeeded(acknowledged)) return std::get<error>(acknowledged);
+            ++drained;
+        }
     }
     return drained;
 }

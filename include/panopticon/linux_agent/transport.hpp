@@ -37,5 +37,5 @@ private:
 // evidence durably for operator action/retry; no transport implementation may disable TLS.
 [[nodiscard]] result<std::size_t> drain_spool(durable_spool& spool, https_client& client,
                                                const std::string& https_url, const enrolled_identity& identity,
-                                               std::size_t maximum_records);
+                                               std::size_t maximum_records, std::size_t maximum_batch_bytes);
 }  // namespace panopticon::linux_agent

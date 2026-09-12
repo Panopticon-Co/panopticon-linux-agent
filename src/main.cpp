@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
         }
     }
     const auto delivered = panopticon::linux_agent::drain_spool(spool, client, settings.manager_url + "/api/v1/ingest",
-        std::get<panopticon::linux_agent::enrolled_identity>(identity), settings.queue_capacity);
+        std::get<panopticon::linux_agent::enrolled_identity>(identity), settings.queue_capacity, settings.maximum_batch_bytes);
     if (!panopticon::linux_agent::succeeded(delivered)) { std::cerr << "telemetry transport failed\n"; return 1; }
     return 0;
 }

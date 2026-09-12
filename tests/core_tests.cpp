@@ -133,16 +133,24 @@ void test_spool_recovers_and_acknowledges_only_its_entries() {
 class fake_https_client final : public https_client {
 public:
     transport_outcome outcome{transport_outcome::acknowledged};
-    transport_outcome post_ndjson(const std::string&, const enrolled_identity&, const std::string&) override { return outcome; }
+    std::string last_payload;
+    std::size_t calls{};
+    transport_outcome post_ndjson(const std::string&, const enrolled_identity&, const std::string& payload) override {
+        last_payload = payload; ++calls; return outcome;
+    }
 };
 
 void test_transport_drains_only_acknowledged_spool_entries() {
     const auto directory = temporary_directory(); durable_spool spool{directory, 4096U};
     require(succeeded(spool.append("event")), "spool append should succeed");
     fake_https_client client; const enrolled_identity identity{"agent-1", "host-1", "token"};
-    require(std::get<std::size_t>(drain_spool(spool, client, "https://manager", identity, 1U)) == 1U, "ack must drain");
+    require(std::get<std::size_t>(drain_spool(spool, client, "https://manager", identity, 1U, 1024U)) == 1U, "ack must drain");
+    require(succeeded(spool.append("event-one")), "spool append should succeed");
+    require(succeeded(spool.append("event-two")), "spool append should succeed");
+    require(std::get<std::size_t>(drain_spool(spool, client, "https://manager", identity, 2U, 1024U)) == 2U, "batch ack must drain all records");
+    require(client.last_payload == "event-one\nevent-two\n", "batch payload must be bounded NDJSON");
     require(succeeded(spool.append("event")), "spool append should succeed"); client.outcome = transport_outcome::retryable;
-    require(std::get<std::size_t>(drain_spool(spool, client, "https://manager", identity, 1U)) == 0U, "retry must retain");
+    require(std::get<std::size_t>(drain_spool(spool, client, "https://manager", identity, 1U, 1024U)) == 0U, "retry must retain");
 }
 
 void test_spool_quarantines_corrupt_segments() {
