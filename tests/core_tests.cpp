@@ -47,6 +47,7 @@ command valid_command() {
         "agent-1",
         "host-1",
         "1",
+        "correlation-1",
         action_type::kill_process,
         std::chrono::sys_seconds{std::chrono::seconds{200}},
         {"host-1", 42U, 99U},
@@ -259,6 +260,11 @@ void test_command_gate_rejects_expiry_replay_and_pid_one() {
     protected_target.command_id = "cmd-3";
     protected_target.process_target.pid = 1U;
     require(gate.validate_and_mark(protected_target).code == receipt_code::target_protected, "pid one must be protected");
+
+    auto uncorrelated = valid_command();
+    uncorrelated.command_id = "cmd-4";
+    uncorrelated.correlation_id.clear();
+    require(gate.validate_and_mark(uncorrelated).code == receipt_code::invalid_command, "commands without a correlation ID must reject");
 }
 
 void test_command_parser_accepts_only_closed_manager_envelopes() {
@@ -287,10 +293,11 @@ void test_command_gate_uses_durable_replay_ledger() {
 }
 
 void test_command_result_is_typed_and_bounded() {
-    const auto result = serialize_command_result({"cmd-1", receipt_code::expired, "ignored"}, 256U);
+    const auto result = serialize_command_result({"cmd-1", "correlation-1", receipt_code::expired, "ignored"}, 256U);
     require(succeeded(result), "receipt should serialize");
     require(std::get<std::string>(result).find("\"outcome\":\"rejected\"") != std::string::npos, "expired command must be rejected");
-    require(!succeeded(serialize_command_result({"cmd-1", receipt_code::succeeded, ""}, 4U)), "receipt must be bounded");
+    require(std::get<std::string>(result).find("\"correlation_id\":\"correlation-1\"") != std::string::npos, "receipt must preserve correlation");
+    require(!succeeded(serialize_command_result({"cmd-1", "correlation-1", receipt_code::succeeded, ""}, 4U)), "receipt must be bounded");
 }
 
 }  // namespace

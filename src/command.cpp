@@ -83,7 +83,7 @@ result<command> parse_command_json(const std::string_view payload) {
         if (!pid || !start || *pid > std::numeric_limits<std::uint32_t>::max()) return error{error_code::invalid_input, "process command target is invalid"};
         target.pid = static_cast<std::uint32_t>(*pid); target.start_time_ticks = *start;
     }
-    return command{command_id, agent_id, host_id, schema_version, action_type_value, *expiry, target};
+    return command{command_id, agent_id, host_id, schema_version, correlation_id, action_type_value, *expiry, target};
 }
 
 result<std::vector<command>> parse_command_poll_response(const std::string_view payload,
@@ -126,30 +126,30 @@ command_gate::command_gate(std::string agent_id, std::string host_id, std::funct
 
 command_receipt command_gate::validate_and_mark(const command& received) {
     std::lock_guard lock{mutex_};
-    if (!is_valid_identifier(received.command_id) || received.schema_version != "1" || received.agent_id != agent_id_ ||
+    if (!is_valid_identifier(received.command_id) || !is_valid_identifier(received.correlation_id) || received.schema_version != "1" || received.agent_id != agent_id_ ||
         received.host_id != host_id_ || received.process_target.host_id != host_id_) {
-        return {received.command_id, receipt_code::invalid_command, "command identity, target, or schema is invalid"};
+        return {received.command_id, received.correlation_id, receipt_code::invalid_command, "command identity, target, or schema is invalid"};
     }
     if (received.expires_at <= clock_()) {
-        return {received.command_id, receipt_code::expired, "command has expired"};
+        return {received.command_id, received.correlation_id, receipt_code::expired, "command has expired"};
     }
     if (seen_.contains(received.command_id)) {
-        return {received.command_id, receipt_code::replay_detected, "command was already accepted"};
+        return {received.command_id, received.correlation_id, receipt_code::replay_detected, "command was already accepted"};
     }
     if (received.action != action_type::kill_process && received.action != action_type::collect_process_info &&
         received.action != action_type::collect_network_connections) {
-        return {received.command_id, receipt_code::unsupported_action, "action is not implemented"};
+        return {received.command_id, received.correlation_id, receipt_code::unsupported_action, "action is not implemented"};
     }
     if (received.action == action_type::kill_process && is_protected_process(received.process_target.pid)) {
-        return {received.command_id, receipt_code::target_protected, "target is a protected process"};
+        return {received.command_id, received.correlation_id, receipt_code::target_protected, "target is a protected process"};
     }
     if (durable_ledger_ != nullptr) {
         const auto recorded = durable_ledger_->mark_if_new(received.command_id);
-        if (!succeeded(recorded)) return {received.command_id, receipt_code::execution_failed, "cannot persist command replay state"};
-        if (!std::get<bool>(recorded)) return {received.command_id, receipt_code::replay_detected, "command was accepted before restart"};
+        if (!succeeded(recorded)) return {received.command_id, received.correlation_id, receipt_code::execution_failed, "cannot persist command replay state"};
+        if (!std::get<bool>(recorded)) return {received.command_id, received.correlation_id, receipt_code::replay_detected, "command was accepted before restart"};
     }
     seen_.insert(received.command_id);
-    return {received.command_id, receipt_code::succeeded, "command accepted for a closed action handler"};
+    return {received.command_id, received.correlation_id, receipt_code::succeeded, "command accepted for a closed action handler"};
 }
 
 bool is_protected_process(const std::uint32_t pid) noexcept {
@@ -162,12 +162,13 @@ bool is_protected_process(const std::uint32_t pid) noexcept {
 }
 
 result<std::string> serialize_command_result(const command_receipt& receipt, const std::size_t maximum_bytes) {
-    if (!is_valid_identifier(receipt.command_id) || maximum_bytes == 0U) return error{error_code::invalid_input, "receipt is invalid"};
+    if (!is_valid_identifier(receipt.command_id) || !is_valid_identifier(receipt.correlation_id) || maximum_bytes == 0U) return error{error_code::invalid_input, "receipt is invalid"};
     const auto outcome = receipt.code == receipt_code::succeeded ? "succeeded" :
                          receipt.code == receipt_code::execution_failed ? "failed" : "rejected";
     std::ostringstream output;
     output << "{\"result_id\":\"result-" << receipt.command_id << "\",\"command_id\":\"" << receipt.command_id
-           << "\",\"outcome\":\"" << outcome << "\",\"detail\":\"" << static_cast<unsigned int>(receipt.code) << "\"}";
+           << "\",\"outcome\":\"" << outcome << "\",\"detail\":\"" << static_cast<unsigned int>(receipt.code)
+           << "\",\"correlation_id\":\"" << receipt.correlation_id << "\"}";
     auto serialized = output.str();
     if (serialized.size() > maximum_bytes) return error{error_code::resource_limit, "command result exceeds limit"};
     return serialized;

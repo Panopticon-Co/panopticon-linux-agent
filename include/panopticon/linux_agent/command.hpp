@@ -31,6 +31,7 @@ struct command {
     std::string agent_id;
     std::string host_id;
     std::string schema_version;
+    std::string correlation_id;
     action_type action;
     std::chrono::sys_seconds expires_at;
     process_identity process_target;
@@ -49,6 +50,7 @@ enum class receipt_code : std::uint8_t {
 
 struct command_receipt {
     std::string command_id;
+    std::string correlation_id;
     receipt_code code;
     std::string summary;
 };
