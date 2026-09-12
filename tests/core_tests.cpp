@@ -7,6 +7,7 @@
 #include "panopticon/linux_agent/network.hpp"
 #include "panopticon/linux_agent/queue.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
+#include "panopticon/linux_agent/quarantine.hpp"
 #include "panopticon/linux_agent/spool.hpp"
 #include "panopticon/linux_agent/transport.hpp"
 
@@ -72,6 +73,21 @@ void test_audit_and_health_are_bounded_and_secret_free() {
     const auto health = serialize_health_ndjson({true, 42U, 3U, "online", "secret-token"}, 256U);
     require(health.find("secret-token") == std::string::npos, "health output must not disclose errors containing secrets");
     require(serialize_health_ndjson({true, 42U, 3U, "online", ""}, 8U).empty(), "health must observe output limit");
+}
+
+void test_quarantine_moves_regular_file_and_rejects_symlink() {
+    const auto directory = temporary_directory();
+    const auto source = directory / "allowed" / "sample.txt";
+    std::filesystem::create_directories(source.parent_path());
+    { std::ofstream output{source}; output << "evidence"; }
+    const auto quarantined = quarantine_regular_file(directory / "allowed", source, directory / "quarantine");
+    require(succeeded(quarantined), "regular allowed file should quarantine");
+    require(!std::filesystem::exists(source), "source must be moved");
+    require(std::filesystem::exists(std::get<quarantine_entry>(quarantined).metadata_path), "metadata must exist");
+    const auto link = directory / "allowed" / "link";
+    std::error_code error;
+    std::filesystem::create_symlink(std::get<quarantine_entry>(quarantined).stored_path, link, error);
+    if (!error) require(!succeeded(quarantine_regular_file(directory / "allowed", link, directory / "quarantine")), "symlink must be rejected");
 }
 
 void test_security_event_evicts_low_priority_work() {
@@ -218,6 +234,7 @@ int main() {
         test_process_identity_accounts_for_pid_reuse();
         test_enrolled_identity_is_persisted_atomically();
         test_audit_and_health_are_bounded_and_secret_free();
+        test_quarantine_moves_regular_file_and_rejects_symlink();
         test_security_event_evicts_low_priority_work();
         test_spool_recovers_and_acknowledges_only_its_entries();
         test_transport_drains_only_acknowledged_spool_entries();
