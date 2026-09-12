@@ -1,4 +1,5 @@
 #include "panopticon/linux_agent/command.hpp"
+#include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/queue.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
@@ -98,6 +99,17 @@ void test_procfs_is_explicitly_unsupported_off_linux() {
 #endif
 }
 
+void test_internal_normalization_escapes_and_bounds_ndjson() {
+    process_observation observation{{"host-1", 42U, 99U}, 1U, 1000U, 1000U, 'R', "/bin/test", "test\nargument", ""};
+    const agent_context context{"agent-1", "host-1", "test-host", "Linux", "6.8"};
+    const auto normalized = normalize_process(std::move(observation), context, std::chrono::sys_seconds{std::chrono::seconds{100}});
+    require(succeeded(normalized), "valid observation should normalize");
+    const auto serialized = serialize_ndjson(std::get<internal_process_event>(normalized), 4096U);
+    require(succeeded(serialized), "normalized event should serialize within limit");
+    require(std::get<std::string>(serialized).find("test\\nargument") != std::string::npos, "control characters must be JSON escaped");
+    require(!succeeded(serialize_ndjson(std::get<internal_process_event>(normalized), 8U)), "oversized events must be rejected");
+}
+
 void test_command_gate_rejects_expiry_replay_and_pid_one() {
     command_gate gate{"agent-1", "host-1", [] { return std::chrono::sys_seconds{std::chrono::seconds{100}}; }};
     const auto first = gate.validate_and_mark(valid_command());
@@ -124,6 +136,7 @@ int main() {
         test_spool_recovers_and_acknowledges_only_its_entries();
         test_spool_quarantines_corrupt_segments();
         test_procfs_is_explicitly_unsupported_off_linux();
+        test_internal_normalization_escapes_and_bounds_ndjson();
         test_command_gate_rejects_expiry_replay_and_pid_one();
     } catch (const std::exception& error) {
         std::cerr << "test failure: " << error.what() << '\n';
