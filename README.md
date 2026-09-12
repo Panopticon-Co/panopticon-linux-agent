@@ -6,18 +6,21 @@ Windows Officer source tree.
 
 ## Current status
 
-The agent has a C++20 core with a bounded, thread-safe priority queue; atomic quota-bounded
-spool segments with accidental-corruption detection/recovery; a typed command gate; and a
-strict configuration validation. It also has Linux procfs process/TCP snapshot adapters. The
-procfs adapters report unsupported rather than
-pretending to have host visibility on non-Linux systems.
+The agent has a C++20 core with a bounded priority queue; atomic quota-bounded spool segments
+with corruption recovery; strict configuration; PID/start-time process identity; procfs process,
+TCP/UDP IPv4/IPv6, and host-context collectors; canonical schema-0.4 process serialization;
+durable enrolled identity and command replay state; bounded audit/health records; safe file
+collection/quarantine; and a closed response foundation. Linux-only adapters report unsupported
+rather than pretending to have host visibility on other platforms.
 
 The previous Rust core is discontinued by [ADR 003](docs/adr/003-linux-agent-cpp-toolchain.md).
-The current core is not enrolled and must not be deployed as a production endpoint.
+The Manager has additive enrollment, schema-0.4 Linux ingestion, typed command queue, and typed
+result APIs. The agent provides a libcurl HTTPS client when libcurl is available, enforcing peer
+and hostname verification, bearer authentication, timeouts, bounded responses, and spool ACK
+semantics. A strict-configured executable can emit bounded canonical procfs snapshots.
 
-There is no approved Linux telemetry schema, Manager enrollment/authentication protocol,
-command endpoint, TLS client, eBPF program, file watcher, isolation implementation, or
-privileged helper. Those capabilities are intentionally disabled rather than simulated.
+There is no eBPF adapter, file watcher, host-isolation implementation, privileged helper, or
+fully wired enrollment/transport/command runtime loop yet. These are not claimed as complete.
 
 ## Development
 

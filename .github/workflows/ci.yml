@@ -5,15 +5,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install --yes libcurl4-openssl-dev
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build --parallel
       - run: ctest --test-dir build --output-on-failure
+      - run: ./build/panopticon-linux-agent tests/agent-test.conf > /tmp/panopticon.ndjson
+      - run: test -s /tmp/panopticon.ndjson
 
   sanitizers:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install --yes clang
+      - run: sudo apt-get update && sudo apt-get install --yes clang libcurl4-openssl-dev
       - run: cmake -S . -B build-sanitized -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DPANOPTICON_ENABLE_ASAN=ON -DPANOPTICON_ENABLE_UBSAN=ON
       - run: cmake --build build-sanitized --parallel
       - run: ctest --test-dir build-sanitized --output-on-failure
