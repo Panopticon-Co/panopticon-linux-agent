@@ -28,6 +28,11 @@ public:
     [[nodiscard]] result<enrolled_identity> enroll(const std::string& manager_url, const std::string& agent_id,
                                                     const std::string& host_id,
                                                     const std::string& bootstrap_token) const;
+    [[nodiscard]] result<std::string> poll_commands(const std::string& manager_url,
+                                                     const enrolled_identity& identity) const;
+    [[nodiscard]] transport_outcome submit_command_result(const std::string& manager_url,
+                                                           const enrolled_identity& identity,
+                                                           const std::string& payload) const;
 private:
     long timeout_seconds_;
     std::size_t maximum_response_bytes_;

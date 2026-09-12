@@ -131,6 +131,68 @@ result<enrolled_identity> curl_https_client::enroll(const std::string& manager_u
 #endif
 }
 
+result<std::string> curl_https_client::poll_commands(const std::string& manager_url,
+                                                      const enrolled_identity& identity) const {
+    if (manager_url.rfind("https://", 0U) != 0U || !is_valid_identifier(identity.agent_id) ||
+        identity.bearer_token.empty() || identity.bearer_token.size() > 512U || timeout_seconds_ <= 0L) {
+        return error{error_code::invalid_input, "command polling input is invalid"};
+    }
+#ifndef PANOPTICON_HAVE_CURL
+    return error{error_code::unsupported_action, "HTTPS command polling requires libcurl"};
+#else
+    if (!initialize_curl()) return error{error_code::io_failure, "cannot initialize HTTPS client"};
+    CURL* handle = curl_easy_init();
+    if (handle == nullptr) return error{error_code::io_failure, "cannot allocate HTTPS client"};
+    response_sink sink{maximum_response_bytes_, {}};
+    const auto endpoint = without_trailing_slash(manager_url) + "/api/v1/agents/" + identity.agent_id + "/commands";
+    curl_slist* headers = nullptr;
+    const auto auth_header = "Authorization: Bearer " + identity.bearer_token;
+    headers = curl_slist_append(headers, auth_header.c_str());
+    curl_easy_setopt(handle, CURLOPT_URL, endpoint.c_str()); curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L); curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L); curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, timeout_seconds_); curl_easy_setopt(handle, CURLOPT_TIMEOUT, timeout_seconds_);
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, capture_bounded_response); curl_easy_setopt(handle, CURLOPT_WRITEDATA, &sink);
+    const auto code = curl_easy_perform(handle); long status{}; curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers); curl_easy_cleanup(handle);
+    if (code != CURLE_OK) return error{error_code::io_failure, "command poll transport failure"};
+    if (status == 401L || status == 403L) return error{error_code::target_mismatch, "command poll authentication rejected"};
+    if (status != 200L || sink.contents.size() > maximum_response_bytes_) return error{error_code::io_failure, "command poll service rejected request"};
+    return sink.contents;
+#endif
+}
+
+transport_outcome curl_https_client::submit_command_result(const std::string& manager_url,
+                                                            const enrolled_identity& identity,
+                                                            const std::string& payload) const {
+    if (manager_url.rfind("https://", 0U) != 0U || !is_valid_identifier(identity.agent_id) ||
+        identity.bearer_token.empty() || payload.empty() || payload.size() > maximum_response_bytes_ || timeout_seconds_ <= 0L) {
+        return transport_outcome::rejected;
+    }
+#ifndef PANOPTICON_HAVE_CURL
+    return transport_outcome::retryable;
+#else
+    if (!initialize_curl()) return transport_outcome::retryable;
+    CURL* handle = curl_easy_init(); if (handle == nullptr) return transport_outcome::retryable;
+    response_sink sink{maximum_response_bytes_, {}};
+    const auto endpoint = without_trailing_slash(manager_url) + "/api/v1/agents/" + identity.agent_id + "/command-results";
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    const auto auth_header = "Authorization: Bearer " + identity.bearer_token;
+    headers = curl_slist_append(headers, auth_header.c_str());
+    curl_easy_setopt(handle, CURLOPT_URL, endpoint.c_str()); curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, payload.data()); curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(payload.size()));
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L); curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, timeout_seconds_); curl_easy_setopt(handle, CURLOPT_TIMEOUT, timeout_seconds_);
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, capture_bounded_response); curl_easy_setopt(handle, CURLOPT_WRITEDATA, &sink);
+    const auto code = curl_easy_perform(handle); long status{}; curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers); curl_easy_cleanup(handle);
+    if (code != CURLE_OK) return transport_outcome::retryable;
+    if (status == 200L && sink.contents.find("\"accepted\":true") != std::string::npos) return transport_outcome::acknowledged;
+    if (status == 401L || status == 403L) return transport_outcome::authentication_failed;
+    return status == 429L || status >= 500L ? transport_outcome::retryable : transport_outcome::rejected;
+#endif
+}
+
 result<std::size_t> drain_spool(durable_spool& spool, https_client& client, const std::string& https_url,
                                 const enrolled_identity& identity, const std::size_t maximum_records,
                                 const std::size_t maximum_batch_bytes) {
