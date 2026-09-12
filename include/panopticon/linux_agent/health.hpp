@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 #include <string>
 namespace panopticon::linux_agent {
 struct health_status {

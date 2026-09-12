@@ -1,7 +1,9 @@
 #include "panopticon/linux_agent/command.hpp"
+#include "panopticon/linux_agent/audit.hpp"
 #include "panopticon/linux_agent/config.hpp"
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/identity.hpp"
+#include "panopticon/linux_agent/health.hpp"
 #include "panopticon/linux_agent/network.hpp"
 #include "panopticon/linux_agent/queue.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
@@ -61,6 +63,15 @@ void test_enrolled_identity_is_persisted_atomically() {
     const auto loaded = load_enrolled_identity(path);
     require(succeeded(loaded), "identity should reload");
     require(std::get<enrolled_identity>(loaded).bearer_token == expected.bearer_token, "identity token must round-trip");
+}
+
+void test_audit_and_health_are_bounded_and_secret_free() {
+    const auto audit_path = temporary_directory() / "audit" / "events.ndjson";
+    require(succeeded(append_audit_record(audit_path, "command_received", "cmd-1", "accepted", 256U)), "audit should persist");
+    require(!succeeded(append_audit_record(audit_path, "bad space", "cmd-1", "accepted", 256U)), "audit must reject malformed identifiers");
+    const auto health = serialize_health_ndjson({true, 42U, 3U, "online", "secret-token"}, 256U);
+    require(health.find("secret-token") == std::string::npos, "health output must not disclose errors containing secrets");
+    require(serialize_health_ndjson({true, 42U, 3U, "online", ""}, 8U).empty(), "health must observe output limit");
 }
 
 void test_security_event_evicts_low_priority_work() {
@@ -206,6 +217,7 @@ int main() {
     try {
         test_process_identity_accounts_for_pid_reuse();
         test_enrolled_identity_is_persisted_atomically();
+        test_audit_and_health_are_bounded_and_secret_free();
         test_security_event_evicts_low_priority_work();
         test_spool_recovers_and_acknowledges_only_its_entries();
         test_transport_drains_only_acknowledged_spool_entries();
