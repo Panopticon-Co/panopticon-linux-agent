@@ -20,6 +20,11 @@ add_library(panopticon-linux-core STATIC
 )
 target_include_directories(panopticon-linux-core PUBLIC include)
 target_compile_features(panopticon-linux-core PUBLIC cxx_std_20)
+find_package(CURL QUIET)
+if(CURL_FOUND)
+    target_link_libraries(panopticon-linux-core PUBLIC CURL::libcurl)
+    target_compile_definitions(panopticon-linux-core PRIVATE PANOPTICON_HAVE_CURL=1)
+endif()
 
 if(MSVC)
     target_compile_options(panopticon-linux-core PRIVATE /W4 /WX /permissive- /EHsc /utf-8)

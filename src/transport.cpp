@@ -1,6 +1,53 @@
 #include "panopticon/linux_agent/transport.hpp"
 
+#ifdef PANOPTICON_HAVE_CURL
+#include <curl/curl.h>
+#endif
+
 namespace panopticon::linux_agent {
+curl_https_client::curl_https_client(const long timeout_seconds, const std::size_t maximum_response_bytes)
+    : timeout_seconds_{timeout_seconds}, maximum_response_bytes_{maximum_response_bytes} {}
+
+#ifdef PANOPTICON_HAVE_CURL
+namespace {
+struct response_sink { std::size_t limit; std::size_t size{}; };
+size_t discard_bounded_response(char*, const size_t size, const size_t count, void* context) {
+    auto* sink = static_cast<response_sink*>(context); const auto bytes = size * count;
+    if (bytes > sink->limit - sink->size) return 0U;
+    sink->size += bytes; return bytes;
+}
+}
+#endif
+
+transport_outcome curl_https_client::post_ndjson(const std::string& https_url, const enrolled_identity& identity,
+                                                  const std::string& payload) {
+    if (https_url.rfind("https://", 0U) != 0U || identity.bearer_token.empty() || payload.empty() || timeout_seconds_ <= 0L)
+        return transport_outcome::rejected;
+#ifndef PANOPTICON_HAVE_CURL
+    return transport_outcome::retryable;
+#else
+    CURL* handle = curl_easy_init(); if (handle == nullptr) return transport_outcome::retryable;
+    response_sink sink{maximum_response_bytes_};
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/x-ndjson");
+    headers = curl_slist_append(headers, "X-Panopticon-Protocol: 1");
+    const auto agent_header = "X-Panopticon-Agent-Id: " + identity.agent_id;
+    const auto auth_header = "Authorization: Bearer " + identity.bearer_token;
+    headers = curl_slist_append(headers, agent_header.c_str()); headers = curl_slist_append(headers, auth_header.c_str());
+    curl_easy_setopt(handle, CURLOPT_URL, https_url.c_str()); curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, payload.data()); curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(payload.size()));
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L); curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, timeout_seconds_); curl_easy_setopt(handle, CURLOPT_TIMEOUT, timeout_seconds_);
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, discard_bounded_response); curl_easy_setopt(handle, CURLOPT_WRITEDATA, &sink);
+    const auto code = curl_easy_perform(handle); long status{}; curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers); curl_easy_cleanup(handle);
+    if (code != CURLE_OK) return transport_outcome::retryable;
+    if (status == 200L) return transport_outcome::acknowledged;
+    if (status == 401L || status == 403L) return transport_outcome::authentication_failed;
+    return status == 429L || status >= 500L ? transport_outcome::retryable : transport_outcome::rejected;
+#endif
+}
+
 result<std::size_t> drain_spool(durable_spool& spool, https_client& client, const std::string& https_url,
                                 const enrolled_identity& identity, const std::size_t maximum_records) {
     if (https_url.rfind("https://", 0U) != 0U || maximum_records == 0U || !is_valid_identifier(identity.agent_id))
