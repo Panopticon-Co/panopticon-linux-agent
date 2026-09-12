@@ -1,4 +1,5 @@
 #include "panopticon/linux_agent/command.hpp"
+#include "panopticon/linux_agent/config.hpp"
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/network.hpp"
@@ -124,6 +125,15 @@ void test_proc_net_tcp_parser_is_bounded_and_decodes_endpoints() {
     require(connection.state == "established", "TCP state must normalize");
 }
 
+void test_configuration_rejects_unknown_and_insecure_values() {
+    constexpr std::string_view valid{
+        "manager_url=https://manager.example\nagent_id=agent-1\nhost_id=host-1\nqueue_capacity=10\nspool_quota_bytes=4096\nmaximum_event_bytes=256\nmaximum_batch_bytes=512\nresponse_enabled=false\n"};
+    require(succeeded(parse_config(valid)), "complete HTTPS configuration must parse");
+    require(!succeeded(parse_config("manager_url=http://bad\n")), "incomplete insecure configuration must fail");
+    const std::string unknown_key = std::string{valid} + "unknown=true\n";
+    require(!succeeded(parse_config(unknown_key)), "unknown key must fail");
+}
+
 void test_command_gate_rejects_expiry_replay_and_pid_one() {
     command_gate gate{"agent-1", "host-1", [] { return std::chrono::sys_seconds{std::chrono::seconds{100}}; }};
     const auto first = gate.validate_and_mark(valid_command());
@@ -152,6 +162,7 @@ int main() {
         test_procfs_is_explicitly_unsupported_off_linux();
         test_internal_normalization_escapes_and_bounds_ndjson();
         test_proc_net_tcp_parser_is_bounded_and_decodes_endpoints();
+        test_configuration_rejects_unknown_and_insecure_values();
         test_command_gate_rejects_expiry_replay_and_pid_one();
     } catch (const std::exception& error) {
         std::cerr << "test failure: " << error.what() << '\n';

@@ -14,6 +14,7 @@ add_library(panopticon-linux-core STATIC
     src/procfs.cpp
     src/event.cpp
     src/network.cpp
+    src/config.cpp
 )
 target_include_directories(panopticon-linux-core PUBLIC include)
 target_compile_features(panopticon-linux-core PUBLIC cxx_std_20)

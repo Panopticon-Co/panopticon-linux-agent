@@ -8,7 +8,8 @@ Windows Officer source tree.
 
 The agent has a C++20 core with a bounded, thread-safe priority queue; atomic quota-bounded
 spool segments with accidental-corruption detection/recovery; a typed command gate; and a
-Linux procfs process-snapshot adapter. The procfs adapter reports unsupported rather than
+strict configuration validation. It also has Linux procfs process/TCP snapshot adapters. The
+procfs adapters report unsupported rather than
 pretending to have host visibility on non-Linux systems.
 
 The previous Rust core is discontinued by [ADR 003](docs/adr/003-linux-agent-cpp-toolchain.md).
