@@ -9,9 +9,11 @@ Normalization produces a size-bounded `linux-internal-1` NDJSON record. It JSON-
 fields, includes agent/host context and the process identity tuple, and rejects oversized output.
 It is an internal spool format, not a Panopticon 0.3 event.
 
-The agent also reads a bounded `/proc/net/tcp` table and normalizes IPv4 endpoints plus a small
-set of TCP states. It deliberately reports no process owner: that table alone cannot safely map
-a socket to a PID. IPv6, UDP, file, and authentication collection are not implemented.
+The agent also reads bounded `/proc/net/tcp`, `/proc/net/tcp6`, `/proc/net/udp`, and
+`/proc/net/udp6` tables, normalizing IPv4 and procfs-word-ordered IPv6 endpoints, protocol, and
+a small set of connection states. It deliberately reports no process owner: these tables alone
+cannot safely map a socket to a PID. Socket timestamps, safe process attribution, file, and
+authentication collection are not implemented.
 
 The current Panopticon 0.3 contract cannot represent Linux source kinds, so this data is never
 sent to the Manager.

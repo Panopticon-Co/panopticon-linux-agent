@@ -125,6 +125,25 @@ void test_proc_net_tcp_parser_is_bounded_and_decodes_endpoints() {
     require(connection.state == "established", "TCP state must normalize");
 }
 
+void test_proc_net_udp_and_ipv6_parsers_are_bounded_and_typed() {
+    constexpr std::string_view udp_table{
+        "  sl  local_address rem_address   st\n"
+        "   0: 00000000:0035 00000000:0000 07\n"};
+    const auto udp = parse_proc_net_udp(udp_table, 1U);
+    require(succeeded(udp), "UDP table should parse");
+    require(std::get<std::vector<network_connection>>(udp).front().protocol == "udp", "UDP protocol must be typed");
+    constexpr std::string_view tcp6_table{
+        "  sl  local_address                         remote_address                        st\n"
+        "   0: 0000000000000000FFFF00000100007F:01BB 00000000000000000000000000000000:0000 0A\n"};
+    const auto tcp6 = parse_proc_net_tcp6(tcp6_table, 1U);
+    require(succeeded(tcp6), "TCP6 table should parse");
+    const auto& connection = std::get<std::vector<network_connection>>(tcp6).front();
+    require(connection.protocol == "tcp6" && connection.local_address == "0:0:0:0:0:ffff:7f00:1",
+            "TCP6 endpoint must decode procfs word order");
+    require(connection.state == "listen", "TCP6 state must normalize");
+    require(!succeeded(parse_proc_net_udp6(udp_table, 0U)), "all network tables must reject zero limits");
+}
+
 void test_configuration_rejects_unknown_and_insecure_values() {
     constexpr std::string_view valid{
         "manager_url=https://manager.example\nagent_id=agent-1\nhost_id=host-1\nqueue_capacity=10\nspool_quota_bytes=4096\nmaximum_event_bytes=256\nmaximum_batch_bytes=512\nresponse_enabled=false\n"};
@@ -162,6 +181,7 @@ int main() {
         test_procfs_is_explicitly_unsupported_off_linux();
         test_internal_normalization_escapes_and_bounds_ndjson();
         test_proc_net_tcp_parser_is_bounded_and_decodes_endpoints();
+        test_proc_net_udp_and_ipv6_parsers_are_bounded_and_typed();
         test_configuration_rejects_unknown_and_insecure_values();
         test_command_gate_rejects_expiry_replay_and_pid_one();
     } catch (const std::exception& error) {
