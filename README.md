@@ -6,14 +6,19 @@ Windows Officer source tree.
 
 ## Current status
 
-The previous Rust core is a discontinued prototype following the language re-evaluation in
-[ADR 003](docs/adr/003-linux-agent-cpp-toolchain.md). It is not an implemented Linux agent
-and must not be packaged, deployed, or extended. The C++20 rebaseline has not started.
+The agent has a C++20 core with a bounded, thread-safe priority queue; atomic quota-bounded
+spool segments with accidental-corruption detection/recovery; a typed command gate; and a
+Linux procfs process-snapshot adapter. The procfs adapter reports unsupported rather than
+pretending to have host visibility on non-Linux systems.
 
-No Linux collectors, spool/delivery path, Manager enrollment/command protocol, response
-handler, eBPF program, or systemd deployment is currently implemented or claimed.
+The previous Rust core is discontinued by [ADR 003](docs/adr/003-linux-agent-cpp-toolchain.md).
+The current core is not enrolled and must not be deployed as a production endpoint.
+
+There is no approved Linux telemetry schema, Manager enrollment/authentication protocol,
+command endpoint, TLS client, eBPF program, file watcher, isolation implementation, or
+privileged helper. Those capabilities are intentionally disabled rather than simulated.
 
 ## Development
 
-The C++ build and test instructions will be added with the rebaseline. Use a Linux systemd
-host for runtime validation; no VM validation is currently claimed.
+See [BUILD.md](BUILD.md) and [TESTING.md](TESTING.md). Use a Linux systemd host for runtime
+validation; no VM validation is currently claimed.
