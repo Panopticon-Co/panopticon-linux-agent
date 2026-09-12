@@ -86,6 +86,40 @@ result<command> parse_command_json(const std::string_view payload) {
     return command{command_id, agent_id, host_id, schema_version, action_type_value, *expiry, target};
 }
 
+result<std::vector<command>> parse_command_poll_response(const std::string_view payload,
+                                                          const std::size_t maximum_commands) {
+    constexpr std::string_view prefix{"{\"commands\":["};
+    if (maximum_commands == 0U || payload.size() < prefix.size() + 2U || payload.rfind(prefix, 0U) != 0U ||
+        payload.back() != '}' || payload.find('\\') != std::string_view::npos) {
+        return error{error_code::invalid_input, "command poll response is invalid"};
+    }
+    std::vector<command> commands;
+    std::size_t cursor = prefix.size();
+    if (payload[cursor] == ']') return commands;
+    while (cursor < payload.size() && payload[cursor] != ']') {
+        if (commands.size() == maximum_commands || payload[cursor] != '{') {
+            return error{error_code::resource_limit, "command poll response exceeds bounds"};
+        }
+        std::size_t depth{};
+        const auto object_begin = cursor;
+        do {
+            if (payload[cursor] == '{') ++depth;
+            else if (payload[cursor] == '}') --depth;
+            ++cursor;
+        } while (cursor < payload.size() && depth != 0U);
+        if (depth != 0U) return error{error_code::invalid_input, "command poll response has unbalanced object"};
+        const auto parsed = parse_command_json(payload.substr(object_begin, cursor - object_begin));
+        if (!succeeded(parsed)) return std::get<error>(parsed);
+        commands.push_back(std::get<command>(parsed));
+        if (payload[cursor] == ',') ++cursor;
+        else if (payload[cursor] != ']') return error{error_code::invalid_input, "command poll response separator is invalid"};
+    }
+    if (cursor + 2U != payload.size() || payload[cursor] != ']' || payload[cursor + 1U] != '}') {
+        return error{error_code::invalid_input, "command poll response trailing data is invalid"};
+    }
+    return commands;
+}
+
 command_gate::command_gate(std::string agent_id, std::string host_id, std::function<std::chrono::sys_seconds()> clock,
                            replay_ledger* durable_ledger)
     : agent_id_{std::move(agent_id)}, host_id_{std::move(host_id)}, clock_{std::move(clock)}, durable_ledger_{durable_ledger} {}

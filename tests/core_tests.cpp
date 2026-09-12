@@ -270,6 +270,8 @@ void test_command_parser_accepts_only_closed_manager_envelopes() {
     const auto parsed = parse_command_json(command_json);
     require(succeeded(parsed), "canonical Manager command must parse");
     require(std::get<command>(parsed).process_target.pid == 42U, "parser must preserve typed PID");
+    const auto poll = parse_command_poll_response("{\"commands\":[" + std::string{command_json} + "]}", 1U);
+    require(succeeded(poll) && std::get<std::vector<command>>(poll).size() == 1U, "bounded command poll must decode canonical commands");
     require(!succeeded(parse_command_json("{\"action\":\"EXECUTE_COMMAND\"}")), "arbitrary execution must never parse");
     require(!succeeded(parse_command_json(std::string{command_json}.replace(0U, 1U, "["))), "non-object command must reject");
 }
