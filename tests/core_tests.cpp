@@ -9,6 +9,7 @@
 #include "panopticon/linux_agent/procfs.hpp"
 #include "panopticon/linux_agent/quarantine.hpp"
 #include "panopticon/linux_agent/retry.hpp"
+#include "panopticon/linux_agent/replay_ledger.hpp"
 #include "panopticon/linux_agent/spool.hpp"
 #include "panopticon/linux_agent/transport.hpp"
 
@@ -96,6 +97,14 @@ void test_retry_backoff_is_bounded() {
     require(retry_delay(policy, 0U) == std::chrono::milliseconds{100}, "initial retry delay must be used");
     require(retry_delay(policy, 3U) == std::chrono::milliseconds{800}, "retry delay must grow exponentially");
     require(retry_delay(policy, 4U) == std::chrono::milliseconds{0}, "retry attempts must be bounded");
+}
+
+void test_replay_ledger_survives_restart() {
+    const auto path = temporary_directory() / "state" / "replay";
+    replay_ledger first{path, 2U}; require(succeeded(first.load()), "new replay ledger should load");
+    require(std::get<bool>(first.mark_if_new("cmd-1")), "first command must be recorded");
+    replay_ledger restarted{path, 2U}; require(succeeded(restarted.load()), "replay ledger should reload");
+    require(!std::get<bool>(restarted.mark_if_new("cmd-1")), "persisted command must be rejected as replay");
 }
 
 void test_security_event_evicts_low_priority_work() {
@@ -244,6 +253,7 @@ int main() {
         test_audit_and_health_are_bounded_and_secret_free();
         test_quarantine_moves_regular_file_and_rejects_symlink();
         test_retry_backoff_is_bounded();
+        test_replay_ledger_survives_restart();
         test_security_event_evicts_low_priority_work();
         test_spool_recovers_and_acknowledges_only_its_entries();
         test_transport_drains_only_acknowledged_spool_entries();

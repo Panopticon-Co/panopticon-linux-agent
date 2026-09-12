@@ -21,6 +21,7 @@ add_library(panopticon-linux-core STATIC
     src/health.cpp
     src/host.cpp
     src/quarantine.cpp
+    src/replay_ledger.cpp
 )
 target_include_directories(panopticon-linux-core PUBLIC include)
 target_compile_features(panopticon-linux-core PUBLIC cxx_std_20)
