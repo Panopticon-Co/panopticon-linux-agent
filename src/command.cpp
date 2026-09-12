@@ -8,8 +8,9 @@
 
 namespace panopticon::linux_agent {
 
-command_gate::command_gate(std::string agent_id, std::string host_id, std::function<std::chrono::sys_seconds()> clock)
-    : agent_id_{std::move(agent_id)}, host_id_{std::move(host_id)}, clock_{std::move(clock)} {}
+command_gate::command_gate(std::string agent_id, std::string host_id, std::function<std::chrono::sys_seconds()> clock,
+                           replay_ledger* durable_ledger)
+    : agent_id_{std::move(agent_id)}, host_id_{std::move(host_id)}, clock_{std::move(clock)}, durable_ledger_{durable_ledger} {}
 
 command_receipt command_gate::validate_and_mark(const command& received) {
     std::lock_guard lock{mutex_};
@@ -20,7 +21,7 @@ command_receipt command_gate::validate_and_mark(const command& received) {
     if (received.expires_at <= clock_()) {
         return {received.command_id, receipt_code::expired, "command has expired"};
     }
-    if (!seen_.insert(received.command_id).second) {
+    if (seen_.contains(received.command_id)) {
         return {received.command_id, receipt_code::replay_detected, "command was already accepted"};
     }
     if (received.action != action_type::kill_process && received.action != action_type::collect_process_info &&
@@ -30,6 +31,12 @@ command_receipt command_gate::validate_and_mark(const command& received) {
     if (received.action == action_type::kill_process && is_protected_process(received.process_target.pid)) {
         return {received.command_id, receipt_code::target_protected, "target is a protected process"};
     }
+    if (durable_ledger_ != nullptr) {
+        const auto recorded = durable_ledger_->mark_if_new(received.command_id);
+        if (!succeeded(recorded)) return {received.command_id, receipt_code::execution_failed, "cannot persist command replay state"};
+        if (!std::get<bool>(recorded)) return {received.command_id, receipt_code::replay_detected, "command was accepted before restart"};
+    }
+    seen_.insert(received.command_id);
     return {received.command_id, receipt_code::succeeded, "command accepted for a closed action handler"};
 }
 

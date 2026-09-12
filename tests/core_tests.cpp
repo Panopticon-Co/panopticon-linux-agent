@@ -244,6 +244,16 @@ void test_command_gate_rejects_expiry_replay_and_pid_one() {
     require(gate.validate_and_mark(protected_target).code == receipt_code::target_protected, "pid one must be protected");
 }
 
+void test_command_gate_uses_durable_replay_ledger() {
+    const auto path = temporary_directory() / "state" / "commands";
+    replay_ledger first_ledger{path, 8U}; require(succeeded(first_ledger.load()), "ledger must load");
+    command_gate first{"agent-1", "host-1", [] { return std::chrono::sys_seconds{std::chrono::seconds{100}}; }, &first_ledger};
+    require(first.validate_and_mark(valid_command()).code == receipt_code::succeeded, "first command must be accepted");
+    replay_ledger restarted_ledger{path, 8U}; require(succeeded(restarted_ledger.load()), "ledger must reload");
+    command_gate restarted{"agent-1", "host-1", [] { return std::chrono::sys_seconds{std::chrono::seconds{100}}; }, &restarted_ledger};
+    require(restarted.validate_and_mark(valid_command()).code == receipt_code::replay_detected, "restart replay must be rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -264,6 +274,7 @@ int main() {
         test_proc_net_udp_and_ipv6_parsers_are_bounded_and_typed();
         test_configuration_rejects_unknown_and_insecure_values();
         test_command_gate_rejects_expiry_replay_and_pid_one();
+        test_command_gate_uses_durable_replay_ledger();
     } catch (const std::exception& error) {
         std::cerr << "test failure: " << error.what() << '\n';
         return 1;

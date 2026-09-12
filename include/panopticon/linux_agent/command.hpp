@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/error.hpp"
 #include "panopticon/linux_agent/identity.hpp"
+#include "panopticon/linux_agent/replay_ledger.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -52,7 +53,8 @@ struct command_receipt {
 
 class command_gate {
 public:
-    command_gate(std::string agent_id, std::string host_id, std::function<std::chrono::sys_seconds()> clock);
+    command_gate(std::string agent_id, std::string host_id, std::function<std::chrono::sys_seconds()> clock,
+                 replay_ledger* durable_ledger = nullptr);
 
     [[nodiscard]] command_receipt validate_and_mark(const command& command);
 
@@ -60,6 +62,7 @@ private:
     std::string agent_id_;
     std::string host_id_;
     std::function<std::chrono::sys_seconds()> clock_;
+    replay_ledger* durable_ledger_;
     std::mutex mutex_;
     std::set<std::string> seen_;
 };
