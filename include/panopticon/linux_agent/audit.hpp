@@ -6,5 +6,6 @@
 namespace panopticon::linux_agent {
 [[nodiscard]] result<bool> append_audit_record(const std::filesystem::path& path, std::string_view action,
                                                 std::string_view correlation_id, std::string_view outcome,
-                                                std::size_t maximum_record_bytes);
+                                                std::size_t maximum_record_bytes,
+                                                std::size_t maximum_file_bytes = 1024U * 1024U);
 }  // namespace panopticon::linux_agent

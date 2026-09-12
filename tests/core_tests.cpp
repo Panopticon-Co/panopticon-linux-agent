@@ -71,6 +71,7 @@ void test_enrolled_identity_is_persisted_atomically() {
 void test_audit_and_health_are_bounded_and_secret_free() {
     const auto audit_path = temporary_directory() / "audit" / "events.ndjson";
     require(succeeded(append_audit_record(audit_path, "command_received", "cmd-1", "accepted", 256U)), "audit should persist");
+    require(!succeeded(append_audit_record(audit_path, "command_received", "cmd-2", "accepted", 256U, 1U)), "audit file quota must be enforced");
     require(!succeeded(append_audit_record(audit_path, "bad space", "cmd-1", "accepted", 256U)), "audit must reject malformed identifiers");
     const auto health = serialize_health_ndjson({true, 42U, 3U, "online", "secret-token"}, 256U);
     require(health.find("secret-token") == std::string::npos, "health output must not disclose errors containing secrets");
