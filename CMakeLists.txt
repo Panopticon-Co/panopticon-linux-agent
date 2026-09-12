@@ -20,6 +20,7 @@ add_library(panopticon-linux-core STATIC
     src/audit.cpp
     src/health.cpp
     src/host.cpp
+    src/quarantine.cpp
 )
 target_include_directories(panopticon-linux-core PUBLIC include)
 target_compile_features(panopticon-linux-core PUBLIC cxx_std_20)
