@@ -39,6 +39,25 @@ size_t capture_bounded_response(char* data, const size_t size, const size_t coun
 }
 #endif
 
+#ifdef PANOPTICON_HAVE_CURL
+namespace {
+std::string without_trailing_slash(std::string url) {
+    while (url.size() > 8U && url.back() == '/') url.pop_back();
+    return url;
+}
+
+std::string json_string_value(const std::string& body, const std::string& key) {
+    const auto needle = "\"" + key + "\":\"";
+    const auto begin = body.find(needle);
+    if (begin == std::string::npos) return {};
+    const auto value_begin = begin + needle.size();
+    const auto end = body.find('"', value_begin);
+    if (end == std::string::npos || body.find('\\', value_begin) < end) return {};
+    return body.substr(value_begin, end - value_begin);
+}
+}
+#endif
+
 transport_outcome curl_https_client::post_ndjson(const std::string& https_url, const enrolled_identity& identity,
                                                   const std::string& payload) {
     if (https_url.rfind("https://", 0U) != 0U || identity.bearer_token.empty() || payload.empty() || timeout_seconds_ <= 0L)
@@ -69,6 +88,46 @@ transport_outcome curl_https_client::post_ndjson(const std::string& https_url, c
         return transport_outcome::acknowledged;
     if (status == 401L || status == 403L) return transport_outcome::authentication_failed;
     return status == 429L || status >= 500L ? transport_outcome::retryable : transport_outcome::rejected;
+#endif
+}
+
+result<enrolled_identity> curl_https_client::enroll(const std::string& manager_url, const std::string& agent_id,
+                                                     const std::string& host_id, const std::string& bootstrap_token) const {
+    if (manager_url.rfind("https://", 0U) != 0U || !is_valid_identifier(agent_id) || !is_valid_identifier(host_id) ||
+        bootstrap_token.empty() || bootstrap_token.size() > 512U || timeout_seconds_ <= 0L) {
+        return error{error_code::invalid_input, "enrollment input is invalid"};
+    }
+#ifndef PANOPTICON_HAVE_CURL
+    return error{error_code::unsupported_action, "HTTPS enrollment requires libcurl"};
+#else
+    if (!initialize_curl()) return error{error_code::io_failure, "cannot initialize HTTPS client"};
+    CURL* handle = curl_easy_init();
+    if (handle == nullptr) return error{error_code::io_failure, "cannot allocate HTTPS client"};
+    response_sink sink{maximum_response_bytes_, {}};
+    const auto body = "{\"agent_id\":\"" + agent_id + "\",\"host_id\":\"" + host_id + "\"}";
+    const auto endpoint = without_trailing_slash(manager_url) + "/api/v1/agents/enroll";
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    const auto enrollment_header = "X-Panopticon-Enrollment-Token: " + bootstrap_token;
+    headers = curl_slist_append(headers, enrollment_header.c_str());
+    curl_easy_setopt(handle, CURLOPT_URL, endpoint.c_str());
+    curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, body.data());
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.size()));
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L); curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, timeout_seconds_); curl_easy_setopt(handle, CURLOPT_TIMEOUT, timeout_seconds_);
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, capture_bounded_response); curl_easy_setopt(handle, CURLOPT_WRITEDATA, &sink);
+    const auto code = curl_easy_perform(handle); long status{}; curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers); curl_easy_cleanup(handle);
+    if (code != CURLE_OK) return error{error_code::io_failure, "enrollment transport failure"};
+    if (status == 401L || status == 403L) return error{error_code::target_mismatch, "enrollment credential rejected"};
+    if (status != 200L) return error{error_code::io_failure, "enrollment service rejected request"};
+    const auto returned_agent = json_string_value(sink.contents, "agent_id");
+    const auto access_token = json_string_value(sink.contents, "access_token");
+    if (returned_agent != agent_id || access_token.empty() || access_token.size() > 512U) {
+        return error{error_code::corrupt_data, "enrollment response is malformed"};
+    }
+    return enrolled_identity{agent_id, host_id, access_token};
 #endif
 }
 

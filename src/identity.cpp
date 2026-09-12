@@ -26,6 +26,12 @@ bool is_valid_identifier(const std::string_view value) noexcept {
 }
 
 result<enrolled_identity> load_enrolled_identity(const std::filesystem::path& path) {
+#ifdef __linux__
+    struct stat details {};
+    if (stat(path.c_str(), &details) != 0 || !S_ISREG(details.st_mode) || (details.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
+        return error{error_code::invalid_input, "enrolled identity must be a private regular file"};
+    }
+#endif
     std::ifstream input{path};
     std::string agent_id, host_id, token;
     if (!input || !std::getline(input, agent_id) || !std::getline(input, host_id) || !std::getline(input, token) ||

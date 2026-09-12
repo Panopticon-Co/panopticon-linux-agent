@@ -23,6 +23,11 @@ public:
     explicit curl_https_client(long timeout_seconds = 15L, std::size_t maximum_response_bytes = 65536U);
     transport_outcome post_ndjson(const std::string& https_url, const enrolled_identity& identity,
                                   const std::string& payload) override;
+    // Bootstrap is deliberately a separate operation: the bootstrap secret is
+    // never persisted as an enrolled credential and is sent only over verified TLS.
+    [[nodiscard]] result<enrolled_identity> enroll(const std::string& manager_url, const std::string& agent_id,
+                                                    const std::string& host_id,
+                                                    const std::string& bootstrap_token) const;
 private:
     long timeout_seconds_;
     std::size_t maximum_response_bytes_;
