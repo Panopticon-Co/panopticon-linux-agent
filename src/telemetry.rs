@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-/// Minimal, schema-0.3-compatible process event shape. The canonical JSON schema remains
-/// owned by panopticon-agent/schema/event.schema.json; contract CI validates this output.
+/// Internal normalized telemetry draft.
+///
+/// This is deliberately not advertised as schema-0.3-compatible. The current canonical
+/// schema is owned by the Windows Officer and permits only Windows source kinds. The Linux
+/// extension must be approved and added to the shared contract before this type is serialized
+/// onto the Manager ingest path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct PanopticonEvent {
+pub struct LinuxTelemetryEvent {
     pub schema_version: String,
     pub event: EventMeta,
     pub source: Source,
@@ -53,11 +57,11 @@ pub struct Process {
 }
 
 pub trait ProcessCollector: Send {
-    fn poll(&mut self) -> Result<Vec<PanopticonEvent>, String>;
+    fn poll(&mut self) -> Result<Vec<LinuxTelemetryEvent>, String>;
 }
 pub trait NetworkCollector: Send {
-    fn poll(&mut self) -> Result<Vec<PanopticonEvent>, String>;
+    fn poll(&mut self) -> Result<Vec<LinuxTelemetryEvent>, String>;
 }
 pub trait FileCollector: Send {
-    fn poll(&mut self) -> Result<Vec<PanopticonEvent>, String>;
+    fn poll(&mut self) -> Result<Vec<LinuxTelemetryEvent>, String>;
 }
