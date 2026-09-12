@@ -1,0 +1,6 @@
+/target/
+*.log
+*.db
+*.sqlite
+*.ndjson
+credentials/
