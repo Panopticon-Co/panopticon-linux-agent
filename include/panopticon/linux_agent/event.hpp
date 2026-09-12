@@ -15,6 +15,7 @@ struct agent_context {
     std::string hostname;
     std::string os_name;
     std::string kernel_release;
+    std::string agent_version{"0.1.0"};
 };
 
 struct internal_process_event {
@@ -28,5 +29,9 @@ struct internal_process_event {
 [[nodiscard]] result<internal_process_event> normalize_process(
     process_observation observation, agent_context context, std::chrono::sys_seconds observed_at);
 [[nodiscard]] result<std::string> serialize_ndjson(const internal_process_event& event, std::size_t maximum_bytes);
+// Converts an internal process snapshot to the shared schema 0.4 contract.
+// The caller remains responsible for transport; this adapter has no Manager dependency.
+[[nodiscard]] result<std::string> serialize_canonical_process_ndjson(
+    const internal_process_event& event, std::size_t maximum_bytes);
 
 }  // namespace panopticon::linux_agent
