@@ -3,11 +3,84 @@
 
 #include <utility>
 #include <sstream>
+#include <charconv>
+#include <chrono>
+#include <limits>
+#include <optional>
 #ifdef __linux__
 #include <signal.h>
 #endif
 
 namespace panopticon::linux_agent {
+namespace {
+std::string string_field(const std::string_view payload, const std::string_view key) {
+    const auto marker = "\"" + std::string{key} + "\":\"";
+    const auto begin = payload.find(marker);
+    if (begin == std::string_view::npos) return {};
+    const auto value_begin = begin + marker.size();
+    const auto end = payload.find('"', value_begin);
+    if (end == std::string_view::npos || payload.find('\\', value_begin) < end) return {};
+    return std::string{payload.substr(value_begin, end - value_begin)};
+}
+
+std::optional<std::uint64_t> unsigned_field(const std::string_view payload, const std::string_view key) {
+    const auto marker = "\"" + std::string{key} + "\":";
+    const auto begin = payload.find(marker);
+    if (begin == std::string_view::npos) return std::nullopt;
+    std::uint64_t value{};
+    const auto start = payload.data() + begin + marker.size();
+    const auto end = payload.data() + payload.size();
+    const auto [parsed, issue] = std::from_chars(start, end, value);
+    if (issue != std::errc{} || parsed == start || value == 0U) return std::nullopt;
+    return value;
+}
+
+std::optional<std::chrono::sys_seconds> utc_timestamp(const std::string_view value) {
+    if (value.size() < 20U || (value.back() != 'Z' && value.substr(value.size() - 6U) != "+00:00")) return std::nullopt;
+    const auto digits = [&](const std::size_t offset, const std::size_t count) -> std::optional<int> {
+        int number{};
+        for (std::size_t index{}; index < count; ++index) {
+            const auto character = value[offset + index];
+            if (character < '0' || character > '9') return std::nullopt;
+            number = number * 10 + (character - '0');
+        }
+        return number;
+    };
+    if (value[4] != '-' || value[7] != '-' || value[10] != 'T' || value[13] != ':') return std::nullopt;
+    const auto year = digits(0U, 4U); const auto month = digits(5U, 2U); const auto day = digits(8U, 2U);
+    const auto hour = digits(11U, 2U); const auto minute = digits(14U, 2U); const auto second = digits(17U, 2U);
+    if (!year || !month || !day || !hour || !minute || !second || *month < 1 || *month > 12 || *day < 1 || *day > 31 || *hour > 23 || *minute > 59 || *second > 59) return std::nullopt;
+    const std::chrono::year_month_day date{std::chrono::year{*year}, std::chrono::month{static_cast<unsigned>(*month)}, std::chrono::day{static_cast<unsigned>(*day)}};
+    if (!date.ok()) return std::nullopt;
+    return std::chrono::sys_days{date} + std::chrono::hours{*hour} + std::chrono::minutes{*minute} + std::chrono::seconds{*second};
+}
+}
+
+result<command> parse_command_json(const std::string_view payload) {
+    if (payload.size() < 2U || payload.size() > 8192U || payload.front() != '{' || payload.back() != '}' ||
+        payload.find('\\') != std::string_view::npos) return error{error_code::invalid_input, "command JSON is invalid"};
+    const auto command_id = string_field(payload, "command_id");
+    const auto agent_id = string_field(payload, "agent_id");
+    const auto host_id = string_field(payload, "host_id");
+    const auto schema_version = string_field(payload, "schema_version");
+    const auto action = string_field(payload, "action");
+    const auto expiry = utc_timestamp(string_field(payload, "expires_at"));
+    if (!is_valid_identifier(command_id) || !is_valid_identifier(agent_id) || !is_valid_identifier(host_id) || schema_version != "1" || !expiry) {
+        return error{error_code::invalid_input, "command envelope is invalid"};
+    }
+    action_type action_type_value{};
+    if (action == "KILL_PROCESS") action_type_value = action_type::kill_process;
+    else if (action == "COLLECT_PROCESS_INFO") action_type_value = action_type::collect_process_info;
+    else if (action == "COLLECT_NETWORK_CONNECTIONS") action_type_value = action_type::collect_network_connections;
+    else return error{error_code::unsupported_action, "command action is not supported by this agent build"};
+    process_identity target{host_id, 0U, 0U};
+    if (action_type_value != action_type::collect_network_connections) {
+        const auto pid = unsigned_field(payload, "pid"); const auto start = unsigned_field(payload, "start_time_ticks");
+        if (!pid || !start || *pid > std::numeric_limits<std::uint32_t>::max()) return error{error_code::invalid_input, "process command target is invalid"};
+        target.pid = static_cast<std::uint32_t>(*pid); target.start_time_ticks = *start;
+    }
+    return command{command_id, agent_id, host_id, schema_version, action_type_value, *expiry, target};
+}
 
 command_gate::command_gate(std::string agent_id, std::string host_id, std::function<std::chrono::sys_seconds()> clock,
                            replay_ledger* durable_ledger)

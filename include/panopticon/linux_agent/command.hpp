@@ -11,6 +11,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 
 namespace panopticon::linux_agent {
 
@@ -51,6 +52,9 @@ struct command_receipt {
     std::string summary;
 };
 
+// Decodes only the Manager's schema-1 closed command envelope. It intentionally
+// rejects escapes, unknown action names, local times, and unconstrained targets.
+[[nodiscard]] result<command> parse_command_json(std::string_view payload);
 [[nodiscard]] result<std::string> serialize_command_result(const command_receipt& receipt, std::size_t maximum_bytes);
 
 class command_gate {

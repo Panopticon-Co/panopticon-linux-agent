@@ -261,6 +261,18 @@ void test_command_gate_rejects_expiry_replay_and_pid_one() {
     require(gate.validate_and_mark(protected_target).code == receipt_code::target_protected, "pid one must be protected");
 }
 
+void test_command_parser_accepts_only_closed_manager_envelopes() {
+    constexpr std::string_view command_json{
+        "{\"command_id\":\"cmd-1\",\"agent_id\":\"agent-1\",\"action\":\"KILL_PROCESS\","
+        "\"expires_at\":\"2030-01-02T03:04:05+00:00\",\"target\":{\"pid\":42,\"start_time_ticks\":99},"
+        "\"correlation_id\":\"correlation-1\",\"schema_version\":\"1\",\"host_id\":\"host-1\"}"};
+    const auto parsed = parse_command_json(command_json);
+    require(succeeded(parsed), "canonical Manager command must parse");
+    require(std::get<command>(parsed).process_target.pid == 42U, "parser must preserve typed PID");
+    require(!succeeded(parse_command_json("{\"action\":\"EXECUTE_COMMAND\"}")), "arbitrary execution must never parse");
+    require(!succeeded(parse_command_json(std::string{command_json}.replace(0U, 1U, "["))), "non-object command must reject");
+}
+
 void test_command_gate_uses_durable_replay_ledger() {
     const auto path = temporary_directory() / "state" / "commands";
     replay_ledger first_ledger{path, 8U}; require(succeeded(first_ledger.load()), "ledger must load");
@@ -298,6 +310,7 @@ int main() {
         test_proc_net_udp_and_ipv6_parsers_are_bounded_and_typed();
         test_configuration_rejects_unknown_and_insecure_values();
         test_command_gate_rejects_expiry_replay_and_pid_one();
+        test_command_parser_accepts_only_closed_manager_envelopes();
         test_command_gate_uses_durable_replay_ledger();
         test_command_result_is_typed_and_bounded();
     } catch (const std::exception& error) {
