@@ -1,8 +1,11 @@
 #pragma once
 
 #include "panopticon/linux_agent/error.hpp"
+#include "panopticon/linux_agent/file_collection.hpp"
 #include "panopticon/linux_agent/identity.hpp"
+#include "panopticon/linux_agent/network.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
+#include "panopticon/linux_agent/quarantine.hpp"
 #include "panopticon/linux_agent/replay_ledger.hpp"
 
 #include <chrono>
@@ -36,6 +39,8 @@ struct command {
     action_type action;
     std::chrono::sys_seconds expires_at;
     process_identity process_target;
+    // Populated only for collect_file / quarantine_file; empty otherwise.
+    std::string file_target_path;
 };
 
 enum class receipt_code : std::uint8_t {
@@ -86,5 +91,23 @@ private:
 // from turning a collection command into collection of a different process.
 [[nodiscard]] result<process_observation> collect_process_info(const std::filesystem::path& proc_root,
                                                                 const process_identity& target);
+// Collects bounded TCP/UDP (v4 and v6) connection tables and serializes them
+// as a single bounded JSON line. Socket-to-PID attribution is never fabricated
+// (see network.hpp); owner_pid is omitted when the kernel doesn't supply it.
+[[nodiscard]] result<std::string> collect_network_evidence(const std::filesystem::path& proc_root,
+                                                            std::size_t maximum_connections_per_table,
+                                                            std::size_t maximum_bytes);
+// Reads a bounded regular file under allowed_root and serializes its path,
+// size, and SHA-256 as evidence -- never the raw content, which stays
+// entirely local to this call and is discarded once hashed.
+[[nodiscard]] result<std::string> collect_file_evidence(const std::filesystem::path& allowed_root,
+                                                         const std::filesystem::path& requested_path,
+                                                         std::size_t maximum_bytes);
+// Atomically moves a regular file under allowed_root into quarantine_root and
+// serializes the resulting stored/metadata paths as a bounded JSON line.
+[[nodiscard]] result<std::string> quarantine_file_and_serialize(const std::filesystem::path& allowed_root,
+                                                                 const std::filesystem::path& requested_path,
+                                                                 const std::filesystem::path& quarantine_root,
+                                                                 std::size_t maximum_bytes);
 
 }  // namespace panopticon::linux_agent

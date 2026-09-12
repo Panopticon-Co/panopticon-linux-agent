@@ -6,8 +6,13 @@
 #include <chrono>
 #include <cstddef>
 #include <string>
+#include <string_view>
 
 namespace panopticon::linux_agent {
+
+// General-purpose SHA-256, exposed so other bounded-evidence producers
+// (e.g. COLLECT_FILE's file hash) do not need a second implementation.
+[[nodiscard]] std::string sha256_hex(std::string_view input);
 
 struct agent_context {
     std::string agent_id;

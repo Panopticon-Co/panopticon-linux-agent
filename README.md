@@ -19,8 +19,11 @@ result APIs. The agent provides a libcurl HTTPS client when libcurl is available
 and hostname verification, bearer authentication, timeouts, bounded responses, and spool ACK
 semantics. A strict-configured executable can emit bounded canonical procfs snapshots.
 
-There is no eBPF adapter, file watcher, host-isolation implementation, privileged helper, or
-fully wired enrollment/transport/command runtime loop yet. These are not claimed as complete.
+Enrollment, transport, and the command poll/dispatch/result runtime loop are fully wired. Of
+the closed 7-action response set, 5 are dispatched to a real bounded implementation
+(`KILL_PROCESS`, `COLLECT_PROCESS_INFO`, `COLLECT_NETWORK_CONNECTIONS`, `COLLECT_FILE`,
+`QUARANTINE_FILE` -- see [RESPONSE.md](RESPONSE.md)). There is no eBPF adapter, file watcher,
+host-isolation implementation, or privileged helper yet. These are not claimed as complete.
 
 ## Development
 

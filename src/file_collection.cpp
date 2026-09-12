@@ -10,10 +10,16 @@ namespace panopticon::linux_agent {
 result<collected_file> collect_regular_file(const std::filesystem::path& allowed_root, const std::filesystem::path& requested_path,
                                             const std::size_t maximum_bytes) {
     if (maximum_bytes == 0U || requested_path.empty()) return error{error_code::invalid_input, "file request is invalid"};
+    // absolute()+lexically_normal() (not weakly_canonical) deliberately never
+    // resolves symlinks: a symlink whose target happens to sit inside
+    // allowed_root must still be rejected by the symlink_status() check below,
+    // not silently followed into a different identity than the requested name.
     std::error_code ec; const auto root = std::filesystem::weakly_canonical(allowed_root, ec);
-    const auto path = std::filesystem::weakly_canonical(requested_path, ec);
+    const auto path = std::filesystem::absolute(requested_path, ec).lexically_normal();
     const auto mismatch = std::mismatch(root.begin(), root.end(), path.begin(), path.end());
     if (ec || root.empty() || path.empty() || mismatch.first != root.end()) return error{error_code::invalid_input, "file is outside allowed root"};
+    const auto link_status = std::filesystem::symlink_status(path, ec);
+    if (ec || std::filesystem::is_symlink(link_status)) return error{error_code::invalid_input, "symlinks are not permitted collection targets"};
 #ifndef __linux__
     return error{error_code::unsupported_action, "safe file collection is available only on Linux"};
 #else

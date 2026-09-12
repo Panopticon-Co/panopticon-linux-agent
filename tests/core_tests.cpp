@@ -94,6 +94,72 @@ void test_quarantine_moves_regular_file_and_rejects_symlink() {
     if (!error) require(!succeeded(quarantine_regular_file(directory / "allowed", link, directory / "quarantine")), "symlink must be rejected");
 }
 
+void test_collect_regular_file_enforces_bounds_and_root_jail() {
+    const auto directory = temporary_directory();
+    const auto allowed = directory / "allowed";
+    std::filesystem::create_directories(allowed);
+    const auto file = allowed / "evidence.txt";
+    { std::ofstream output{file}; output << "abc"; }
+#ifdef __linux__
+    const auto collected = collect_regular_file(allowed, file, 4096U);
+    require(succeeded(collected), "regular file within bounds and root should collect");
+    require(std::get<collected_file>(collected).contents == "abc", "collected content must be exact");
+    require(!succeeded(collect_regular_file(allowed, file, 2U)), "oversized file must be rejected, never truncated");
+    const auto outside = directory / "outside.txt";
+    { std::ofstream output{outside}; output << "abc"; }
+    require(!succeeded(collect_regular_file(allowed, outside, 4096U)), "path outside the allowed root must be rejected");
+    const auto link = allowed / "link.txt";
+    std::error_code error;
+    std::filesystem::create_symlink(file, link, error);
+    if (!error) require(!succeeded(collect_regular_file(allowed, link, 4096U)), "symlink must be rejected");
+    require(!succeeded(collect_regular_file(allowed, allowed, 4096U)), "a directory must be rejected");
+#else
+    require(!succeeded(collect_regular_file(allowed, file, 4096U)), "file collection is unsupported off Linux");
+#endif
+}
+
+void test_collect_file_evidence_hashes_without_leaking_content() {
+    const auto directory = temporary_directory();
+    const auto allowed = directory / "allowed";
+    std::filesystem::create_directories(allowed);
+    const auto file = allowed / "sample.txt";
+    { std::ofstream output{file}; output << "abc"; }
+#ifdef __linux__
+    const auto evidence = collect_file_evidence(allowed, file, 4096U);
+    require(succeeded(evidence), "bounded evidence collection should succeed");
+    const auto& serialized = std::get<std::string>(evidence);
+    require(serialized.find("\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"") != std::string::npos,
+            "evidence must carry the correct content hash");
+    require(serialized.find("\"size\":3") != std::string::npos, "evidence must carry the exact size");
+    require(serialized.find("abc") == std::string::npos, "raw file content must never appear in evidence");
+#endif
+    require(!succeeded(collect_file_evidence({}, file, 4096U)), "an unconfigured collection root must fail closed");
+}
+
+void test_quarantine_file_and_serialize_moves_file() {
+    const auto directory = temporary_directory();
+    const auto allowed = directory / "allowed";
+    std::filesystem::create_directories(allowed);
+    const auto file = allowed / "sample.txt";
+    { std::ofstream output{file}; output << "evidence"; }
+    require(!succeeded(quarantine_file_and_serialize({}, file, directory / "quarantine", 4096U)), "unconfigured roots must fail closed");
+#ifdef __linux__
+    const auto result = quarantine_file_and_serialize(allowed, file, directory / "quarantine", 4096U);
+    require(succeeded(result), "quarantine should succeed for an allowed regular file");
+    require(!std::filesystem::exists(file), "source file must be moved");
+    require(std::get<std::string>(result).find("\"stored_path\":\"") != std::string::npos, "result must report stored path");
+    require(std::get<std::string>(result).find("\"metadata_path\":\"") != std::string::npos, "result must report metadata path");
+#endif
+}
+
+void test_collect_network_evidence_is_bounded() {
+    require(!succeeded(collect_network_evidence("/proc", 0U, 4096U)), "zero connection limit must be rejected");
+    require(!succeeded(collect_network_evidence("/proc", 16U, 0U)), "zero byte limit must be rejected");
+#ifndef __linux__
+    require(!succeeded(collect_network_evidence("/proc", 16U, 4096U)), "network collection is unsupported off Linux");
+#endif
+}
+
 void test_retry_backoff_is_bounded() {
     const retry_policy policy{std::chrono::milliseconds{100}, std::chrono::milliseconds{1000}, 4U};
     require(retry_delay(policy, 0U) == std::chrono::milliseconds{100}, "initial retry delay must be used");
@@ -282,6 +348,43 @@ void test_command_parser_accepts_only_closed_manager_envelopes() {
     require(!succeeded(parse_command_json(std::string{command_json}.replace(0U, 1U, "["))), "non-object command must reject");
 }
 
+void test_command_parser_accepts_file_actions_and_rejects_isolation() {
+    constexpr std::string_view collect_file_json{
+        "{\"command_id\":\"cmd-2\",\"agent_id\":\"agent-1\",\"action\":\"COLLECT_FILE\","
+        "\"expires_at\":\"2030-01-02T03:04:05+00:00\",\"target\":{\"path\":\"/tmp/evidence.txt\"},"
+        "\"correlation_id\":\"correlation-2\",\"created_at\":\"2030-01-01T03:04:05+00:00\","
+        "\"schema_version\":\"1\",\"host_id\":\"host-1\"}"};
+    const auto parsed_collect = parse_command_json(collect_file_json);
+    require(succeeded(parsed_collect), "COLLECT_FILE must parse under the closed action set");
+    require(std::get<command>(parsed_collect).file_target_path == "/tmp/evidence.txt", "parser must preserve the requested path");
+    require(std::get<command>(parsed_collect).action == action_type::collect_file, "parser must classify the action correctly");
+
+    constexpr std::string_view quarantine_json{
+        "{\"command_id\":\"cmd-3\",\"agent_id\":\"agent-1\",\"action\":\"QUARANTINE_FILE\","
+        "\"expires_at\":\"2030-01-02T03:04:05+00:00\",\"target\":{\"path\":\"/tmp/evidence.txt\"},"
+        "\"correlation_id\":\"correlation-3\",\"created_at\":\"2030-01-01T03:04:05+00:00\","
+        "\"schema_version\":\"1\",\"host_id\":\"host-1\"}"};
+    require(succeeded(parse_command_json(quarantine_json)), "QUARANTINE_FILE must parse under the closed action set");
+
+    constexpr std::string_view empty_path_json{
+        "{\"command_id\":\"cmd-4\",\"agent_id\":\"agent-1\",\"action\":\"COLLECT_FILE\","
+        "\"expires_at\":\"2030-01-02T03:04:05+00:00\",\"target\":{\"path\":\"\"},"
+        "\"correlation_id\":\"correlation-4\",\"created_at\":\"2030-01-01T03:04:05+00:00\","
+        "\"schema_version\":\"1\",\"host_id\":\"host-1\"}"};
+    require(!succeeded(parse_command_json(empty_path_json)), "an empty file target path must be rejected");
+
+    constexpr std::string_view isolate_json{
+        "{\"command_id\":\"cmd-5\",\"agent_id\":\"agent-1\",\"action\":\"ISOLATE_HOST\","
+        "\"expires_at\":\"2030-01-02T03:04:05+00:00\",\"target\":{},"
+        "\"correlation_id\":\"correlation-5\",\"created_at\":\"2030-01-01T03:04:05+00:00\","
+        "\"schema_version\":\"1\",\"host_id\":\"host-1\"}"};
+    require(!succeeded(parse_command_json(isolate_json)), "ISOLATE_HOST is not yet implemented and must not parse");
+
+    command_gate gate{"agent-1", "host-1", [] { return std::chrono::sys_seconds{std::chrono::seconds{100}}; }};
+    auto collect_command = std::get<command>(parsed_collect);
+    require(gate.validate_and_mark(collect_command).code == receipt_code::succeeded, "the gate must accept COLLECT_FILE");
+}
+
 void test_command_gate_uses_durable_replay_ledger() {
     const auto path = temporary_directory() / "state" / "commands";
     replay_ledger first_ledger{path, 8U}; require(succeeded(first_ledger.load()), "ledger must load");
@@ -327,6 +430,10 @@ int main() {
         test_enrolled_identity_is_persisted_atomically();
         test_audit_and_health_are_bounded_and_secret_free();
         test_quarantine_moves_regular_file_and_rejects_symlink();
+        test_collect_regular_file_enforces_bounds_and_root_jail();
+        test_collect_file_evidence_hashes_without_leaking_content();
+        test_quarantine_file_and_serialize_moves_file();
+        test_collect_network_evidence_is_bounded();
         test_retry_backoff_is_bounded();
         test_replay_ledger_survives_restart();
         test_security_event_evicts_low_priority_work();
@@ -340,6 +447,7 @@ int main() {
         test_configuration_rejects_unknown_and_insecure_values();
         test_command_gate_rejects_expiry_replay_and_pid_one();
         test_command_parser_accepts_only_closed_manager_envelopes();
+        test_command_parser_accepts_file_actions_and_rejects_isolation();
         test_command_gate_uses_durable_replay_ledger();
         test_command_result_is_typed_and_bounded();
         test_collect_process_info_rejects_pid_reuse();
