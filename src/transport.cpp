@@ -1,10 +1,21 @@
 #include "panopticon/linux_agent/transport.hpp"
+#include <random>
+#include <iomanip>
+#include <sstream>
 
 #ifdef PANOPTICON_HAVE_CURL
 #include <curl/curl.h>
 #endif
 
 namespace panopticon::linux_agent {
+namespace {
+std::string batch_id() {
+    std::random_device source; std::mt19937_64 generator{source()};
+    std::ostringstream output; output << std::hex << std::setfill('0');
+    for (int index = 0; index < 2; ++index) output << std::setw(16) << generator();
+    return output.str();
+}
+}
 curl_https_client::curl_https_client(const long timeout_seconds, const std::size_t maximum_response_bytes)
     : timeout_seconds_{timeout_seconds}, maximum_response_bytes_{maximum_response_bytes} {}
 
@@ -32,8 +43,9 @@ transport_outcome curl_https_client::post_ndjson(const std::string& https_url, c
     headers = curl_slist_append(headers, "Content-Type: application/x-ndjson");
     headers = curl_slist_append(headers, "X-Panopticon-Protocol: 1");
     const auto agent_header = "X-Panopticon-Agent-Id: " + identity.agent_id;
+    const auto batch_header = "X-Panopticon-Batch-Id: " + batch_id();
     const auto auth_header = "Authorization: Bearer " + identity.bearer_token;
-    headers = curl_slist_append(headers, agent_header.c_str()); headers = curl_slist_append(headers, auth_header.c_str());
+    headers = curl_slist_append(headers, agent_header.c_str()); headers = curl_slist_append(headers, batch_header.c_str()); headers = curl_slist_append(headers, auth_header.c_str());
     curl_easy_setopt(handle, CURLOPT_URL, https_url.c_str()); curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(handle, CURLOPT_POSTFIELDS, payload.data()); curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(payload.size()));
     curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L); curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
