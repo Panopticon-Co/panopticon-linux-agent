@@ -2,6 +2,7 @@
 #include "panopticon/linux_agent/procfs.hpp"
 
 #include <utility>
+#include <sstream>
 #ifdef __linux__
 #include <signal.h>
 #endif
@@ -42,6 +43,18 @@ command_receipt command_gate::validate_and_mark(const command& received) {
 
 bool is_protected_process(const std::uint32_t pid) noexcept {
     return pid <= 1U;
+}
+
+result<std::string> serialize_command_result(const command_receipt& receipt, const std::size_t maximum_bytes) {
+    if (!is_valid_identifier(receipt.command_id) || maximum_bytes == 0U) return error{error_code::invalid_input, "receipt is invalid"};
+    const auto outcome = receipt.code == receipt_code::succeeded ? "succeeded" :
+                         receipt.code == receipt_code::execution_failed ? "failed" : "rejected";
+    std::ostringstream output;
+    output << "{\"result_id\":\"result-" << receipt.command_id << "\",\"command_id\":\"" << receipt.command_id
+           << "\",\"outcome\":\"" << outcome << "\",\"detail\":\"" << static_cast<unsigned int>(receipt.code) << "\"}";
+    auto serialized = output.str();
+    if (serialized.size() > maximum_bytes) return error{error_code::resource_limit, "command result exceeds limit"};
+    return serialized;
 }
 
 result<bool> terminate_process(const std::filesystem::path& proc_root, const process_identity& target) {

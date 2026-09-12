@@ -254,6 +254,13 @@ void test_command_gate_uses_durable_replay_ledger() {
     require(restarted.validate_and_mark(valid_command()).code == receipt_code::replay_detected, "restart replay must be rejected");
 }
 
+void test_command_result_is_typed_and_bounded() {
+    const auto result = serialize_command_result({"cmd-1", receipt_code::expired, "ignored"}, 256U);
+    require(succeeded(result), "receipt should serialize");
+    require(std::get<std::string>(result).find("\"outcome\":\"rejected\"") != std::string::npos, "expired command must be rejected");
+    require(!succeeded(serialize_command_result({"cmd-1", receipt_code::succeeded, ""}, 4U)), "receipt must be bounded");
+}
+
 }  // namespace
 
 int main() {
@@ -275,6 +282,7 @@ int main() {
         test_configuration_rejects_unknown_and_insecure_values();
         test_command_gate_rejects_expiry_replay_and_pid_one();
         test_command_gate_uses_durable_replay_ledger();
+        test_command_result_is_typed_and_bounded();
     } catch (const std::exception& error) {
         std::cerr << "test failure: " << error.what() << '\n';
         return 1;

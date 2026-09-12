@@ -51,6 +51,8 @@ struct command_receipt {
     std::string summary;
 };
 
+[[nodiscard]] result<std::string> serialize_command_result(const command_receipt& receipt, std::size_t maximum_bytes);
+
 class command_gate {
 public:
     command_gate(std::string agent_id, std::string host_id, std::function<std::chrono::sys_seconds()> clock,
