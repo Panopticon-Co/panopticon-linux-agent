@@ -4,14 +4,12 @@
 #include "panopticon/linux_agent/procfs.hpp"
 
 #include <chrono>
-#include <fstream>
 #include <iostream>
 #include <sstream>
 
 int main(int argc, char** argv) {
     if (argc != 2) { std::cerr << "usage: panopticon-linux-agent <strict-config-path>\n"; return 2; }
-    std::ifstream input{argv[1]}; std::ostringstream contents; contents << input.rdbuf();
-    const auto config = panopticon::linux_agent::parse_config(contents.str());
+    const auto config = panopticon::linux_agent::load_config_file(argv[1]);
     if (!panopticon::linux_agent::succeeded(config)) { std::cerr << "invalid agent configuration\n"; return 2; }
     const auto host = panopticon::linux_agent::collect_host_observation();
     if (!panopticon::linux_agent::succeeded(host)) { std::cerr << "host collection unavailable\n"; return 1; }

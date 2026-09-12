@@ -225,6 +225,9 @@ void test_configuration_rejects_unknown_and_insecure_values() {
     require(!succeeded(parse_config("manager_url=http://bad\n")), "incomplete insecure configuration must fail");
     const std::string unknown_key = std::string{valid} + "unknown=true\n";
     require(!succeeded(parse_config(unknown_key)), "unknown key must fail");
+    const auto path = temporary_directory() / "agent.conf";
+    { std::ofstream output{path}; output << valid; }
+    require(succeeded(load_config_file(path)), "regular configuration file must load");
 }
 
 void test_command_gate_rejects_expiry_replay_and_pid_one() {

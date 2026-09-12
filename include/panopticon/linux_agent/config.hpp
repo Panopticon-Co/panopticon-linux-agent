@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -21,5 +22,6 @@ struct agent_config {
 };
 
 [[nodiscard]] result<agent_config> parse_config(std::string_view contents);
+[[nodiscard]] result<agent_config> load_config_file(const std::filesystem::path& path);
 
 }  // namespace panopticon::linux_agent

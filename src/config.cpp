@@ -6,6 +6,7 @@
 #include <array>
 #include <charconv>
 #include <map>
+#include <fstream>
 #include <optional>
 #include <sstream>
 
@@ -67,6 +68,20 @@ result<agent_config> parse_config(const std::string_view contents) {
     if (!queue_value || !spool_value || !event_value || !batch_value || *queue_value == 0U || *spool_value == 0U || *event_value == 0U ||
         *batch_value < *event_value || (*response != "true" && *response != "false")) return error{error_code::invalid_input, "configuration resource limit is invalid"};
     return agent_config{*url, *agent, *host, *queue_value, *spool_value, *event_value, *batch_value, *response == "true"};
+}
+
+result<agent_config> load_config_file(const std::filesystem::path& path) {
+    std::error_code filesystem_error;
+    const auto status = std::filesystem::status(path, filesystem_error);
+    if (filesystem_error || !std::filesystem::is_regular_file(status)) return error{error_code::io_failure, "configuration path is not a regular file"};
+#ifdef __linux__
+    const auto unsafe = std::filesystem::perms::group_write | std::filesystem::perms::others_write;
+    if ((status.permissions() & unsafe) != std::filesystem::perms::none) return error{error_code::invalid_input, "configuration must not be group or world writable"};
+#endif
+    std::ifstream input{path, std::ios::binary};
+    std::ostringstream contents; contents << input.rdbuf();
+    if (!input.good() && !input.eof()) return error{error_code::io_failure, "cannot read configuration"};
+    return parse_config(contents.str());
 }
 
 }  // namespace panopticon::linux_agent
