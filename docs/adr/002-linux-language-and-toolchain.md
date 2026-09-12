@@ -1,6 +1,6 @@
 # ADR 002: Use Rust for the Linux agent
 
-**Status:** Accepted
+**Status:** Superseded by ADR 003
 **Date:** 2026-09-12
 
 ## Context
@@ -73,7 +73,6 @@ the Windows Officer nor changes the Manager's wire contracts.
 
 ## Revisit triggers
 
-Revisit this decision if a required eBPF feature cannot be supported through a
-maintainable Rust adapter, if measured collector overhead misses an agreed
-budget, or if Panopticon establishes a supported cross-platform native endpoint
-SDK that materially changes the source-sharing case.
+This ADR was superseded after the team clarified that it has strong C/C++
+experience and essentially no Rust experience. See ADR 003 for the current
+decision and its required C++ security controls.
