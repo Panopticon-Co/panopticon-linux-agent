@@ -2,7 +2,7 @@
 
 | Repository | Required change | Status |
 | --- | --- | --- |
-| panopticon-agent | Add an additive Linux source-kind and fixture extension before Linux records are accepted | Required before live Linux ingest |
+| panopticon-agent | Schema 0.4 adds the additive `linux_procfs` source kind while preserving Windows kinds | Implemented; Linux agent canonical serialization still required |
 | panopticon-manager | Enrollment, authenticated Linux identity, durable retry semantics, and typed command/result endpoints | Dependency; not invented here |
 | panopticon-detection-engine | Consume existing event contract | No change |
 | panopticon-diagrams | Add Linux diagrams only as implementations land | Pending |
