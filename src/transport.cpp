@@ -48,7 +48,7 @@ transport_outcome curl_https_client::post_ndjson(const std::string& https_url, c
 #else
     if (!initialize_curl()) return transport_outcome::retryable;
     CURL* handle = curl_easy_init(); if (handle == nullptr) return transport_outcome::retryable;
-    response_sink sink{maximum_response_bytes_};
+    response_sink sink{maximum_response_bytes_, {}};
     curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/x-ndjson");
     headers = curl_slist_append(headers, "X-Panopticon-Protocol: 1");
