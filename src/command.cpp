@@ -9,6 +9,7 @@
 #include <optional>
 #ifdef __linux__
 #include <signal.h>
+#include <unistd.h>
 #endif
 
 namespace panopticon::linux_agent {
@@ -115,7 +116,12 @@ command_receipt command_gate::validate_and_mark(const command& received) {
 }
 
 bool is_protected_process(const std::uint32_t pid) noexcept {
-    return pid <= 1U;
+    if (pid <= 1U) return true;
+#ifdef __linux__
+    return pid == static_cast<std::uint32_t>(getpid());
+#else
+    return false;
+#endif
 }
 
 result<std::string> serialize_command_result(const command_receipt& receipt, const std::size_t maximum_bytes) {
