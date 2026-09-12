@@ -30,11 +30,11 @@ curl_https_client::curl_https_client(const long timeout_seconds, const std::size
 
 #ifdef PANOPTICON_HAVE_CURL
 namespace {
-struct response_sink { std::size_t limit; std::size_t size{}; };
-size_t discard_bounded_response(char*, const size_t size, const size_t count, void* context) {
+struct response_sink { std::size_t limit; std::string contents; };
+size_t capture_bounded_response(char* data, const size_t size, const size_t count, void* context) {
     auto* sink = static_cast<response_sink*>(context); const auto bytes = size * count;
-    if (bytes > sink->limit - sink->size) return 0U;
-    sink->size += bytes; return bytes;
+    if (bytes > sink->limit - sink->contents.size()) return 0U;
+    sink->contents.append(data, bytes); return bytes;
 }
 }
 #endif
@@ -53,18 +53,20 @@ transport_outcome curl_https_client::post_ndjson(const std::string& https_url, c
     headers = curl_slist_append(headers, "Content-Type: application/x-ndjson");
     headers = curl_slist_append(headers, "X-Panopticon-Protocol: 1");
     const auto agent_header = "X-Panopticon-Agent-Id: " + identity.agent_id;
-    const auto batch_header = "X-Panopticon-Batch-Id: " + batch_id();
+    const auto request_batch_id = batch_id();
+    const auto batch_header = "X-Panopticon-Batch-Id: " + request_batch_id;
     const auto auth_header = "Authorization: Bearer " + identity.bearer_token;
     headers = curl_slist_append(headers, agent_header.c_str()); headers = curl_slist_append(headers, batch_header.c_str()); headers = curl_slist_append(headers, auth_header.c_str());
     curl_easy_setopt(handle, CURLOPT_URL, https_url.c_str()); curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(handle, CURLOPT_POSTFIELDS, payload.data()); curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(payload.size()));
     curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L); curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, timeout_seconds_); curl_easy_setopt(handle, CURLOPT_TIMEOUT, timeout_seconds_);
-    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, discard_bounded_response); curl_easy_setopt(handle, CURLOPT_WRITEDATA, &sink);
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, capture_bounded_response); curl_easy_setopt(handle, CURLOPT_WRITEDATA, &sink);
     const auto code = curl_easy_perform(handle); long status{}; curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
     curl_slist_free_all(headers); curl_easy_cleanup(handle);
     if (code != CURLE_OK) return transport_outcome::retryable;
-    if (status == 200L) return transport_outcome::acknowledged;
+    if (status == 200L && sink.contents.find("\"batch_id\":\"" + request_batch_id + "\"") != std::string::npos)
+        return transport_outcome::acknowledged;
     if (status == 401L || status == 403L) return transport_outcome::authentication_failed;
     return status == 429L || status >= 500L ? transport_outcome::retryable : transport_outcome::rejected;
 #endif
