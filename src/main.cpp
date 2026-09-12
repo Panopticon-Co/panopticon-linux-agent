@@ -94,6 +94,22 @@ int main(int argc, char** argv) {
                 auto receipt = gate.validate_and_mark(received);
                 if (receipt.code == panopticon::linux_agent::receipt_code::succeeded && received.action == panopticon::linux_agent::action_type::kill_process) {
                     if (!panopticon::linux_agent::succeeded(panopticon::linux_agent::terminate_process("/proc", received.process_target))) receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
+                } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded && received.action == panopticon::linux_agent::action_type::collect_process_info) {
+                    const auto observed = panopticon::linux_agent::collect_process_info("/proc", received.process_target);
+                    if (!panopticon::linux_agent::succeeded(observed)) {
+                        receipt.code = panopticon::linux_agent::receipt_code::target_mismatch;
+                        receipt.summary = "process identity could not be re-observed";
+                    } else {
+                        const auto normalized = panopticon::linux_agent::normalize_process(std::get<panopticon::linux_agent::process_observation>(observed), context,
+                            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+                        const auto serialized = panopticon::linux_agent::succeeded(normalized)
+                            ? panopticon::linux_agent::serialize_canonical_process_ndjson(std::get<panopticon::linux_agent::internal_process_event>(normalized), settings.maximum_event_bytes)
+                            : panopticon::linux_agent::result<std::string>{std::get<panopticon::linux_agent::error>(normalized)};
+                        if (!panopticon::linux_agent::succeeded(serialized) || !panopticon::linux_agent::succeeded(spool.append(std::get<std::string>(serialized)))) {
+                            receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
+                            receipt.summary = "process observation could not be durably queued";
+                        }
+                    }
                 } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded) {
                     receipt.code = panopticon::linux_agent::receipt_code::unsupported_action;
                     receipt.summary = "action handler is not available in this agent build";

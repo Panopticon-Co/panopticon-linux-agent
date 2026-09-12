@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/error.hpp"
 #include "panopticon/linux_agent/identity.hpp"
+#include "panopticon/linux_agent/procfs.hpp"
 #include "panopticon/linux_agent/replay_ledger.hpp"
 
 #include <chrono>
@@ -81,5 +82,9 @@ private:
 [[nodiscard]] bool is_protected_process(std::uint32_t pid) noexcept;
 // Sends SIGTERM only after a fresh procfs observation proves the PID/start-time tuple.
 [[nodiscard]] result<bool> terminate_process(const std::filesystem::path& proc_root, const process_identity& target);
+// Re-observes exactly the requested PID/start-time tuple to prevent PID reuse
+// from turning a collection command into collection of a different process.
+[[nodiscard]] result<process_observation> collect_process_info(const std::filesystem::path& proc_root,
+                                                                const process_identity& target);
 
 }  // namespace panopticon::linux_agent

@@ -195,4 +195,19 @@ result<bool> terminate_process(const std::filesystem::path& proc_root, const pro
 #endif
 }
 
+result<process_observation> collect_process_info(const std::filesystem::path& proc_root, const process_identity& target) {
+    if (target.pid == 0U || target.start_time_ticks == 0U || !is_valid_identifier(target.host_id)) {
+        return error{error_code::invalid_input, "process target is invalid"};
+    }
+    constexpr std::size_t maximum_verification_observations{131072U};
+    const auto processes = collect_processes(proc_root, target.host_id, maximum_verification_observations);
+    if (!succeeded(processes)) return std::get<error>(processes);
+    const auto& observations = std::get<std::vector<process_observation>>(processes);
+    const auto found = std::find_if(observations.begin(), observations.end(), [&](const process_observation& observation) {
+        return observation.identity == target;
+    });
+    if (found == observations.end()) return error{error_code::target_mismatch, "process identity no longer matches"};
+    return *found;
+}
+
 }  // namespace panopticon::linux_agent

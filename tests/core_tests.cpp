@@ -300,6 +300,25 @@ void test_command_result_is_typed_and_bounded() {
     require(!succeeded(serialize_command_result({"cmd-1", "correlation-1", receipt_code::succeeded, ""}, 4U)), "receipt must be bounded");
 }
 
+void test_collect_process_info_rejects_pid_reuse() {
+#ifdef __linux__
+    const auto directory = temporary_directory();
+    const auto process = directory / "42";
+    std::filesystem::create_directories(process);
+    { std::ofstream output{process / "stat"}; output << "42 (fixture) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 100 0"; }
+    { std::ofstream output{process / "status"}; output << "Uid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n"; }
+    { std::ofstream output{process / "cmdline", std::ios::binary}; output << "fixture"; }
+    std::error_code error;
+    std::filesystem::create_symlink("/bin/true", process / "exe", error);
+    const auto found = collect_process_info(directory, {"host-1", 42U, 100U});
+    require(succeeded(found), "matching process identity should collect");
+    require(std::get<process_observation>(found).identity.pid == 42U, "collected process must preserve PID");
+    require(!succeeded(collect_process_info(directory, {"host-1", 42U, 101U})), "reused PID must not collect a different process");
+#else
+    require(!succeeded(collect_process_info("/proc", {"host-1", 42U, 100U})), "collection is unsupported off Linux");
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -323,6 +342,7 @@ int main() {
         test_command_parser_accepts_only_closed_manager_envelopes();
         test_command_gate_uses_durable_replay_ledger();
         test_command_result_is_typed_and_bounded();
+        test_collect_process_info_rejects_pid_reuse();
     } catch (const std::exception& error) {
         std::cerr << "test failure: " << error.what() << '\n';
         return 1;
