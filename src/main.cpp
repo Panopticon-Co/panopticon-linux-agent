@@ -110,6 +110,31 @@ int main(int argc, char** argv) {
                             receipt.summary = "process observation could not be durably queued";
                         }
                     }
+                } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded && received.action == panopticon::linux_agent::action_type::collect_network_connections) {
+                    const auto evidence = panopticon::linux_agent::collect_network_evidence("/proc", settings.queue_capacity, settings.maximum_event_bytes);
+                    if (!panopticon::linux_agent::succeeded(evidence) || !panopticon::linux_agent::succeeded(spool.append(std::get<std::string>(evidence)))) {
+                        receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
+                        receipt.summary = "network evidence could not be durably queued";
+                    }
+                } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded && received.action == panopticon::linux_agent::action_type::collect_file) {
+                    const auto evidence = panopticon::linux_agent::collect_file_evidence(settings.file_collection_root, received.file_target_path, settings.maximum_event_bytes);
+                    if (!panopticon::linux_agent::succeeded(evidence)) {
+                        receipt.code = panopticon::linux_agent::receipt_code::target_mismatch;
+                        receipt.summary = "requested file could not be safely collected";
+                    } else if (!panopticon::linux_agent::succeeded(spool.append(std::get<std::string>(evidence)))) {
+                        receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
+                        receipt.summary = "file evidence could not be durably queued";
+                    }
+                } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded && received.action == panopticon::linux_agent::action_type::quarantine_file) {
+                    const auto quarantined = panopticon::linux_agent::quarantine_file_and_serialize(settings.file_collection_root, received.file_target_path,
+                        settings.quarantine_root, settings.maximum_event_bytes);
+                    if (!panopticon::linux_agent::succeeded(quarantined)) {
+                        receipt.code = panopticon::linux_agent::receipt_code::target_mismatch;
+                        receipt.summary = "requested file could not be safely quarantined";
+                    } else if (!panopticon::linux_agent::succeeded(spool.append(std::get<std::string>(quarantined)))) {
+                        receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
+                        receipt.summary = "quarantine result could not be durably queued";
+                    }
                 } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded) {
                     receipt.code = panopticon::linux_agent::receipt_code::unsupported_action;
                     receipt.summary = "action handler is not available in this agent build";

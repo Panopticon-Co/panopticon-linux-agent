@@ -24,6 +24,10 @@ struct agent_config {
     std::string identity_path;
     std::string enrollment_token_path;
     std::string spool_path;
+    // Root jails for COLLECT_FILE / QUARANTINE_FILE. Empty means the action is
+    // unavailable on this agent build rather than defaulting to an unsafe root.
+    std::string file_collection_root;
+    std::string quarantine_root;
 };
 
 [[nodiscard]] result<agent_config> parse_config(std::string_view contents);

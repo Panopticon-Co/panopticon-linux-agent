@@ -53,7 +53,7 @@ constexpr std::array<std::uint32_t, 64U> sha256_constants{
 
 std::uint32_t rotate_right(const std::uint32_t value, const std::uint32_t bits) { return (value >> bits) | (value << (32U - bits)); }
 
-std::string sha256_hex(std::string input) {
+std::string sha256_hex_impl(std::string input) {
     const auto original_bits = static_cast<std::uint64_t>(input.size()) * 8U;
     input.push_back(static_cast<char>(0x80U));
     while ((input.size() % 64U) != 56U) input.push_back('\0');
@@ -108,6 +108,8 @@ std::string nullable_json(const std::string& value) { return value.empty() ? "nu
 
 }  // namespace
 
+std::string sha256_hex(const std::string_view input) { return sha256_hex_impl(std::string{input}); }
+
 result<internal_process_event> normalize_process(
     process_observation observation, agent_context context, const std::chrono::sys_seconds observed_at) {
     if (!valid_context(context) || observation.identity.host_id != context.host_id || observation.identity.start_time_ticks == 0U) {
@@ -150,8 +152,8 @@ result<std::string> serialize_canonical_process_ndjson(const internal_process_ev
         return error{error_code::invalid_input, "event schema, context, or output limit is invalid"};
     }
     const auto identity = process_identity_key(event.process.identity);
-    const auto entity_id = "proc_" + sha256_hex(identity);
-    const auto event_id = "evt_" + sha256_hex("linux_procfs|" + identity + "|" + std::to_string(event.observed_at.time_since_epoch().count()));
+    const auto entity_id = "proc_" + sha256_hex_impl(identity);
+    const auto event_id = "evt_" + sha256_hex_impl("linux_procfs|" + identity + "|" + std::to_string(event.observed_at.time_since_epoch().count()));
     const auto name = std::filesystem::path{event.process.executable}.filename().string();
     std::ostringstream output;
     output << "{\"schema_version\":\"0.4\",\"event\":{\"id\":\"" << event_id

@@ -1,4 +1,5 @@
 #include "panopticon/linux_agent/command.hpp"
+#include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
 
 #include <utility>
@@ -14,6 +15,30 @@
 
 namespace panopticon::linux_agent {
 namespace {
+std::string escape_evidence_json(const std::string_view value) {
+    std::string output;
+    output.reserve(value.size());
+    for (const unsigned char character : value) {
+        switch (character) {
+            case '"': output += "\\\""; break;
+            case '\\': output += "\\\\"; break;
+            case '\n': output += "\\n"; break;
+            case '\r': output += "\\r"; break;
+            case '\t': output += "\\t"; break;
+            default:
+                if (character < 0x20U) {
+                    constexpr char hexadecimal[] = "0123456789abcdef";
+                    output += "\\u00";
+                    output += hexadecimal[(character >> 4U) & 0x0FU];
+                    output += hexadecimal[character & 0x0FU];
+                } else {
+                    output += static_cast<char>(character);
+                }
+        }
+    }
+    return output;
+}
+
 std::string string_field(const std::string_view payload, const std::string_view key) {
     const auto marker = "\"" + std::string{key} + "\":\"";
     const auto begin = payload.find(marker);
@@ -76,14 +101,22 @@ result<command> parse_command_json(const std::string_view payload) {
     if (action == "KILL_PROCESS") action_type_value = action_type::kill_process;
     else if (action == "COLLECT_PROCESS_INFO") action_type_value = action_type::collect_process_info;
     else if (action == "COLLECT_NETWORK_CONNECTIONS") action_type_value = action_type::collect_network_connections;
+    else if (action == "COLLECT_FILE") action_type_value = action_type::collect_file;
+    else if (action == "QUARANTINE_FILE") action_type_value = action_type::quarantine_file;
     else return error{error_code::unsupported_action, "command action is not supported by this agent build"};
+    const bool is_process_action = action_type_value == action_type::kill_process || action_type_value == action_type::collect_process_info;
+    const bool is_file_action = action_type_value == action_type::collect_file || action_type_value == action_type::quarantine_file;
     process_identity target{host_id, 0U, 0U};
-    if (action_type_value != action_type::collect_network_connections) {
+    std::string file_path;
+    if (is_process_action) {
         const auto pid = unsigned_field(payload, "pid"); const auto start = unsigned_field(payload, "start_time_ticks");
         if (!pid || !start || *pid > std::numeric_limits<std::uint32_t>::max()) return error{error_code::invalid_input, "process command target is invalid"};
         target.pid = static_cast<std::uint32_t>(*pid); target.start_time_ticks = *start;
+    } else if (is_file_action) {
+        file_path = string_field(payload, "path");
+        if (file_path.empty() || file_path.size() > 4096U) return error{error_code::invalid_input, "file command target is invalid"};
     }
-    return command{command_id, agent_id, host_id, schema_version, correlation_id, action_type_value, *expiry, target};
+    return command{command_id, agent_id, host_id, schema_version, correlation_id, action_type_value, *expiry, target, file_path};
 }
 
 result<std::vector<command>> parse_command_poll_response(const std::string_view payload,
@@ -137,7 +170,8 @@ command_receipt command_gate::validate_and_mark(const command& received) {
         return {received.command_id, received.correlation_id, receipt_code::replay_detected, "command was already accepted"};
     }
     if (received.action != action_type::kill_process && received.action != action_type::collect_process_info &&
-        received.action != action_type::collect_network_connections) {
+        received.action != action_type::collect_network_connections && received.action != action_type::collect_file &&
+        received.action != action_type::quarantine_file) {
         return {received.command_id, received.correlation_id, receipt_code::unsupported_action, "action is not implemented"};
     }
     if (received.action == action_type::kill_process && is_protected_process(received.process_target.pid)) {
@@ -208,6 +242,71 @@ result<process_observation> collect_process_info(const std::filesystem::path& pr
     });
     if (found == observations.end()) return error{error_code::target_mismatch, "process identity no longer matches"};
     return *found;
+}
+
+result<std::string> collect_network_evidence(const std::filesystem::path& proc_root, const std::size_t maximum_connections_per_table,
+                                              const std::size_t maximum_bytes) {
+    if (maximum_connections_per_table == 0U || maximum_bytes == 0U) return error{error_code::invalid_input, "network evidence limits are invalid"};
+#ifndef __linux__
+    (void)proc_root;
+    return error{error_code::unsupported_action, "network collection is available only on Linux"};
+#else
+    std::vector<network_connection> connections;
+    for (const auto& collect : {&collect_tcp_connections, &collect_tcp6_connections, &collect_udp_connections, &collect_udp6_connections}) {
+        const auto collected = (*collect)(proc_root, maximum_connections_per_table);
+        if (!succeeded(collected)) return std::get<error>(collected);
+        const auto& batch = std::get<std::vector<network_connection>>(collected);
+        connections.insert(connections.end(), batch.begin(), batch.end());
+    }
+    std::ostringstream output;
+    output << "{\"connections\":[";
+    bool first = true;
+    for (const auto& connection : connections) {
+        if (!first) output << ",";
+        first = false;
+        output << "{\"protocol\":\"" << escape_evidence_json(connection.protocol) << "\",\"local_address\":\""
+               << escape_evidence_json(connection.local_address) << "\",\"local_port\":" << connection.local_port
+               << ",\"remote_address\":\"" << escape_evidence_json(connection.remote_address)
+               << "\",\"remote_port\":" << connection.remote_port << ",\"state\":\"" << escape_evidence_json(connection.state)
+               << "\",\"owner_pid\":" << (connection.owner_pid ? std::to_string(*connection.owner_pid) : "null") << "}";
+    }
+    output << "]}";
+    auto serialized = output.str();
+    if (serialized.size() > maximum_bytes) return error{error_code::resource_limit, "network evidence exceeds limit"};
+    return serialized;
+#endif
+}
+
+result<std::string> collect_file_evidence(const std::filesystem::path& allowed_root, const std::filesystem::path& requested_path,
+                                          const std::size_t maximum_bytes) {
+    if (allowed_root.empty()) return error{error_code::unsupported_action, "file collection root is not configured"};
+    // The full file is read (bounded) only long enough to hash it; the raw
+    // content is never included in the evidence this function returns.
+    constexpr std::size_t maximum_hashed_bytes{16U * 1024U * 1024U};
+    const auto collected = collect_regular_file(allowed_root, requested_path, maximum_hashed_bytes);
+    if (!succeeded(collected)) return std::get<error>(collected);
+    const auto& file = std::get<collected_file>(collected);
+    const auto hash = sha256_hex(file.contents);
+    std::ostringstream output;
+    output << "{\"path\":\"" << escape_evidence_json(file.path.string()) << "\",\"size\":" << file.contents.size()
+           << ",\"sha256\":\"" << hash << "\"}";
+    auto serialized = output.str();
+    if (serialized.size() > maximum_bytes) return error{error_code::resource_limit, "file evidence exceeds limit"};
+    return serialized;
+}
+
+result<std::string> quarantine_file_and_serialize(const std::filesystem::path& allowed_root, const std::filesystem::path& requested_path,
+                                                  const std::filesystem::path& quarantine_root, const std::size_t maximum_bytes) {
+    if (allowed_root.empty() || quarantine_root.empty()) return error{error_code::unsupported_action, "quarantine roots are not configured"};
+    const auto quarantined = quarantine_regular_file(allowed_root, requested_path, quarantine_root);
+    if (!succeeded(quarantined)) return std::get<error>(quarantined);
+    const auto& entry = std::get<quarantine_entry>(quarantined);
+    std::ostringstream output;
+    output << "{\"stored_path\":\"" << escape_evidence_json(entry.stored_path.string()) << "\",\"metadata_path\":\""
+           << escape_evidence_json(entry.metadata_path.string()) << "\"}";
+    auto serialized = output.str();
+    if (serialized.size() > maximum_bytes) return error{error_code::resource_limit, "quarantine result exceeds limit"};
+    return serialized;
 }
 
 }  // namespace panopticon::linux_agent
