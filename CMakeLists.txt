@@ -15,6 +15,7 @@ add_library(panopticon-linux-core STATIC
     src/event.cpp
     src/network.cpp
     src/config.cpp
+    src/transport.cpp
 )
 target_include_directories(panopticon-linux-core PUBLIC include)
 target_compile_features(panopticon-linux-core PUBLIC cxx_std_20)

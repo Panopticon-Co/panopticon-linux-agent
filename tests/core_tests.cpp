@@ -6,6 +6,7 @@
 #include "panopticon/linux_agent/queue.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
 #include "panopticon/linux_agent/spool.hpp"
+#include "panopticon/linux_agent/transport.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -82,6 +83,21 @@ void test_spool_recovers_and_acknowledges_only_its_entries() {
     require(std::get<bool>(spool.acknowledge(entry)) == false, "acknowledging an absent entry is idempotent");
     std::error_code error;
     std::filesystem::remove_all(directory, error);
+}
+
+class fake_https_client final : public https_client {
+public:
+    transport_outcome outcome{transport_outcome::acknowledged};
+    transport_outcome post_ndjson(const std::string&, const enrolled_identity&, const std::string&) override { return outcome; }
+};
+
+void test_transport_drains_only_acknowledged_spool_entries() {
+    const auto directory = temporary_directory(); durable_spool spool{directory, 4096U};
+    require(succeeded(spool.append("event")), "spool append should succeed");
+    fake_https_client client; const enrolled_identity identity{"agent-1", "host-1", "token"};
+    require(std::get<std::size_t>(drain_spool(spool, client, "https://manager", identity, 1U)) == 1U, "ack must drain");
+    require(succeeded(spool.append("event")), "spool append should succeed"); client.outcome = transport_outcome::retryable;
+    require(std::get<std::size_t>(drain_spool(spool, client, "https://manager", identity, 1U)) == 0U, "retry must retain");
 }
 
 void test_spool_quarantines_corrupt_segments() {
@@ -192,6 +208,7 @@ int main() {
         test_enrolled_identity_is_persisted_atomically();
         test_security_event_evicts_low_priority_work();
         test_spool_recovers_and_acknowledges_only_its_entries();
+        test_transport_drains_only_acknowledged_spool_entries();
         test_spool_quarantines_corrupt_segments();
         test_procfs_is_explicitly_unsupported_off_linux();
         test_internal_normalization_escapes_and_bounds_ndjson();
