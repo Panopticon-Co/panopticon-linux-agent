@@ -164,7 +164,9 @@ result<std::string> serialize_canonical_process_ndjson(const internal_process_ev
            << "\",\"os\":{\"name\":\"" << escape_json(event.context.os_name) << "\",\"build\":\"" << escape_json(event.context.kernel_release)
            << "\"}},\"user\":{\"name\":null,\"domain\":null,\"sid\":null},\"process\":{\"entity_id\":\"" << entity_id
            << "\",\"pid\":" << event.process.identity.pid << ",\"name\":" << nullable_json(name) << ",\"executable\":" << nullable_json(event.process.executable)
-           << ",\"command_line\":" << nullable_json(event.process.command_line) << ",\"parent\":{\"entity_id\":null,\"pid\":" << event.process.parent_pid
+           << ",\"command_line\":" << nullable_json(event.process.command_line)
+           << ",\"start_time_ticks\":" << event.process.identity.start_time_ticks
+           << ",\"parent\":{\"entity_id\":null,\"pid\":" << event.process.parent_pid
            << ",\"name\":null},\"hash\":{\"sha256\":null}}}\n";
     auto serialized = output.str();
     if (serialized.size() > maximum_bytes) return error{error_code::resource_limit, "canonical event exceeds configured size"};

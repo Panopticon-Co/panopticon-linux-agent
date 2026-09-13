@@ -261,6 +261,8 @@ void test_internal_normalization_escapes_and_bounds_ndjson() {
     const auto& canonical_text = std::get<std::string>(canonical);
     require(canonical_text.find("\"schema_version\":\"0.4\"") != std::string::npos, "canonical schema version must be emitted");
     require(canonical_text.find("\"kind\":\"linux_procfs\"") != std::string::npos, "canonical Linux source kind must be emitted");
+    require(canonical_text.find("\"start_time_ticks\":99") != std::string::npos,
+            "canonical event must carry the observed process's start_time_ticks for PID-reuse-safe KILL_PROCESS targeting");
 }
 
 void test_proc_net_tcp_parser_is_bounded_and_decodes_endpoints() {
