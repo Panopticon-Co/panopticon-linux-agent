@@ -28,6 +28,10 @@ struct agent_config {
     // unavailable on this agent build rather than defaulting to an unsafe root.
     std::string file_collection_root;
     std::string quarantine_root;
+    // Path to the isolation helper's AF_UNIX socket (see isolation.hpp,
+    // docs/adr/004). Empty means ISOLATE_HOST/RELEASE_HOST_ISOLATION are
+    // unavailable on this agent build.
+    std::string isolation_socket_path;
 };
 
 [[nodiscard]] result<agent_config> parse_config(std::string_view contents);

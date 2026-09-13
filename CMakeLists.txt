@@ -22,6 +22,7 @@ add_library(panopticon-linux-core STATIC
     src/host.cpp
     src/quarantine.cpp
     src/replay_ledger.cpp
+    src/isolation.cpp
 )
 target_include_directories(panopticon-linux-core PUBLIC include)
 target_compile_features(panopticon-linux-core PUBLIC cxx_std_20)
@@ -75,4 +76,18 @@ if(LIBMNL_FOUND AND LIBNFTNL_FOUND)
     target_include_directories(isolation-namespace-spike PRIVATE ${LIBMNL_INCLUDE_DIRS} ${LIBNFTNL_INCLUDE_DIRS})
     target_link_libraries(isolation-namespace-spike PRIVATE ${LIBMNL_LIBRARIES} ${LIBNFTNL_LIBRARIES})
     target_link_directories(isolation-namespace-spike PRIVATE ${LIBMNL_LIBRARY_DIRS} ${LIBNFTNL_LIBRARY_DIRS})
+
+    # The privileged isolation helper (ADR 004). Deliberately its own
+    # executable, not linked into panopticon-linux-core or the agent binary
+    # -- CAP_NET_ADMIN never reaches the unprivileged main agent process.
+    add_executable(panopticon-isolation-helper src/isolation_helper_main.cpp src/isolation_ruleset.cpp src/isolation.cpp)
+    target_include_directories(panopticon-isolation-helper PRIVATE include ${LIBMNL_INCLUDE_DIRS} ${LIBNFTNL_INCLUDE_DIRS})
+    target_compile_features(panopticon-isolation-helper PRIVATE cxx_std_20)
+    target_link_libraries(panopticon-isolation-helper PRIVATE ${LIBMNL_LIBRARIES} ${LIBNFTNL_LIBRARIES})
+    target_link_directories(panopticon-isolation-helper PRIVATE ${LIBMNL_LIBRARY_DIRS} ${LIBNFTNL_LIBRARY_DIRS})
+    if(NOT MSVC)
+        target_compile_options(panopticon-isolation-helper PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    install(TARGETS panopticon-isolation-helper RUNTIME DESTINATION bin)
+    install(FILES systemd/panopticon-isolation-helper.service DESTINATION lib/systemd/system)
 endif()

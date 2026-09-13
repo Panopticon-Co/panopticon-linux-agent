@@ -3,6 +3,7 @@
 #include "panopticon/linux_agent/error.hpp"
 #include "panopticon/linux_agent/file_collection.hpp"
 #include "panopticon/linux_agent/identity.hpp"
+#include "panopticon/linux_agent/isolation.hpp"
 #include "panopticon/linux_agent/network.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
 #include "panopticon/linux_agent/quarantine.hpp"
