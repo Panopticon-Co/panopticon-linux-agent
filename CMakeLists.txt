@@ -80,7 +80,10 @@ if(LIBMNL_FOUND AND LIBNFTNL_FOUND)
     # The privileged isolation helper (ADR 004). Deliberately its own
     # executable, not linked into panopticon-linux-core or the agent binary
     # -- CAP_NET_ADMIN never reaches the unprivileged main agent process.
-    add_executable(panopticon-isolation-helper src/isolation_helper_main.cpp src/isolation_ruleset.cpp src/isolation.cpp)
+    # identity.cpp is linked directly (not the whole panopticon-linux-core)
+    # for is_valid_identifier() -- deliberately not pulling libcurl or any
+    # other core-library dependency into this minimal privileged process.
+    add_executable(panopticon-isolation-helper src/isolation_helper_main.cpp src/isolation_ruleset.cpp src/isolation.cpp src/identity.cpp)
     target_include_directories(panopticon-isolation-helper PRIVATE include ${LIBMNL_INCLUDE_DIRS} ${LIBNFTNL_INCLUDE_DIRS})
     target_compile_features(panopticon-isolation-helper PRIVATE cxx_std_20)
     target_link_libraries(panopticon-isolation-helper PRIVATE ${LIBMNL_LIBRARIES} ${LIBNFTNL_LIBRARIES})
