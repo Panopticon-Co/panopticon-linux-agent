@@ -59,3 +59,20 @@ endif()
 
 install(TARGETS panopticon-linux-agent RUNTIME DESTINATION bin)
 install(FILES systemd/panopticon-linux-agent.service DESTINATION lib/systemd/system)
+
+# ADR 004 de-risking spike: proves libmnl/libnftnl netlink calls work before
+# the isolation helper is built on top of them. Standalone, not linked into
+# panopticon-linux-core or the agent binary. Only built when both libraries
+# are actually available (Linux-only; CI installs them explicitly).
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(LIBMNL QUIET libmnl)
+    pkg_check_modules(LIBNFTNL QUIET libnftnl)
+endif()
+if(LIBMNL_FOUND AND LIBNFTNL_FOUND)
+    add_executable(isolation-namespace-spike tests/e2e/isolation_namespace_spike.cpp)
+    target_compile_features(isolation-namespace-spike PRIVATE cxx_std_20)
+    target_include_directories(isolation-namespace-spike PRIVATE ${LIBMNL_INCLUDE_DIRS} ${LIBNFTNL_INCLUDE_DIRS})
+    target_link_libraries(isolation-namespace-spike PRIVATE ${LIBMNL_LIBRARIES} ${LIBNFTNL_LIBRARIES})
+    target_link_directories(isolation-namespace-spike PRIVATE ${LIBMNL_LIBRARY_DIRS} ${LIBNFTNL_LIBRARY_DIRS})
+endif()
