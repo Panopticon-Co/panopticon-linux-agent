@@ -93,4 +93,8 @@ if(LIBMNL_FOUND AND LIBNFTNL_FOUND)
     endif()
     install(TARGETS panopticon-isolation-helper RUNTIME DESTINATION bin)
     install(FILES systemd/panopticon-isolation-helper.service DESTINATION lib/systemd/system)
+
+    add_executable(isolation-client-tool tests/e2e/isolation_client_tool.cpp src/isolation.cpp src/identity.cpp)
+    target_include_directories(isolation-client-tool PRIVATE include)
+    target_compile_features(isolation-client-tool PRIVATE cxx_std_20)
 endif()

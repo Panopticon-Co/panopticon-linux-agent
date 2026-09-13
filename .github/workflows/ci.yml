@@ -15,6 +15,10 @@ jobs:
         run: |
           chmod +x tests/e2e/run_isolation_namespace_spike.sh
           tests/e2e/run_isolation_namespace_spike.sh build/isolation-namespace-spike
+      - name: Isolation helper end-to-end isolate/release cycle
+        run: |
+          chmod +x tests/e2e/run_isolation_e2e.sh
+          tests/e2e/run_isolation_e2e.sh build/panopticon-isolation-helper build/isolation-client-tool
 
   sanitizers:
     runs-on: ubuntu-24.04
