@@ -33,9 +33,13 @@ run_inside_namespace() {
 
 run_inside_namespace bash -c "
     set -euo pipefail
-    '${HELPER_BINARY}' '${SOCKET_PATH}' '${STATE_PATH}' 127.0.0.1 443 \"\$(id -un)\" &
+    # Redirected to a file, not inherited from this step's own stdout/stderr:
+    # a backgrounded process that keeps those pipes open (even after this
+    # script and its EXIT trap have run) hangs the whole CI step waiting for
+    # EOF on them, regardless of whether the kill below actually lands.
+    '${HELPER_BINARY}' '${SOCKET_PATH}' '${STATE_PATH}' 127.0.0.1 443 \"\$(id -un)\" > '${WORKDIR}/helper.log' 2>&1 &
     HELPER_PID=\$!
-    trap 'kill \${HELPER_PID} 2>/dev/null || true' EXIT
+    trap 'kill \${HELPER_PID} 2>/dev/null || true; cat \"${WORKDIR}/helper.log\" >&2 || true' EXIT
     for _ in \$(seq 1 50); do
         [ -S '${SOCKET_PATH}' ] && break
         sleep 0.1
