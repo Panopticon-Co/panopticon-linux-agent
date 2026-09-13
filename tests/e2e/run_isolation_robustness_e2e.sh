@@ -88,6 +88,20 @@ run_inside_namespace bash -c "
         kill -0 \${HELPER_PID} 2>/dev/null || break
         sleep 0.1
     done
+    # SIGKILL gives the helper no chance to unlink its own socket special
+    # file, so it is still sitting on disk pointing at a dead listener.
+    # wait_for_socket() below only checks '[ -S \$SOCKET_PATH ]', which that
+    # stale file satisfies immediately -- racing ahead of the restarted
+    # helper's own listening_socket() call, which (correctly, fail-closed)
+    # only runs *after* it finishes re-applying isolation on startup. Without
+    # removing the stale file first, a client can connect to the dead
+    # listener and fail before the new helper is actually up; this was the
+    # real, deterministic cause of this script's intermittent CI failures
+    # ('isolation-client-tool: request failed' right after restart), not two
+    # overlapping helper lifecycles as an earlier read of the doubled log
+    # output (printed once by this failure branch's own 'cat' and again by
+    # the EXIT trap's 'cat' of the same single log file) suggested.
+    rm -f '${SOCKET_PATH}'
 
     echo '--- restart while isolation state exists: helper re-applies fail-closed ---'
     HELPER_PID=\$(start_helper)
