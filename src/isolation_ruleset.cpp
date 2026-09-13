@@ -248,23 +248,38 @@ result<bool> apply_isolation_ruleset(const std::uint32_t manager_ipv4_network_or
 }
 
 result<bool> release_isolation_ruleset() {
-    char raw_buffer[4U * kNetlinkBufferBytes];
+    char raw_buffer[8U * kNetlinkBufferBytes];
     mnl_nlmsg_batch* batch = mnl_nlmsg_batch_start(raw_buffer, sizeof(raw_buffer));
     std::uint32_t seq = static_cast<std::uint32_t>(std::time(nullptr));
 
     nftnl_batch_begin(static_cast<char*>(mnl_nlmsg_batch_current(batch)), seq++);
     mnl_nlmsg_batch_next(batch);
 
+    // Real nft(8) client behavior when deleting a table (see nftables'
+    // src/rule.c do_command_delete): every base chain is torn down with its
+    // own NFT_MSG_DELCHAIN first, because deleting a *hooked* base chain
+    // means unregistering its netfilter hook -- collapsing that into a bare
+    // NFT_MSG_DELTABLE on a table with active hooked chains produced no
+    // netlink reply at all (confirmed on real CI: zero bytes received
+    // within a 5s timeout, not even an error ack), which is exactly what
+    // caused the original indefinite hang this whole ADR 004 e2e test was
+    // added to catch. NLM_F_ACK on every message here is required, not
+    // optional, precisely because of that -- a batch must never be built
+    // with no reply expected from any of its messages.
+    for (const auto& chain_name : {kIsolationInputChainName, kIsolationOutputChainName}) {
+        nftnl_chain* chain = nftnl_chain_alloc();
+        nftnl_chain_set_str(chain, NFTNL_CHAIN_TABLE, std::string{kIsolationTableName}.c_str());
+        nftnl_chain_set_str(chain, NFTNL_CHAIN_NAME, std::string{chain_name}.c_str());
+        nlmsghdr* chain_header = nftnl_chain_nlmsg_build_hdr(static_cast<char*>(mnl_nlmsg_batch_current(batch)),
+                                                              NFT_MSG_DELCHAIN, NFPROTO_INET, NLM_F_ACK, seq++);
+        nftnl_chain_nlmsg_build_payload(chain_header, chain);
+        nftnl_chain_free(chain);
+        mnl_nlmsg_batch_next(batch);
+    }
+
     nftnl_table* table = nftnl_table_alloc();
     nftnl_table_set_str(table, NFTNL_TABLE_NAME, std::string{kIsolationTableName}.c_str());
     nftnl_table_set_u32(table, NFTNL_TABLE_FAMILY, NFPROTO_INET);
-    // NLM_F_ACK is required here, not optional: a batch with no
-    // NLM_F_ACK-flagged message never gets any reply at all from the
-    // kernel, so commit_batch's mnl_socket_recvfrom blocked forever on
-    // every release (this was a real, reproduced-in-CI hang, not a
-    // hypothetical). Releasing when not isolated (table absent) is still a
-    // silent, idempotent no-op success -- that is handled by commit_batch
-    // tolerating ENOENT specifically, not by suppressing the ack.
     nlmsghdr* nlh = nftnl_table_nlmsg_build_hdr(static_cast<char*>(mnl_nlmsg_batch_current(batch)), NFT_MSG_DELTABLE,
                                                  NFPROTO_INET, NLM_F_ACK, seq++);
     nftnl_table_nlmsg_build_payload(nlh, table);
