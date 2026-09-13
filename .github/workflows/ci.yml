@@ -19,6 +19,10 @@ jobs:
         run: |
           chmod +x tests/e2e/run_isolation_e2e.sh
           tests/e2e/run_isolation_e2e.sh build/panopticon-isolation-helper build/isolation-client-tool
+      - name: Isolation helper IPC robustness (malformed/oversized/unauthorized/restart)
+        run: |
+          chmod +x tests/e2e/run_isolation_robustness_e2e.sh
+          tests/e2e/run_isolation_robustness_e2e.sh build/panopticon-isolation-helper build/isolation-client-tool build/isolation-raw-frame-tool
 
   sanitizers:
     runs-on: ubuntu-24.04

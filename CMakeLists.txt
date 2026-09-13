@@ -97,4 +97,10 @@ if(LIBMNL_FOUND AND LIBNFTNL_FOUND)
     add_executable(isolation-client-tool tests/e2e/isolation_client_tool.cpp src/isolation.cpp src/identity.cpp)
     target_include_directories(isolation-client-tool PRIVATE include)
     target_compile_features(isolation-client-tool PRIVATE cxx_std_20)
+
+    # Test-only: sends arbitrary raw bytes to the helper's socket, bypassing
+    # encode_isolation_request(), so the e2e suite can exercise malformed and
+    # oversized IPC input that the real agent's typed client can never produce.
+    add_executable(isolation-raw-frame-tool tests/e2e/isolation_raw_frame_tool.cpp)
+    target_compile_features(isolation-raw-frame-tool PRIVATE cxx_std_20)
 endif()

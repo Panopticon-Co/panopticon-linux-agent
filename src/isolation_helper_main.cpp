@@ -151,11 +151,19 @@ int main(int argc, char** argv) {
         if (connection < 0) continue;
         if (!peer_is_expected_agent(connection, expected_uid)) { close(connection); continue; }
 
-        char buffer[kIsolationRequestFrameSize];
+        // Sized one byte larger than the only legal frame: a SOCK_SEQPACKET
+        // recv() into a buffer exactly the frame's size cannot distinguish a
+        // valid frame from an oversized packet silently truncated to fit --
+        // the kernel just discards the excess and reports the buffer-capped
+        // length. Making the buffer one byte bigger means any oversized
+        // packet reports a received length that is provably not the exact
+        // frame size, so it is rejected here rather than having its
+        // (attacker-controlled) truncated prefix parsed as if it were valid.
+        char buffer[kIsolationRequestFrameSize + 1U];
         const auto received = recv(connection, buffer, sizeof(buffer), 0);
         std::uint8_t status = kIsolationStatusRejected;
-        if (received == static_cast<ssize_t>(sizeof(buffer))) {
-            const auto decoded = decode_isolation_request(std::string_view{buffer, sizeof(buffer)});
+        if (received == static_cast<ssize_t>(kIsolationRequestFrameSize)) {
+            const auto decoded = decode_isolation_request(std::string_view{buffer, kIsolationRequestFrameSize});
             if (succeeded(decoded)) {
                 const auto& [opcode, command_id] = std::get<std::pair<isolation_opcode, std::string>>(decoded);
                 if (opcode == isolation_opcode::isolate) {

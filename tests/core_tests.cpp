@@ -413,6 +413,8 @@ void test_isolation_ipc_frame_is_closed_and_bounded() {
     require(!succeeded(encode_isolation_request(isolation_opcode::isolate, "bad id with spaces")),
             "an invalid identifier must not encode");
     require(!succeeded(decode_isolation_request("too short")), "a frame of the wrong size must not decode");
+    const std::string oversized(kIsolationRequestFrameSize + 64U, 'A');
+    require(!succeeded(decode_isolation_request(oversized)), "an oversized frame must not decode");
 
     std::string tampered_padding(kIsolationRequestFrameSize, '\0');
     tampered_padding[0] = static_cast<char>(static_cast<std::uint8_t>(isolation_opcode::release));
