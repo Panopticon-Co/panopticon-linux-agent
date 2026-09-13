@@ -162,12 +162,21 @@ int main(int argc, char** argv) {
                     // Idempotent: re-applying while already isolated is a
                     // no-op success, not an error, so a retried command
                     // cannot fail or double-apply.
-                    if (succeeded(apply_isolation_ruleset(manager_ipv4, manager_port)) &&
-                        save_state(state_path, {true, command_id})) {
+                    const auto applied = apply_isolation_ruleset(manager_ipv4, manager_port);
+                    if (!succeeded(applied)) {
+                        std::fprintf(stderr, "isolation-helper: apply failed: %s\n", std::get<panopticon::linux_agent::error>(applied).message.c_str());
+                    } else if (!save_state(state_path, {true, command_id})) {
+                        std::fprintf(stderr, "isolation-helper: could not persist isolation state\n");
+                    } else {
                         status = kIsolationStatusOk;
                     }
                 } else if (opcode == isolation_opcode::release) {
-                    if (succeeded(release_isolation_ruleset()) && save_state(state_path, {false, ""})) {
+                    const auto released = release_isolation_ruleset();
+                    if (!succeeded(released)) {
+                        std::fprintf(stderr, "isolation-helper: release failed: %s\n", std::get<panopticon::linux_agent::error>(released).message.c_str());
+                    } else if (!save_state(state_path, {false, ""})) {
+                        std::fprintf(stderr, "isolation-helper: could not persist release state\n");
+                    } else {
                         status = kIsolationStatusOk;
                     }
                 }

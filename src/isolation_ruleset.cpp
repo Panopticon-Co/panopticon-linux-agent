@@ -12,6 +12,7 @@
 #include <linux/in.h>
 
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 
@@ -34,10 +35,15 @@ int on_ack([[maybe_unused]] const nlmsghdr* nlh, void* count) {
 // failure.
 bool commit_batch(mnl_nlmsg_batch* batch) {
     mnl_socket* nl = mnl_socket_open(NETLINK_NETFILTER);
-    if (nl == nullptr) return false;
-    if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) { mnl_socket_close(nl); return false; }
+    if (nl == nullptr) { std::perror("isolation-ruleset: mnl_socket_open"); return false; }
+    if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
+        std::perror("isolation-ruleset: mnl_socket_bind");
+        mnl_socket_close(nl);
+        return false;
+    }
     const auto portid = mnl_socket_get_portid(nl);
     if (mnl_socket_sendto(nl, mnl_nlmsg_batch_head(batch), mnl_nlmsg_batch_size(batch)) < 0) {
+        std::perror("isolation-ruleset: mnl_socket_sendto");
         mnl_socket_close(nl);
         return false;
     }
@@ -45,10 +51,14 @@ bool commit_batch(mnl_nlmsg_batch* batch) {
     int acknowledged = 0;
     for (;;) {
         const auto received = mnl_socket_recvfrom(nl, reply, sizeof(reply));
-        if (received < 0) { mnl_socket_close(nl); return false; }
+        if (received < 0) { std::perror("isolation-ruleset: mnl_socket_recvfrom"); mnl_socket_close(nl); return false; }
         if (received == 0) break;
         const auto result = mnl_cb_run(reply, static_cast<std::size_t>(received), 0, portid, on_ack, &acknowledged);
-        if (result < 0) { mnl_socket_close(nl); return false; }
+        if (result < 0) {
+            std::fprintf(stderr, "isolation-ruleset: mnl_cb_run: %s\n", std::strerror(errno));
+            mnl_socket_close(nl);
+            return false;
+        }
         if (result == MNL_CB_STOP) break;
     }
     mnl_socket_close(nl);
