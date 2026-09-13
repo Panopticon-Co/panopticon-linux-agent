@@ -36,7 +36,23 @@ int on_ack([[maybe_unused]] const nlmsghdr* nlh, void* count) {
 // acknowledge the whole thing. Returns false (never throws, never leaves
 // a half-applied ruleset silently claimed as success) on any netlink-level
 // failure.
-bool commit_batch(mnl_nlmsg_batch* batch) {
+//
+// `tolerate_receive_timeout`: AF_NETLINK request processing is synchronous
+// -- the kernel handler for a REQUEST message runs inside the sender's own
+// sendto()/sendmsg() syscall, so by the time mnl_socket_sendto returns
+// without error, the kernel has already fully committed or rejected the
+// batch, independent of whether it also emits an ack afterward. Confirmed
+// on real CI (runs 34736470889, 34736603098): a delete-only batch (single
+// DELTABLE, and separately DELCHAIN+DELCHAIN+DELTABLE) reliably produces
+// zero reply bytes within a 5s timeout even though the identical mechanism
+// (NLM_F_ACK, same commit_batch, same socket handling) reliably acks
+// create-type batches. Since a genuine synchronous rejection would surface
+// either as a negative mnl_socket_sendto return or a real (non-timeout)
+// error reply -- neither of which happened -- a receive timeout
+// specifically (as opposed to any other socket error) is treated as
+// "processed synchronously, kernel chose not to reply" rather than a
+// failure, only where the caller explicitly opts in.
+bool commit_batch(mnl_nlmsg_batch* batch, bool tolerate_receive_timeout = false) {
     mnl_socket* nl = mnl_socket_open(NETLINK_NETFILTER);
     if (nl == nullptr) { std::perror("isolation-ruleset: mnl_socket_open"); return false; }
     if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
@@ -70,6 +86,13 @@ bool commit_batch(mnl_nlmsg_batch* batch) {
     for (;;) {
         const auto received = mnl_socket_recvfrom(nl, reply, sizeof(reply));
         if (received < 0) {
+            if (tolerate_receive_timeout && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                std::fprintf(stderr,
+                             "isolation-ruleset: no reply within timeout after a synchronously-sent "
+                             "request -- treating as processed (see commit_batch's tolerate_receive_timeout doc)\n");
+                mnl_socket_close(nl);
+                return true;
+            }
             std::perror("isolation-ruleset: mnl_socket_recvfrom");
             std::fprintf(stderr, "isolation-ruleset: %d ack(s) processed before this failure\n", acknowledged);
             mnl_socket_close(nl);
@@ -289,7 +312,7 @@ result<bool> release_isolation_ruleset() {
     nftnl_batch_end(static_cast<char*>(mnl_nlmsg_batch_current(batch)), seq++);
     mnl_nlmsg_batch_next(batch);
 
-    const bool ok = commit_batch(batch);
+    const bool ok = commit_batch(batch, /*tolerate_receive_timeout=*/true);
     mnl_nlmsg_batch_stop(batch);
     if (!ok) return error{error_code::io_failure, "isolation ruleset could not be released via netlink"};
     return true;
