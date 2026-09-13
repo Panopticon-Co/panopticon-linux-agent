@@ -19,11 +19,17 @@ result APIs. The agent provides a libcurl HTTPS client when libcurl is available
 and hostname verification, bearer authentication, timeouts, bounded responses, and spool ACK
 semantics. A strict-configured executable can emit bounded canonical procfs snapshots.
 
-Enrollment, transport, and the command poll/dispatch/result runtime loop are fully wired. Of
-the closed 7-action response set, 5 are dispatched to a real bounded implementation
+Enrollment, transport, and the command poll/dispatch/result runtime loop are fully wired. All
+7 actions in the closed response set are dispatched to a real bounded implementation
 (`KILL_PROCESS`, `COLLECT_PROCESS_INFO`, `COLLECT_NETWORK_CONNECTIONS`, `COLLECT_FILE`,
-`QUARANTINE_FILE` -- see [RESPONSE.md](RESPONSE.md)). There is no eBPF adapter, file watcher,
-host-isolation implementation, or privileged helper yet. These are not claimed as complete.
+`QUARANTINE_FILE`, `ISOLATE_HOST`, `RELEASE_HOST_ISOLATION` -- see [RESPONSE.md](RESPONSE.md)).
+`ISOLATE_HOST`/`RELEASE_HOST_ISOLATION` are implemented via a separate, minimal privileged
+helper process (`panopticon-isolation-helper`) that holds `CAP_NET_ADMIN` so the main agent
+never does; see [ADR 004](docs/adr/004-host-isolation-privilege-boundary.md). CI proves real,
+non-loopback packet-level containment across network namespaces (not just IPC/state-file
+mechanics) -- see [docs/VM_VALIDATION_GAPS.md](docs/VM_VALIDATION_GAPS.md) for exactly what is
+CI-verified versus what still genuinely requires a VM. There is no eBPF adapter or file watcher
+yet. These are not claimed as complete.
 
 ## Development
 
