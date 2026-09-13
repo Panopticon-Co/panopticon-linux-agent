@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Runs the ADR 004 netlink spike inside an unprivileged, throwaway network
-# namespace, so it never touches the real host firewall and needs no real
-# root/sudo -- only unprivileged user namespaces, which CI (and any modern
-# Linux) already supports.
+# Runs the ADR 004 netlink spike inside a throwaway network namespace, so it
+# never touches the real host firewall.
+#
+# Prefers an unprivileged user+network namespace (no real root needed at
+# all). Some hardened distributions (including GitHub-hosted ubuntu-24.04
+# runners, via Ubuntu's AppArmor unprivileged-userns restriction) refuse
+# CLONE_NEWUSER for a non-root caller -- in that case this falls back to
+# `sudo unshare --net`, which still creates an isolated, empty network
+# namespace (distinct from the real host's), just using ambient sudo
+# instead of a user-namespace remap.
 set -euo pipefail
 
 SPIKE_BINARY="${1:?usage: run_isolation_namespace_spike.sh <path-to-isolation-namespace-spike>}"
@@ -12,4 +18,9 @@ if [ ! -x "${SPIKE_BINARY}" ]; then
     exit 1
 fi
 
-exec unshare --user --map-root-user --net -- "${SPIKE_BINARY}"
+if unshare --user --map-root-user --net -- true 2>/dev/null; then
+    exec unshare --user --map-root-user --net -- "${SPIKE_BINARY}"
+fi
+
+echo "unprivileged user namespaces are restricted here; falling back to sudo unshare --net" >&2
+exec sudo unshare --net -- "${SPIKE_BINARY}"
