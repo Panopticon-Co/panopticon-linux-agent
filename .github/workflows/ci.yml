@@ -5,12 +5,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install --yes libcurl4-openssl-dev
+      - run: sudo apt-get update && sudo apt-get install --yes libcurl4-openssl-dev libmnl-dev libnftnl-dev
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build --parallel
       - run: ctest --test-dir build --output-on-failure
       - run: ./build/panopticon-linux-agent tests/agent-test.conf > /tmp/panopticon.ndjson
       - run: test -s /tmp/panopticon.ndjson
+      - name: ADR 004 netlink de-risking spike (unprivileged network namespace)
+        run: |
+          chmod +x tests/e2e/run_isolation_namespace_spike.sh
+          tests/e2e/run_isolation_namespace_spike.sh build/isolation-namespace-spike
 
   sanitizers:
     runs-on: ubuntu-24.04
