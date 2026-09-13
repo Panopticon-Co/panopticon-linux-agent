@@ -23,6 +23,11 @@ jobs:
         run: |
           chmod +x tests/e2e/run_isolation_robustness_e2e.sh
           tests/e2e/run_isolation_robustness_e2e.sh build/panopticon-isolation-helper build/isolation-client-tool build/isolation-raw-frame-tool
+      - name: Isolation helper real non-loopback packet-level verification
+        run: |
+          sudo apt-get install --yes netcat-openbsd
+          chmod +x tests/e2e/run_isolation_packet_verification_e2e.sh
+          sudo tests/e2e/run_isolation_packet_verification_e2e.sh build/panopticon-isolation-helper build/isolation-client-tool
 
   sanitizers:
     runs-on: ubuntu-24.04
