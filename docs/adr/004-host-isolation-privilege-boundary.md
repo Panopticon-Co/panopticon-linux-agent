@@ -75,11 +75,16 @@ no per-command data to feed into a ruleset even if we wanted to. The
 helper's ruleset is entirely compiled in:
 
 - One table/chain, default-drop policy when isolated.
-- Static exceptions: loopback, `ESTABLISHED`/`RELATED` conntrack state, and
-  the Manager's `host:port`, resolved once and pinned at helper startup
-  (never re-resolved during isolation, so a DNS outage cannot bypass
-  isolation by re-resolving to an attacker address, nor can it extend an
-  isolation window by failing closed on release).
+- Static exceptions: loopback, and the Manager's `host:port` (both
+  directions), resolved once and pinned at helper startup (never
+  re-resolved during isolation, so a DNS outage cannot bypass isolation by
+  re-resolving to an attacker address, nor can it extend an isolation
+  window by failing closed on release). **Deliberately no
+  `ESTABLISHED`/`RELATED` conntrack exception**: exempting all established
+  connections would also keep an attacker's already-established connection
+  flowing straight through "isolation," which directly contradicts the
+  locked no-SSH-break-glass decision. Every connection except the pinned
+  Manager channel and loopback is dropped, established or not.
 - **No SSH break-glass exception.** Recovery is `RELEASE_HOST_ISOLATION`
   from the Manager, or local/console access to the host -- not a standing
   network hole in the isolation itself. (Locked decision.)

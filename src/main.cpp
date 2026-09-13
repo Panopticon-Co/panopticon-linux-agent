@@ -135,6 +135,19 @@ int main(int argc, char** argv) {
                         receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
                         receipt.summary = "quarantine result could not be durably queued";
                     }
+                } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded &&
+                           (received.action == panopticon::linux_agent::action_type::isolate_host ||
+                            received.action == panopticon::linux_agent::action_type::release_host_isolation)) {
+                    const auto opcode = received.action == panopticon::linux_agent::action_type::isolate_host
+                        ? panopticon::linux_agent::isolation_opcode::isolate
+                        : panopticon::linux_agent::isolation_opcode::release;
+                    const auto isolated = settings.isolation_socket_path.empty()
+                        ? panopticon::linux_agent::result<bool>{panopticon::linux_agent::error{panopticon::linux_agent::error_code::unsupported_action, "isolation helper is not configured"}}
+                        : panopticon::linux_agent::request_isolation(settings.isolation_socket_path, opcode, received.command_id);
+                    if (!panopticon::linux_agent::succeeded(isolated) || !std::get<bool>(isolated)) {
+                        receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
+                        receipt.summary = "isolation helper rejected or was unreachable for this request";
+                    }
                 } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded) {
                     receipt.code = panopticon::linux_agent::receipt_code::unsupported_action;
                     receipt.summary = "action handler is not available in this agent build";

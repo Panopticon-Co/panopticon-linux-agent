@@ -103,6 +103,8 @@ result<command> parse_command_json(const std::string_view payload) {
     else if (action == "COLLECT_NETWORK_CONNECTIONS") action_type_value = action_type::collect_network_connections;
     else if (action == "COLLECT_FILE") action_type_value = action_type::collect_file;
     else if (action == "QUARANTINE_FILE") action_type_value = action_type::quarantine_file;
+    else if (action == "ISOLATE_HOST") action_type_value = action_type::isolate_host;
+    else if (action == "RELEASE_HOST_ISOLATION") action_type_value = action_type::release_host_isolation;
     else return error{error_code::unsupported_action, "command action is not supported by this agent build"};
     const bool is_process_action = action_type_value == action_type::kill_process || action_type_value == action_type::collect_process_info;
     const bool is_file_action = action_type_value == action_type::collect_file || action_type_value == action_type::quarantine_file;
@@ -171,7 +173,8 @@ command_receipt command_gate::validate_and_mark(const command& received) {
     }
     if (received.action != action_type::kill_process && received.action != action_type::collect_process_info &&
         received.action != action_type::collect_network_connections && received.action != action_type::collect_file &&
-        received.action != action_type::quarantine_file) {
+        received.action != action_type::quarantine_file && received.action != action_type::isolate_host &&
+        received.action != action_type::release_host_isolation) {
         return {received.command_id, received.correlation_id, receipt_code::unsupported_action, "action is not implemented"};
     }
     if (received.action == action_type::kill_process && is_protected_process(received.process_target.pid)) {

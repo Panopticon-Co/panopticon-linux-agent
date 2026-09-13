@@ -1,0 +1,42 @@
+[Unit]
+Description=Panopticon host-isolation privileged helper (CAP_NET_ADMIN only)
+After=network-online.target
+Wants=network-online.target
+Before=panopticon-linux-agent.service
+
+[Service]
+Type=simple
+User=root
+Group=panopticon
+# The ONLY capability this process ever holds. It never runs a shell, nft,
+# iptables, or any other subprocess -- see docs/adr/004 and isolation_ruleset.cpp.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+# Socket/state paths and the manager host:port are fixed here, not derived
+# from any command content (ADR 004). "panopticon" is the unprivileged
+# agent's own systemd User= (see panopticon-linux-agent.service) -- the
+# helper resolves it to a UID at startup and checks SO_PEERCRED against it.
+ExecStart=/usr/bin/panopticon-isolation-helper \
+    /run/panopticon-agent/isolation.sock \
+    /var/lib/panopticon-agent/isolation.state \
+    manager.internal \
+    443 \
+    panopticon
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Not RuntimeDirectory=/StateDirectory= -- panopticon-linux-agent.service
+# already expects these paths to pre-exist (see its own ReadWritePaths=);
+# declaring them here too, under this unit's different User=/Group=, would
+# race that unit for ownership of the same directories. Provisioning
+# creates /run/panopticon-agent and /var/lib/panopticon-agent owned
+# root:panopticon, mode 0750, once (see BUILD.md).
+ReadWritePaths=/run/panopticon-agent /var/lib/panopticon-agent
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+
+[Install]
+WantedBy=multi-user.target

@@ -44,7 +44,7 @@ result<agent_config> parse_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 13U> allowed{"manager_url", "agent_id", "host_id", "queue_capacity", "spool_quota_bytes", "maximum_event_bytes", "maximum_batch_bytes", "response_enabled", "identity_path", "enrollment_token_path", "spool_path", "file_collection_root", "quarantine_root"};
+    constexpr std::array<std::string_view, 14U> allowed{"manager_url", "agent_id", "host_id", "queue_capacity", "spool_quota_bytes", "maximum_event_bytes", "maximum_batch_bytes", "response_enabled", "identity_path", "enrollment_token_path", "spool_path", "file_collection_root", "quarantine_root", "isolation_socket_path"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) return error{error_code::invalid_input, "unknown configuration key"};
@@ -75,8 +75,9 @@ result<agent_config> parse_config(const std::string_view contents) {
     }
     const auto file_collection_root = required("file_collection_root").value_or("");
     const auto quarantine_root = required("quarantine_root").value_or("");
+    const auto isolation_socket_path = required("isolation_socket_path").value_or("");
     return agent_config{*url, *agent, *host, *queue_value, *spool_value, *event_value, *batch_value, *response == "true",
-                        identity_path, enrollment_token_path, spool_path, file_collection_root, quarantine_root};
+                        identity_path, enrollment_token_path, spool_path, file_collection_root, quarantine_root, isolation_socket_path};
 }
 
 result<agent_config> load_config_file(const std::filesystem::path& path) {

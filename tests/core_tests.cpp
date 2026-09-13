@@ -4,6 +4,7 @@
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/health.hpp"
+#include "panopticon/linux_agent/isolation.hpp"
 #include "panopticon/linux_agent/network.hpp"
 #include "panopticon/linux_agent/queue.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
@@ -348,7 +349,7 @@ void test_command_parser_accepts_only_closed_manager_envelopes() {
     require(!succeeded(parse_command_json(std::string{command_json}.replace(0U, 1U, "["))), "non-object command must reject");
 }
 
-void test_command_parser_accepts_file_actions_and_rejects_isolation() {
+void test_command_parser_accepts_file_and_isolation_actions() {
     constexpr std::string_view collect_file_json{
         "{\"command_id\":\"cmd-2\",\"agent_id\":\"agent-1\",\"action\":\"COLLECT_FILE\","
         "\"expires_at\":\"2030-01-02T03:04:05+00:00\",\"target\":{\"path\":\"/tmp/evidence.txt\"},"
@@ -378,11 +379,50 @@ void test_command_parser_accepts_file_actions_and_rejects_isolation() {
         "\"expires_at\":\"2030-01-02T03:04:05+00:00\",\"target\":{},"
         "\"correlation_id\":\"correlation-5\",\"created_at\":\"2030-01-01T03:04:05+00:00\","
         "\"schema_version\":\"1\",\"host_id\":\"host-1\"}"};
-    require(!succeeded(parse_command_json(isolate_json)), "ISOLATE_HOST is not yet implemented and must not parse");
+    const auto parsed_isolate = parse_command_json(isolate_json);
+    require(succeeded(parsed_isolate), "ISOLATE_HOST must parse under the closed action set");
+    require(std::get<command>(parsed_isolate).action == action_type::isolate_host, "parser must classify the action correctly");
+
+    constexpr std::string_view release_json{
+        "{\"command_id\":\"cmd-6\",\"agent_id\":\"agent-1\",\"action\":\"RELEASE_HOST_ISOLATION\","
+        "\"expires_at\":\"2030-01-02T03:04:05+00:00\",\"target\":{},"
+        "\"correlation_id\":\"correlation-6\",\"created_at\":\"2030-01-01T03:04:05+00:00\","
+        "\"schema_version\":\"1\",\"host_id\":\"host-1\"}"};
+    require(succeeded(parse_command_json(release_json)), "RELEASE_HOST_ISOLATION must parse under the closed action set");
+
+    require(!succeeded(parse_command_json("{\"action\":\"BLOCK_FIREWALL_IP\"}")),
+            "no action beyond the closed 7-tuple may ever parse");
 
     command_gate gate{"agent-1", "host-1", [] { return std::chrono::sys_seconds{std::chrono::seconds{100}}; }};
     auto collect_command = std::get<command>(parsed_collect);
     require(gate.validate_and_mark(collect_command).code == receipt_code::succeeded, "the gate must accept COLLECT_FILE");
+    command_gate isolation_gate{"agent-1", "host-1", [] { return std::chrono::sys_seconds{std::chrono::seconds{100}}; }};
+    auto isolate_command = std::get<command>(parsed_isolate);
+    require(isolation_gate.validate_and_mark(isolate_command).code == receipt_code::succeeded, "the gate must accept ISOLATE_HOST");
+}
+
+void test_isolation_ipc_frame_is_closed_and_bounded() {
+    const auto encoded = encode_isolation_request(isolation_opcode::isolate, "cmd-1");
+    require(succeeded(encoded), "a valid isolate request must encode");
+    require(std::get<std::string>(encoded).size() == kIsolationRequestFrameSize, "the frame must always be the fixed size");
+    const auto decoded = decode_isolation_request(std::get<std::string>(encoded));
+    require(succeeded(decoded), "an encoded frame must decode");
+    require(std::get<std::pair<isolation_opcode, std::string>>(decoded).first == isolation_opcode::isolate, "opcode must round-trip");
+    require(std::get<std::pair<isolation_opcode, std::string>>(decoded).second == "cmd-1", "command_id must round-trip");
+
+    require(!succeeded(encode_isolation_request(isolation_opcode::isolate, "bad id with spaces")),
+            "an invalid identifier must not encode");
+    require(!succeeded(decode_isolation_request("too short")), "a frame of the wrong size must not decode");
+
+    std::string tampered_padding(kIsolationRequestFrameSize, '\0');
+    tampered_padding[0] = static_cast<char>(static_cast<std::uint8_t>(isolation_opcode::release));
+    tampered_padding[5] = 'x';
+    tampered_padding[kIsolationRequestFrameSize - 1U] = 'Z';  // non-zero byte after the id's own terminator
+    require(!succeeded(decode_isolation_request(tampered_padding)), "non-zero trailing padding must be rejected");
+
+    std::string unknown_opcode(kIsolationRequestFrameSize, '\0');
+    unknown_opcode[0] = static_cast<char>(99);
+    require(!succeeded(decode_isolation_request(unknown_opcode)), "an opcode outside the closed pair must be rejected");
 }
 
 void test_command_gate_uses_durable_replay_ledger() {
@@ -447,7 +487,8 @@ int main() {
         test_configuration_rejects_unknown_and_insecure_values();
         test_command_gate_rejects_expiry_replay_and_pid_one();
         test_command_parser_accepts_only_closed_manager_envelopes();
-        test_command_parser_accepts_file_actions_and_rejects_isolation();
+        test_command_parser_accepts_file_and_isolation_actions();
+        test_isolation_ipc_frame_is_closed_and_bounded();
         test_command_gate_uses_durable_replay_ledger();
         test_command_result_is_typed_and_bounded();
         test_collect_process_info_rejects_pid_reuse();
