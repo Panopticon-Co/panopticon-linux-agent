@@ -92,6 +92,14 @@ int main(int argc, char** argv) {
             if (panopticon::linux_agent::succeeded(commands)) for (const auto& received : std::get<std::vector<panopticon::linux_agent::command>>(commands)) {
                 panopticon::linux_agent::command_gate gate{settings.agent_id, settings.host_id, [] { return std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()); }, &ledger};
                 auto receipt = gate.validate_and_mark(received);
+                if (receipt.code == panopticon::linux_agent::receipt_code::succeeded) {
+                    // Best-effort DISPATCHED -> ACCEPTED acknowledgement: this agent has
+                    // validated the command and is about to execute it. The outcome is
+                    // intentionally ignored -- Manager accepts a result submitted straight
+                    // from DISPATCHED too, so a failed/unreachable accept() must never block
+                    // execution of an already-validated command.
+                    (void)client.accept_command(settings.manager_url, std::get<panopticon::linux_agent::enrolled_identity>(identity), received.command_id);
+                }
                 if (receipt.code == panopticon::linux_agent::receipt_code::succeeded && received.action == panopticon::linux_agent::action_type::kill_process) {
                     if (!panopticon::linux_agent::succeeded(panopticon::linux_agent::terminate_process("/proc", received.process_target))) receipt.code = panopticon::linux_agent::receipt_code::execution_failed;
                 } else if (receipt.code == panopticon::linux_agent::receipt_code::succeeded && received.action == panopticon::linux_agent::action_type::collect_process_info) {

@@ -161,6 +161,37 @@ result<std::string> curl_https_client::poll_commands(const std::string& manager_
 #endif
 }
 
+transport_outcome curl_https_client::accept_command(const std::string& manager_url, const enrolled_identity& identity,
+                                                     const std::string& command_id) const {
+    if (manager_url.rfind("https://", 0U) != 0U || !is_valid_identifier(identity.agent_id) ||
+        !is_valid_identifier(command_id) || identity.bearer_token.empty() || timeout_seconds_ <= 0L) {
+        return transport_outcome::rejected;
+    }
+#ifndef PANOPTICON_HAVE_CURL
+    return transport_outcome::retryable;
+#else
+    if (!initialize_curl()) return transport_outcome::retryable;
+    CURL* handle = curl_easy_init(); if (handle == nullptr) return transport_outcome::retryable;
+    response_sink sink{maximum_response_bytes_, {}};
+    const auto endpoint = without_trailing_slash(manager_url) + "/api/v1/agents/" + identity.agent_id +
+        "/commands/" + command_id + "/accept";
+    curl_slist* headers = nullptr;
+    const auto auth_header = "Authorization: Bearer " + identity.bearer_token;
+    headers = curl_slist_append(headers, auth_header.c_str());
+    curl_easy_setopt(handle, CURLOPT_URL, endpoint.c_str()); curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, ""); curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE, 0L);
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L); curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, timeout_seconds_); curl_easy_setopt(handle, CURLOPT_TIMEOUT, timeout_seconds_);
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, capture_bounded_response); curl_easy_setopt(handle, CURLOPT_WRITEDATA, &sink);
+    const auto code = curl_easy_perform(handle); long status{}; curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers); curl_easy_cleanup(handle);
+    if (code != CURLE_OK) return transport_outcome::retryable;
+    if (status == 200L && sink.contents.find("\"accepted\":true") != std::string::npos) return transport_outcome::acknowledged;
+    if (status == 401L || status == 403L) return transport_outcome::authentication_failed;
+    return status == 429L || status >= 500L ? transport_outcome::retryable : transport_outcome::rejected;
+#endif
+}
+
 transport_outcome curl_https_client::submit_command_result(const std::string& manager_url,
                                                             const enrolled_identity& identity,
                                                             const std::string& payload) const {

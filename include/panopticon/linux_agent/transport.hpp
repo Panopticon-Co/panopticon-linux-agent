@@ -30,6 +30,13 @@ public:
                                                     const std::string& bootstrap_token) const;
     [[nodiscard]] result<std::string> poll_commands(const std::string& manager_url,
                                                      const enrolled_identity& identity) const;
+    // Optional DISPATCHED -> ACCEPTED acknowledgement (POST .../commands/{id}/accept),
+    // sent after this agent has validated a polled command and before it starts
+    // executing it. Best-effort: Manager treats a result submitted straight from
+    // DISPATCHED as legal too, so a failure here never blocks execution -- callers
+    // should ignore the outcome and proceed to execute regardless.
+    [[nodiscard]] transport_outcome accept_command(const std::string& manager_url, const enrolled_identity& identity,
+                                                    const std::string& command_id) const;
     [[nodiscard]] transport_outcome submit_command_result(const std::string& manager_url,
                                                            const enrolled_identity& identity,
                                                            const std::string& payload) const;
