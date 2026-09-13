@@ -55,6 +55,10 @@ bool commit_batch(mnl_nlmsg_batch* batch) {
         if (received == 0) break;
         const auto result = mnl_cb_run(reply, static_cast<std::size_t>(received), 0, portid, on_ack, &acknowledged);
         if (result < 0) {
+            // ENOENT here means "delete a table that doesn't exist yet" --
+            // the expected first-run/idempotent-release case, not a real
+            // failure. Any other error still fails the whole batch.
+            if (errno == ENOENT) continue;
             std::fprintf(stderr, "isolation-ruleset: mnl_cb_run: %s\n", std::strerror(errno));
             mnl_socket_close(nl);
             return false;
