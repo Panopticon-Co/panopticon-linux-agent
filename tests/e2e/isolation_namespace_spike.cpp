@@ -18,6 +18,7 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_tables.h>
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -39,6 +40,7 @@ bool send_and_await_ack(mnl_socket* nl, const nlmsghdr* nlh, const std::uint32_t
     auto received = mnl_socket_recvfrom(nl, reply, sizeof(reply));
     while (received > 0) {
         const auto result = mnl_cb_run(reply, static_cast<std::size_t>(received), seq, portid, nullptr, nullptr);
+        if (result < 0) std::fprintf(stderr, "mnl_cb_run: %s\n", std::strerror(errno));
         if (result <= 0) return result == 0;
         received = mnl_socket_recvfrom(nl, reply, sizeof(reply));
     }
