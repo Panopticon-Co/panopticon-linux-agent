@@ -56,16 +56,25 @@ bool commit_batch(mnl_nlmsg_batch* batch) {
         return false;
     }
     const auto portid = mnl_socket_get_portid(nl);
-    if (mnl_socket_sendto(nl, mnl_nlmsg_batch_head(batch), mnl_nlmsg_batch_size(batch)) < 0) {
+    const auto batch_size = mnl_nlmsg_batch_size(batch);
+    const auto sent = mnl_socket_sendto(nl, mnl_nlmsg_batch_head(batch), batch_size);
+    if (sent < 0) {
         std::perror("isolation-ruleset: mnl_socket_sendto");
         mnl_socket_close(nl);
         return false;
     }
+    std::fprintf(stderr, "isolation-ruleset: sent %zd of %zu batch bytes, portid=%u, awaiting reply\n",
+                 sent, batch_size, portid);
     char reply[kNetlinkBufferBytes];
     int acknowledged = 0;
     for (;;) {
         const auto received = mnl_socket_recvfrom(nl, reply, sizeof(reply));
-        if (received < 0) { std::perror("isolation-ruleset: mnl_socket_recvfrom"); mnl_socket_close(nl); return false; }
+        if (received < 0) {
+            std::perror("isolation-ruleset: mnl_socket_recvfrom");
+            std::fprintf(stderr, "isolation-ruleset: %d ack(s) processed before this failure\n", acknowledged);
+            mnl_socket_close(nl);
+            return false;
+        }
         if (received == 0) break;
         const auto result = mnl_cb_run(reply, static_cast<std::size_t>(received), 0, portid, on_ack, &acknowledged);
         if (result < 0) {
