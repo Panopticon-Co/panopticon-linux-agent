@@ -2,6 +2,8 @@
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
 
+#include <algorithm>
+#include <array>
 #include <utility>
 #include <sstream>
 #include <charconv>
@@ -61,6 +63,58 @@ std::optional<std::uint64_t> unsigned_field(const std::string_view payload, cons
     return value;
 }
 
+// Rejects any top-level key not in the closed command envelope, matching
+// panopticon-agent's explicit allowed_keys enumeration and
+// response_engine.contract.Command's extra="forbid" -- see
+// panopticon-contracts/docs/SECURITY.md invariant 2. This parser is a
+// hand-rolled substring scanner rather than a full JSON tokenizer, but a
+// correct top-level-key check is still possible without one: parse_command_json
+// has already rejected any payload containing a backslash, so no string in
+// this payload can contain an escaped quote, which means a bare '"' always
+// either opens or closes a complete, un-escaped string token. Depth is
+// tracked so only KEYS at the outermost object (depth 1, i.e. inside the
+// single top-level '{') are checked -- nested content such as target's own
+// keys is intentionally not inspected here (each action handler validates
+// target's shape separately).
+bool has_only_known_top_level_keys(const std::string_view payload) {
+    static constexpr std::array<std::string_view, 9> allowed_keys{
+        "command_id", "agent_id", "host_id", "schema_version", "action",
+        "expires_at", "created_at", "correlation_id", "target"};
+    std::size_t depth{};
+    std::size_t index{};
+    while (index < payload.size()) {
+        const char character = payload[index];
+        if (character == '{' || character == '[') {
+            ++depth;
+            ++index;
+        } else if (character == '}' || character == ']') {
+            --depth;
+            ++index;
+        } else if (character == '"') {
+            const auto end = payload.find('"', index + 1U);
+            if (end == std::string_view::npos) return false;
+            if (depth == 1U) {
+                const auto token = payload.substr(index + 1U, end - index - 1U);
+                std::size_t lookahead = end + 1U;
+                while (lookahead < payload.size() &&
+                       (payload[lookahead] == ' ' || payload[lookahead] == '\t' ||
+                        payload[lookahead] == '\n' || payload[lookahead] == '\r')) {
+                    ++lookahead;
+                }
+                const bool is_key = lookahead < payload.size() && payload[lookahead] == ':';
+                if (is_key &&
+                    std::find(allowed_keys.begin(), allowed_keys.end(), token) == allowed_keys.end()) {
+                    return false;
+                }
+            }
+            index = end + 1U;
+        } else {
+            ++index;
+        }
+    }
+    return true;
+}
+
 std::optional<std::chrono::sys_seconds> utc_timestamp(const std::string_view value) {
     if (value.size() < 20U || (value.back() != 'Z' && value.substr(value.size() - 6U) != "+00:00")) return std::nullopt;
     const auto digits = [&](const std::size_t offset, const std::size_t count) -> std::optional<int> {
@@ -85,6 +139,9 @@ std::optional<std::chrono::sys_seconds> utc_timestamp(const std::string_view val
 result<command> parse_command_json(const std::string_view payload) {
     if (payload.size() < 2U || payload.size() > 8192U || payload.front() != '{' || payload.back() != '}' ||
         payload.find('\\') != std::string_view::npos) return error{error_code::invalid_input, "command JSON is invalid"};
+    if (!has_only_known_top_level_keys(payload)) {
+        return error{error_code::invalid_input, "command JSON contains an unexpected field"};
+    }
     const auto command_id = string_field(payload, "command_id");
     const auto agent_id = string_field(payload, "agent_id");
     const auto host_id = string_field(payload, "host_id");

@@ -349,6 +349,17 @@ void test_command_parser_accepts_only_closed_manager_envelopes() {
     require(succeeded(poll) && std::get<std::vector<command>>(poll).size() == 1U, "bounded command poll must decode canonical commands");
     require(!succeeded(parse_command_json("{\"action\":\"EXECUTE_COMMAND\"}")), "arbitrary execution must never parse");
     require(!succeeded(parse_command_json(std::string{command_json}.replace(0U, 1U, "["))), "non-object command must reject");
+
+    // panopticon-contracts/docs/SECURITY.md invariant 2 requires no field outside
+    // the closed command envelope to be tolerated, matching panopticon-agent's
+    // explicit allowed_keys enumeration and response_engine.contract.Command's
+    // extra="forbid". This parser previously extracted only recognized fields
+    // and never checked for additional top-level keys -- a smuggled field would
+    // have been silently ignored rather than rejected.
+    const std::string smuggled_shell_json =
+        std::string{command_json}.substr(0U, command_json.size() - 1U) + ",\"shell\":\"rm -rf /\"}";
+    require(!succeeded(parse_command_json(smuggled_shell_json)),
+            "a command envelope with an unrecognized top-level field must be rejected outright");
 }
 
 void test_command_parser_accepts_file_and_isolation_actions() {
@@ -447,6 +458,31 @@ void test_command_result_is_typed_and_bounded() {
     require(!succeeded(serialize_command_result({"cmd-1", "correlation-1", receipt_code::succeeded, ""}, 4U)), "receipt must be bounded");
 }
 
+// Locks the receipt_code -> wire outcome collapse this agent uses, so it
+// cannot silently drift from the mapping documented in
+// panopticon-contracts/docs/CONTRACT.md section 3 (and independently
+// verified byte-for-byte against panopticon-agent's own collapse in the
+// same source-audit pass that added this test).
+void test_receipt_code_collapses_to_the_canonical_three_wire_outcomes() {
+    const auto outcome_of = [](receipt_code code) {
+        const auto result = serialize_command_result({"cmd-1", "correlation-1", code, "x"}, 512U);
+        require(succeeded(result), "every receipt_code must still serialize to a bounded receipt");
+        const auto& text = std::get<std::string>(result);
+        if (text.find("\"outcome\":\"succeeded\"") != std::string::npos) return std::string{"succeeded"};
+        if (text.find("\"outcome\":\"failed\"") != std::string::npos) return std::string{"failed"};
+        if (text.find("\"outcome\":\"rejected\"") != std::string::npos) return std::string{"rejected"};
+        return std::string{"unknown"};
+    };
+    require(outcome_of(receipt_code::succeeded) == "succeeded", "succeeded must stay succeeded");
+    require(outcome_of(receipt_code::execution_failed) == "failed", "execution_failed is the only code that collapses to failed");
+    require(outcome_of(receipt_code::invalid_command) == "rejected", "invalid_command must collapse to rejected");
+    require(outcome_of(receipt_code::expired) == "rejected", "expired must collapse to rejected");
+    require(outcome_of(receipt_code::replay_detected) == "rejected", "replay_detected must collapse to rejected");
+    require(outcome_of(receipt_code::target_mismatch) == "rejected", "target_mismatch must collapse to rejected");
+    require(outcome_of(receipt_code::target_protected) == "rejected", "target_protected must collapse to rejected");
+    require(outcome_of(receipt_code::unsupported_action) == "rejected", "unsupported_action must collapse to rejected");
+}
+
 void test_collect_process_info_rejects_pid_reuse() {
 #ifdef __linux__
     const auto directory = temporary_directory();
@@ -495,6 +531,7 @@ int main() {
         test_isolation_ipc_frame_is_closed_and_bounded();
         test_command_gate_uses_durable_replay_ledger();
         test_command_result_is_typed_and_bounded();
+        test_receipt_code_collapses_to_the_canonical_three_wire_outcomes();
         test_collect_process_info_rejects_pid_reuse();
     } catch (const std::exception& error) {
         std::cerr << "test failure: " << error.what() << '\n';
