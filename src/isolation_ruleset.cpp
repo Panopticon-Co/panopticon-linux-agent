@@ -18,6 +18,11 @@
 namespace panopticon::linux_agent {
 namespace {
 
+// MNL_SOCKET_BUFFER_SIZE is a runtime expression (page-size based) in
+// libmnl, not a compile-time constant, so it cannot size a stack array
+// under -Werror=vla. 8192 bytes matches libmnl's own upper bound.
+constexpr std::size_t kNetlinkBufferBytes{8192U};
+
 int on_ack([[maybe_unused]] const nlmsghdr* nlh, void* count) {
     ++(*static_cast<int*>(count));
     return MNL_CB_OK;
@@ -36,7 +41,7 @@ bool commit_batch(mnl_nlmsg_batch* batch) {
         mnl_socket_close(nl);
         return false;
     }
-    char reply[MNL_SOCKET_BUFFER_SIZE];
+    char reply[kNetlinkBufferBytes];
     int acknowledged = 0;
     for (;;) {
         const auto received = mnl_socket_recvfrom(nl, reply, sizeof(reply));
@@ -142,7 +147,7 @@ result<bool> apply_isolation_ruleset(const std::uint32_t manager_ipv4_network_or
     // Offsets: IPv4 header saddr/daddr are always at bytes 12/16; TCP
     // header sport/dport are always at bytes 0/2 -- fixed by protocol, not
     // configuration, so no bounds/validation branch is needed here.
-    char raw_buffer[16U * MNL_SOCKET_BUFFER_SIZE];
+    char raw_buffer[16U * kNetlinkBufferBytes];
     mnl_nlmsg_batch* batch = mnl_nlmsg_batch_start(raw_buffer, sizeof(raw_buffer));
     std::uint32_t seq = static_cast<std::uint32_t>(std::time(nullptr));
 
@@ -206,7 +211,7 @@ result<bool> apply_isolation_ruleset(const std::uint32_t manager_ipv4_network_or
 }
 
 result<bool> release_isolation_ruleset() {
-    char raw_buffer[4U * MNL_SOCKET_BUFFER_SIZE];
+    char raw_buffer[4U * kNetlinkBufferBytes];
     mnl_nlmsg_batch* batch = mnl_nlmsg_batch_start(raw_buffer, sizeof(raw_buffer));
     std::uint32_t seq = static_cast<std::uint32_t>(std::time(nullptr));
 
