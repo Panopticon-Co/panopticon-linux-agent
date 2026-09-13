@@ -11,6 +11,9 @@
 #include <linux/netfilter/nf_tables.h>
 #include <linux/in.h>
 
+#include <sys/socket.h>
+#include <sys/time.h>
+
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -38,6 +41,17 @@ bool commit_batch(mnl_nlmsg_batch* batch) {
     if (nl == nullptr) { std::perror("isolation-ruleset: mnl_socket_open"); return false; }
     if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
         std::perror("isolation-ruleset: mnl_socket_bind");
+        mnl_socket_close(nl);
+        return false;
+    }
+    // Defense in depth against a batch with no NLM_F_ACK-flagged message
+    // ever getting a kernel reply at all (see the release-path fix below,
+    // NLM_F_ACK is now always requested) -- a privileged daemon must never
+    // block indefinitely on a netlink call regardless of how the batch was
+    // built, so a bounded receive timeout is enforced independently.
+    timeval receive_timeout{.tv_sec = 5, .tv_usec = 0};
+    if (setsockopt(mnl_socket_get_fd(nl), SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout)) < 0) {
+        std::perror("isolation-ruleset: setsockopt(SO_RCVTIMEO)");
         mnl_socket_close(nl);
         return false;
     }
@@ -235,10 +249,15 @@ result<bool> release_isolation_ruleset() {
     nftnl_table* table = nftnl_table_alloc();
     nftnl_table_set_str(table, NFTNL_TABLE_NAME, std::string{kIsolationTableName}.c_str());
     nftnl_table_set_u32(table, NFTNL_TABLE_FAMILY, NFPROTO_INET);
-    // No NLM_F_ACK: releasing when not isolated (table absent) must be a
-    // silent, idempotent no-op success, not a reported error.
+    // NLM_F_ACK is required here, not optional: a batch with no
+    // NLM_F_ACK-flagged message never gets any reply at all from the
+    // kernel, so commit_batch's mnl_socket_recvfrom blocked forever on
+    // every release (this was a real, reproduced-in-CI hang, not a
+    // hypothetical). Releasing when not isolated (table absent) is still a
+    // silent, idempotent no-op success -- that is handled by commit_batch
+    // tolerating ENOENT specifically, not by suppressing the ack.
     nlmsghdr* nlh = nftnl_table_nlmsg_build_hdr(static_cast<char*>(mnl_nlmsg_batch_current(batch)), NFT_MSG_DELTABLE,
-                                                 NFPROTO_INET, 0U, seq++);
+                                                 NFPROTO_INET, NLM_F_ACK, seq++);
     nftnl_table_nlmsg_build_payload(nlh, table);
     nftnl_table_free(table);
     mnl_nlmsg_batch_next(batch);

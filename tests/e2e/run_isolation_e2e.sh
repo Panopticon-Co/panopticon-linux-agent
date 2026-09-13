@@ -46,22 +46,26 @@ run_inside_namespace bash -c "
     done
     [ -S '${SOCKET_PATH}' ] || { echo 'helper socket never appeared'; exit 1; }
 
+    # Bounded independently of the isolation helper's own netlink receive
+    # timeout: a client call must fail fast (seconds), never hang the whole
+    # CI job for its full runner timeout, regardless of which side of the
+    # IPC round-trip a future regression breaks.
     echo '--- isolate ---'
-    '${CLIENT_BINARY}' '${SOCKET_PATH}' isolate cmd-e2e-1
+    timeout 10s '${CLIENT_BINARY}' '${SOCKET_PATH}' isolate cmd-e2e-1
     grep -qx isolated '${STATE_PATH}' || { echo 'state file does not record isolation'; exit 1; }
 
     echo '--- idempotent re-isolate ---'
-    '${CLIENT_BINARY}' '${SOCKET_PATH}' isolate cmd-e2e-2
+    timeout 10s '${CLIENT_BINARY}' '${SOCKET_PATH}' isolate cmd-e2e-2
 
     echo '--- release ---'
-    '${CLIENT_BINARY}' '${SOCKET_PATH}' release cmd-e2e-3
+    timeout 10s '${CLIENT_BINARY}' '${SOCKET_PATH}' release cmd-e2e-3
     if grep -qx isolated '${STATE_PATH}' 2>/dev/null; then
         echo 'state file still claims isolation after release'
         exit 1
     fi
 
     echo '--- idempotent re-release ---'
-    '${CLIENT_BINARY}' '${SOCKET_PATH}' release cmd-e2e-4
+    timeout 10s '${CLIENT_BINARY}' '${SOCKET_PATH}' release cmd-e2e-4
 
     echo 'isolation e2e cycle succeeded'
 "
