@@ -1,11 +1,13 @@
 #include "panopticon/linux_agent/transport.hpp"
 #include <random>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <mutex>
 
 #ifdef PANOPTICON_HAVE_CURL
 #include <curl/curl.h>
+#include <openssl/evp.h>
 #endif
 
 namespace panopticon::linux_agent {
@@ -55,6 +57,30 @@ std::string json_string_value(const std::string& body, const std::string& key) {
     if (end == std::string::npos || body.find('\\', value_begin) < end) return {};
     return body.substr(value_begin, end - value_begin);
 }
+
+// Thin wrappers over OpenSSL's EVP_EncodeBlock/EVP_DecodeBlock -- no new
+// base64 implementation to review or get wrong.
+std::string base64_encode(const std::uint8_t* data, const std::size_t size) {
+    std::string out(4U * ((size + 2U) / 3U) + 1U, '\0');
+    const int written =
+        EVP_EncodeBlock(reinterpret_cast<unsigned char*>(out.data()), data, static_cast<int>(size));
+    out.resize(written < 0 ? 0U : static_cast<std::size_t>(written));
+    return out;
+}
+
+std::optional<std::vector<std::uint8_t>> base64_decode(const std::string& text) {
+    if (text.empty() || text.size() % 4U != 0U) return std::nullopt;
+    std::vector<std::uint8_t> out(text.size() / 4U * 3U);
+    const int written =
+        EVP_DecodeBlock(out.data(), reinterpret_cast<const unsigned char*>(text.data()), static_cast<int>(text.size()));
+    if (written < 0) return std::nullopt;
+    std::size_t padding = 0U;
+    if (text.size() >= 1U && text[text.size() - 1U] == '=') ++padding;
+    if (text.size() >= 2U && text[text.size() - 2U] == '=') ++padding;
+    if (static_cast<std::size_t>(written) < padding) return std::nullopt;
+    out.resize(static_cast<std::size_t>(written) - padding);
+    return out;
+}
 }
 #endif
 
@@ -91,11 +117,9 @@ transport_outcome curl_https_client::post_ndjson(const std::string& https_url, c
 #endif
 }
 
-result<enrolled_identity> curl_https_client::enroll(const std::string& manager_url, const std::string& agent_id,
-                                                     const std::string& host_id, const std::string& bootstrap_token) const {
-    if (manager_url.rfind("https://", 0U) != 0U || !is_valid_identifier(agent_id) || !is_valid_identifier(host_id) ||
-        bootstrap_token.empty() || bootstrap_token.size() > 512U || timeout_seconds_ <= 0L) {
-        return error{error_code::invalid_input, "enrollment input is invalid"};
+result<std::string> curl_https_client::request_enrollment_challenge(const std::string& manager_url) const {
+    if (manager_url.rfind("https://", 0U) != 0U || timeout_seconds_ <= 0L) {
+        return error{error_code::invalid_input, "enrollment challenge input is invalid"};
     }
 #ifndef PANOPTICON_HAVE_CURL
     return error{error_code::unsupported_action, "HTTPS enrollment requires libcurl"};
@@ -104,7 +128,54 @@ result<enrolled_identity> curl_https_client::enroll(const std::string& manager_u
     CURL* handle = curl_easy_init();
     if (handle == nullptr) return error{error_code::io_failure, "cannot allocate HTTPS client"};
     response_sink sink{maximum_response_bytes_, {}};
-    const auto body = "{\"agent_id\":\"" + agent_id + "\",\"host_id\":\"" + host_id + "\"}";
+    const auto endpoint = without_trailing_slash(manager_url) + "/api/v1/agents/enrollment-challenge";
+    curl_easy_setopt(handle, CURLOPT_URL, endpoint.c_str());
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, "");
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE, 0L);
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, timeout_seconds_);
+    curl_easy_setopt(handle, CURLOPT_TIMEOUT, timeout_seconds_);
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, capture_bounded_response);
+    curl_easy_setopt(handle, CURLOPT_WRITEDATA, &sink);
+    const auto code = curl_easy_perform(handle);
+    long status{};
+    curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_cleanup(handle);
+    if (code != CURLE_OK) return error{error_code::io_failure, "enrollment challenge transport failure"};
+    if (status != 200L) return error{error_code::io_failure, "enrollment challenge service rejected request"};
+    const auto nonce = json_string_value(sink.contents, "nonce");
+    if (nonce.empty() || nonce.size() > 64U) {
+        return error{error_code::corrupt_data, "enrollment challenge response is malformed"};
+    }
+    return nonce;
+#endif
+}
+
+result<enrolled_identity> curl_https_client::enroll(const std::string& manager_url, const std::string& agent_id,
+                                                     const std::string& host_id, const std::string& bootstrap_token,
+                                                     const ec_keypair& keypair, const std::string& nonce_b64) const {
+    if (manager_url.rfind("https://", 0U) != 0U || !is_valid_identifier(agent_id) || !is_valid_identifier(host_id) ||
+        bootstrap_token.empty() || bootstrap_token.size() > 512U || nonce_b64.empty() || timeout_seconds_ <= 0L) {
+        return error{error_code::invalid_input, "enrollment input is invalid"};
+    }
+#ifndef PANOPTICON_HAVE_CURL
+    return error{error_code::unsupported_action, "HTTPS enrollment requires libcurl"};
+#else
+    const auto nonce_raw = base64_decode(nonce_b64);
+    if (!nonce_raw) return error{error_code::invalid_input, "enrollment challenge nonce is not valid base64"};
+    const auto signature = sign_raw(keypair, *nonce_raw);
+    if (!succeeded(signature)) return std::get<error>(signature);
+    const auto& sig = std::get<ec_raw_signature>(signature);
+
+    if (!initialize_curl()) return error{error_code::io_failure, "cannot initialize HTTPS client"};
+    CURL* handle = curl_easy_init();
+    if (handle == nullptr) return error{error_code::io_failure, "cannot allocate HTTPS client"};
+    response_sink sink{maximum_response_bytes_, {}};
+    const auto public_key_b64 = base64_encode(keypair.public_point.data(), keypair.public_point.size());
+    const auto signature_b64 = base64_encode(sig.data(), sig.size());
+    const auto body = "{\"agent_id\":\"" + agent_id + "\",\"host_id\":\"" + host_id + "\",\"public_key\":\"" +
+                       public_key_b64 + "\",\"nonce\":\"" + nonce_b64 + "\",\"signature\":\"" + signature_b64 + "\"}";
     const auto endpoint = without_trailing_slash(manager_url) + "/api/v1/agents/enroll";
     curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");

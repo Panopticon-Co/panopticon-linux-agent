@@ -9,6 +9,7 @@ option(PANOPTICON_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 
 add_library(panopticon-linux-core STATIC
     src/identity.cpp
+    src/keypair.cpp
     src/spool.cpp
     src/command.cpp
     src/procfs.cpp
@@ -31,6 +32,13 @@ if(CURL_FOUND)
     target_link_libraries(panopticon-linux-core PUBLIC CURL::libcurl)
     target_compile_definitions(panopticon-linux-core PRIVATE PANOPTICON_HAVE_CURL=1)
 endif()
+
+# Phase 13: ECDSA P-256 enrollment identity (keypair.cpp). Required, not
+# optional like CURL above -- unlike HTTPS delivery, enrollment identity is
+# not a feature an agent can meaningfully run without once response is
+# enabled, and this repository has no fallback crypto implementation.
+find_package(OpenSSL REQUIRED)
+target_link_libraries(panopticon-linux-core PUBLIC OpenSSL::Crypto)
 
 if(MSVC)
     target_compile_options(panopticon-linux-core PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
@@ -56,6 +64,10 @@ if(BUILD_TESTING)
     add_executable(panopticon-linux-core-tests tests/core_tests.cpp)
     target_link_libraries(panopticon-linux-core-tests PRIVATE panopticon-linux-core)
     add_test(NAME panopticon-linux-core-tests COMMAND panopticon-linux-core-tests)
+
+    add_executable(panopticon-linux-keypair-tests tests/keypair_tests.cpp)
+    target_link_libraries(panopticon-linux-keypair-tests PRIVATE panopticon-linux-core)
+    add_test(NAME panopticon-linux-keypair-tests COMMAND panopticon-linux-keypair-tests)
 endif()
 
 install(TARGETS panopticon-linux-agent RUNTIME DESTINATION bin)

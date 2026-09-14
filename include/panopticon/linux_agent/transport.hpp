@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/error.hpp"
 #include "panopticon/linux_agent/identity.hpp"
+#include "panopticon/linux_agent/keypair.hpp"
 #include "panopticon/linux_agent/spool.hpp"
 
 #include <cstddef>
@@ -23,11 +24,20 @@ public:
     explicit curl_https_client(long timeout_seconds = 15L, std::size_t maximum_response_bytes = 65536U);
     transport_outcome post_ndjson(const std::string& https_url, const enrolled_identity& identity,
                                   const std::string& payload) override;
+    // Phase 13: requests a one-time, short-TTL nonce for enrollment proof
+    // of possession. No authentication required or possible to misuse --
+    // a nonce alone proves and authorizes nothing without a subsequent
+    // valid bootstrap token and a real signature over it.
+    [[nodiscard]] result<std::string> request_enrollment_challenge(const std::string& manager_url) const;
+
     // Bootstrap is deliberately a separate operation: the bootstrap secret is
     // never persisted as an enrolled credential and is sent only over verified TLS.
+    // Phase 13: also proves possession of `keypair`'s private key by signing
+    // `nonce_b64` (as returned by request_enrollment_challenge, verbatim) --
+    // see panopticon-manager/docs/adr/004-agent-enrollment-identity.md.
     [[nodiscard]] result<enrolled_identity> enroll(const std::string& manager_url, const std::string& agent_id,
-                                                    const std::string& host_id,
-                                                    const std::string& bootstrap_token) const;
+                                                    const std::string& host_id, const std::string& bootstrap_token,
+                                                    const ec_keypair& keypair, const std::string& nonce_b64) const;
     [[nodiscard]] result<std::string> poll_commands(const std::string& manager_url,
                                                      const enrolled_identity& identity) const;
     // Optional DISPATCHED -> ACCEPTED acknowledgement (POST .../commands/{id}/accept),

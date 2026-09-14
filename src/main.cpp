@@ -64,7 +64,36 @@ int main(int argc, char** argv) {
         if (settings.enrollment_token_path.empty()) { std::cerr << "enrolled identity unavailable\n"; return 1; }
         const auto token = load_bootstrap_token(settings.enrollment_token_path);
         if (!panopticon::linux_agent::succeeded(token)) { std::cerr << "enrollment credential unavailable\n"; return 1; }
-        identity = client.enroll(settings.manager_url, settings.agent_id, settings.host_id, std::get<std::string>(token));
+
+        // Phase 13: enrollment now proves possession of a locally-generated
+        // ECDSA P-256 keypair. The key file path is derived from
+        // identity_path (".key" suffix) rather than a new config key --
+        // this repository's strict config format validates an explicit
+        // allowlist of keys, and a derived path avoids widening it for a
+        // file that is never operator-chosen independently of the identity
+        // file it belongs to. Reuse a previously generated key if one
+        // already exists (e.g. a prior enrollment attempt failed after key
+        // generation but before the server accepted it) -- never silently
+        // regenerate over an existing key file.
+        const auto keypair_path = std::filesystem::path{settings.identity_path}.concat(".key");
+        auto keypair = panopticon::linux_agent::load_ec_keypair(keypair_path);
+        if (!panopticon::linux_agent::succeeded(keypair)) {
+            keypair = panopticon::linux_agent::generate_ec_p256_keypair();
+            if (panopticon::linux_agent::succeeded(keypair) &&
+                !panopticon::linux_agent::succeeded(panopticon::linux_agent::store_ec_keypair(
+                    keypair_path, std::get<panopticon::linux_agent::ec_keypair>(keypair)))) {
+                std::cerr << "could not persist enrollment key pair\n";
+                keypair = panopticon::linux_agent::error{panopticon::linux_agent::error_code::io_failure,
+                                                          "cannot persist enrollment key pair"};
+            }
+        }
+        if (!panopticon::linux_agent::succeeded(keypair)) { std::cerr << "enrollment key pair unavailable\n"; return 1; }
+
+        const auto nonce = client.request_enrollment_challenge(settings.manager_url);
+        if (!panopticon::linux_agent::succeeded(nonce)) { std::cerr << "enrollment challenge unavailable\n"; return 1; }
+
+        identity = client.enroll(settings.manager_url, settings.agent_id, settings.host_id, std::get<std::string>(token),
+                                  std::get<panopticon::linux_agent::ec_keypair>(keypair), std::get<std::string>(nonce));
         if (!panopticon::linux_agent::succeeded(identity) ||
             !panopticon::linux_agent::succeeded(panopticon::linux_agent::store_enrolled_identity(settings.identity_path, std::get<panopticon::linux_agent::enrolled_identity>(identity)))) {
             std::cerr << "agent enrollment failed\n"; return 1;
