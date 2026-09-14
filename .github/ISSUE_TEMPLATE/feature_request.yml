@@ -1,0 +1,34 @@
+name: Feature request
+description: Propose a new capability or enhancement for the Linux agent
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project follows vertical-development-first, and the response action set
+        (`KILL_PROCESS`, `COLLECT_PROCESS_INFO`, `COLLECT_NETWORK_CONNECTIONS`, `COLLECT_FILE`,
+        `QUARANTINE_FILE`, `ISOLATE_HOST`, `RELEASE_HOST_ISOLATION`) is a deliberately closed set.
+        Proposals to add a new response action or expand telemetry scope should explain why the
+        current vertical slice genuinely requires it.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What gap or limitation are you trying to address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: cross-repo
+    attributes:
+      label: Cross-repository impact
+      description: Does this touch the event/command wire contract shared with panopticon-manager, panopticon-contracts, panopticon-agent, or panopticon-detection-engine?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

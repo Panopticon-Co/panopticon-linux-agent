@@ -1,0 +1,21 @@
+name: Documentation
+description: Report inaccurate, stale, or missing documentation
+labels: ["documentation"]
+body:
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: File and section (e.g. README.md, RESPONSE.md, docs/adr/004-...).
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is wrong or missing
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested fix
