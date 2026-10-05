@@ -84,6 +84,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/wal.cpp
         src/sensor/netlink_proc.cpp
         src/sensor/ebpf_process.cpp
+        src/sensor/host_state.cpp
         src/sensor/pipeline.cpp
     )
     target_include_directories(panopticon-sensor-core PUBLIC include)
@@ -119,6 +120,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_include_directories(panopticon-ebpf-tests PRIVATE bpf)
         target_link_libraries(panopticon-ebpf-tests PRIVATE panopticon-sensor-core)
         add_test(NAME panopticon-ebpf-tests COMMAND panopticon-ebpf-tests)
+
+    add_executable(panopticon-state-tests tests/state_tests.cpp)
+    target_compile_options(panopticon-state-tests PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(panopticon-state-tests PRIVATE panopticon-sensor-core)
+    add_test(NAME panopticon-state-tests COMMAND panopticon-state-tests)
     endif()
 endif()
 
