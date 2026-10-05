@@ -63,11 +63,22 @@ quarantine; PID reuse between command and execution; malformed and oversized par
 event flood; WAL truncation/corruption; config with wrong ownership; stop/disable attempts;
 foreign BPF detach attempts; binary replacement; downgrade attempt.
 
-## 7. Commands
+## 7. Implemented suites
+
+| Binary | Level | Contents |
+| --- | --- | --- |
+| `panopticon-sensor-tests` | unit + ground truth + provider integration | JSON escaping and UTF-8 replacement; clock round trip; `stat` parsing with a hostile `comm`; `status` parsing; cmdline bounds; exe-link classification; fake-procfs read; ground truth on the real kernel: exec with argv and env allowlist (secret keys excluded), exec of a deleted binary, memfd `fexecve`; entity-graph lifecycle (fork, exec, rename, cred change, ptrace inject, exit, duplicate exit, PID reuse); reconcile infers a missed exit; exit-status decoding; CNPROC message decoding; live CNPROC fork/exec/exit (root, skipped otherwise); CRC-32C check value; WAL append/read/ack/recover across segments, torn tail, quota and corruption; pipeline end to end with a scripted provider; strict config; record-queue FIFO and drop counting |
+| `panopticon-linux-agent-core-tests` | unit | pre-existing command/config/isolation tests. Known environmental failure: "regular configuration file must load" fails when the umask is 0002 (the test file is group-writable and correctly rejected); passes with umask 022 |
+
+Ground-truth items from §2 covered so far: 1, 3 (in the entity graph), 9, 11. The rest need
+the eBPF provider or a PID namespace harness (S2).
+
+## 8. Commands
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ctest --test-dir build --output-on-failure      # unit + contract
+sudo build/panopticon-sensor-tests              # includes live netlink proc
 sudo tests/ground_truth/run.sh build            # process model (root, VM)
 ```

@@ -57,160 +57,160 @@ limits** · **Perf** impact · **Privacy** implications · **Test** method · **
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| A1 | Host identity (host id, machine-id, hostname, boot id) | M | Spoofed/duplicated sensors | `state.host` | PROCFS + `/etc/machine-id` | DMI product uuid | cloned golden images share machine-id → duplicate detection on (machine-id, enrollment key) | – | low | unit + VM | PARTIAL | |
-| A2 | Hardware inventory (CPU, memory, DMI vendor/model/serial, virtualisation) | S | Asset context | `state.host.hardware` | SYSFS dmi + `/proc/cpuinfo`, `/proc/meminfo` | partial if DMI unreadable | serial root-only | – | serial is PII-adjacent | VM | MISSING | |
-| A3 | Network identity (interfaces, MACs, addresses) | M | Correlation, lateral movement | `state.interfaces` | RTNL dump | `/sys/class/net` | – | – | MACs | VM | MISSING | |
-| B1 | OS / distribution / version | M | Vulnerability context | `state.host.os` | `/etc/os-release` | `/usr/lib/os-release` | – | – | none | unit | MISSING | |
-| B2 | Kernel version, cmdline, taint | M | Tainted kernel / rootkit | `state.kernel` | PROCFS version, cmdline, `kernel/tainted` | – | – | – | cmdline redaction | unit | PARTIAL | |
-| C1 | Security posture: Secure Boot, lockdown, active LSMs, SELinux/AppArmor mode, `kptr_restrict`, `ptrace_scope`, `unprivileged_bpf_disabled`, `modules_disabled`, ASLR, `core_pattern` | M | Weakened defences (TA0005) | `state.posture`, `posture.changed` | SYSFS + PROCFS | each item independently `unknown` | some need root | – | none | unit + VM | MISSING | |
-| C2 | Sensor capability report (BTF, BPF features, LSMs, fanotify, audit) | M | Silent coverage loss | `health.coverage` | capability prober | – | – | startup | none | VM matrix | MISSING | |
+| A1 | Host identity (host id, machine-id, hostname, boot id) | M | Spoofed/duplicated sensors | `state.host` | PROCFS + `/etc/machine-id` | DMI product uuid | cloned golden images share machine-id → duplicate detection on (machine-id, enrollment key) | – | low | unit + VM | PARTIAL | PARTIAL |
+| A2 | Hardware inventory (CPU, memory, DMI vendor/model/serial, virtualisation) | S | Asset context | `state.host.hardware` | SYSFS dmi + `/proc/cpuinfo`, `/proc/meminfo` | partial if DMI unreadable | serial root-only | – | serial is PII-adjacent | VM | MISSING | MISSING |
+| A3 | Network identity (interfaces, MACs, addresses) | M | Correlation, lateral movement | `state.interfaces` | RTNL dump | `/sys/class/net` | – | – | MACs | VM | MISSING | MISSING |
+| B1 | OS / distribution / version | M | Vulnerability context | `state.host.os` | `/etc/os-release` | `/usr/lib/os-release` | – | – | none | unit | MISSING | MISSING |
+| B2 | Kernel version, cmdline, taint | M | Tainted kernel / rootkit | `state.kernel` | PROCFS version, cmdline, `kernel/tainted` | – | – | – | cmdline redaction | unit | PARTIAL | PARTIAL |
+| C1 | Security posture: Secure Boot, lockdown, active LSMs, SELinux/AppArmor mode, `kptr_restrict`, `ptrace_scope`, `unprivileged_bpf_disabled`, `modules_disabled`, ASLR, `core_pattern` | M | Weakened defences (TA0005) | `state.posture`, `posture.changed` | SYSFS + PROCFS | each item independently `unknown` | some need root | – | none | unit + VM | MISSING | MISSING |
+| C2 | Sensor capability report (BTF, BPF features, LSMs, fanotify, audit) | M | Silent coverage loss | `health.coverage` | capability prober | – | – | startup | none | VM matrix | MISSING | PARTIAL |
 
 ### D–N. Process, identity and isolation context
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| D1 | Fork/clone/vfork | M | Execution (TA0002) | `process.fork` | EBPF-TP `sched_process_fork` | CNPROC → PROCFS reconcile | procfs misses short-lived | low | none | ground truth | MISSING | |
-| D2 | Exec | M | T1059, T1204 | `process.exec` | EBPF-TP `sched_process_exec` | CNPROC + procfs read (racy) → reconcile | procfs-sourced argv lost if the process exits first | low | argv redaction | ground truth | PARTIAL | |
-| D3 | Exit with code/signal | M | Timeline | `process.exit` | EBPF-TP `sched_process_exit` | CNPROC → reconcile (code unknown) | inferred exits carry no code | low | none | ground truth | MISSING | |
-| D4 | Threads (not process starts) | S | Thread injection context | `process.thread_count` | EBPF fork with CLONE_THREAD | CNPROC | – | low | none | ground truth | MISSING | |
-| E1 | Process entity identity (boot-scoped, PID-reuse safe) | M | Mis-attribution; PID reuse vs response | every record | entity graph | same algorithm in every provider | – | – | none | PID-reuse ground truth | PARTIAL | |
-| E2 | Exec generation | M | Image swap after exec | `process.exec_gen` | entity graph | CNPROC exec | – | – | none | ground truth | MISSING | |
-| F1 | Parent / ancestry vector | M | Parent anomalies | `process.ancestry[]` | entity graph | PROCFS ppid | subreaper re-parenting flagged | low | none | ground truth | PARTIAL | |
-| F2 | pgid / sid / controlling TTY | S | Interactive attribution | `process.pgid/sid/tty` | EBPF `task->signal` | PROCFS stat | – | low | none | unit | MISSING | |
-| G1 | Full argv (bounded, truncation flagged) | M | T1059 | `process.args[]` | EBPF `mm->arg_start..arg_end` | PROCFS cmdline | default cap 4 KiB / 64 args | low | redaction policy | ground truth | PARTIAL | |
-| G2 | Executable path, dev/inode, deleted/memfd flags | M | T1036, T1620 | `process.executable` | EBPF `mm->exe_file` dentry walk | PROCFS `exe` readlink + stat | walk capped at 32 components | low | none | ground truth | PARTIAL | |
-| G3 | Interpreter/script detection | M | T1059.004/006 | `process.interpreter` | EBPF `bprm->interp` vs `bprm->filename` | argv heuristics | – | low | none | attack sim | MISSING | |
-| G4 | comm, cwd, selected env (LD_PRELOAD, LD_LIBRARY_PATH, PATH) | M | T1574.006 | `process.env` | EBPF env read (allowlisted keys) | PROCFS environ | allowlisted keys only | low | values may be secrets → allowlist | attack sim | MISSING | |
-| G5 | stdio types (pipe, socket, tty) | S | Reverse shells | `process.stdio` | PROCFS fd readlink at exec | – | racy for short-lived | low | none | attack sim | MISSING | |
-| H1 | Credentials (r/e/s/fs uid+gid, groups, securebits, no_new_privs) | M | T1548 | `process.creds` | EBPF `task->cred` | PROCFS status | – | low | none | ground truth | PARTIAL | |
-| H2 | Credential change with before/after | M | T1548; kernel exploit | `process.cred_change` | EBPF-FENTRY `commit_creds` | CNPROC uid/gid | no capability deltas in fallback | low | none | attack sim | MISSING | |
-| I1 | User/group names, login uid, audit session | M | T1078 | `user.*` | passwd/group cache + `loginuid` | – | NSS/LDAP users show uid only | – | usernames | unit | MISSING | |
-| J1 | Capability sets | M | T1548; breakout | `process.caps` | EBPF `cred->cap_*` | PROCFS status | – | low | none | ground truth | MISSING | |
-| K1 | Namespace inode numbers | M | T1611 | `process.ns` | EBPF `nsproxy` | PROCFS `ns/*` | – | low | none | ground truth | MISSING | |
-| K2 | Namespace changes (setns/unshare) | M | T1611 | `process.ns_change` | EBPF-FENTRY on namespace switch | reconcile diff | – | low | none | attack sim | MISSING | |
-| L1 | cgroup path and systemd unit | M | Attribution | `process.cgroup`, `process.unit` | EBPF cgroup id + PROCFS path | PROCFS cgroup | v1 multi-hierarchy → name=systemd | low | none | VM | PARTIAL | |
-| M1 | Container id, runtime, image | M | T1610/T1611 | `container.*` | cgroup parse + RUNTIME | id only | rootless paths vary | low | image names | VM docker+podman | MISSING | |
-| M2 | Container lifecycle | S | T1610 | `container.started/stopped` | derived from first/last process in new container cgroup | RUNTIME poll | derived, not runtime events | low | none | VM | MISSING | |
-| N1 | Kubernetes pod uid/name/namespace | S | Workload context | `container.k8s.*` | RUNTIME CRI annotations | cgroup pod uid | no API server calls | low | labels | VM (optional kind) | MISSING | |
+| D1 | Fork/clone/vfork | M | Execution (TA0002) | `process.fork` | EBPF-TP `sched_process_fork` | CNPROC → PROCFS reconcile | procfs misses short-lived | low | none | ground truth | MISSING | PARTIAL |
+| D2 | Exec | M | T1059, T1204 | `process.exec` | EBPF-TP `sched_process_exec` | CNPROC + procfs read (racy) → reconcile | procfs-sourced argv lost if the process exits first | low | argv redaction | ground truth | PARTIAL | PARTIAL |
+| D3 | Exit with code/signal | M | Timeline | `process.exit` | EBPF-TP `sched_process_exit` | CNPROC → reconcile (code unknown) | inferred exits carry no code | low | none | ground truth | MISSING | PARTIAL |
+| D4 | Threads (not process starts) | S | Thread injection context | `process.thread_count` | EBPF fork with CLONE_THREAD | CNPROC | – | low | none | ground truth | MISSING | PARTIAL |
+| E1 | Process entity identity (boot-scoped, PID-reuse safe) | M | Mis-attribution; PID reuse vs response | every record | entity graph | same algorithm in every provider | – | – | none | PID-reuse ground truth | PARTIAL | PARTIAL |
+| E2 | Exec generation | M | Image swap after exec | `process.exec_gen` | entity graph | CNPROC exec | – | – | none | ground truth | MISSING | PARTIAL |
+| F1 | Parent / ancestry vector | M | Parent anomalies | `process.ancestry[]` | entity graph | PROCFS ppid | subreaper re-parenting flagged | low | none | ground truth | PARTIAL | PARTIAL |
+| F2 | pgid / sid / controlling TTY | S | Interactive attribution | `process.pgid/sid/tty` | EBPF `task->signal` | PROCFS stat | – | low | none | unit | MISSING | PARTIAL |
+| G1 | Full argv (bounded, truncation flagged) | M | T1059 | `process.args[]` | EBPF `mm->arg_start..arg_end` | PROCFS cmdline | default cap 4 KiB / 64 args | low | redaction policy | ground truth | PARTIAL | PARTIAL |
+| G2 | Executable path, dev/inode, deleted/memfd flags | M | T1036, T1620 | `process.executable` | EBPF `mm->exe_file` dentry walk | PROCFS `exe` readlink + stat | walk capped at 32 components | low | none | ground truth | PARTIAL | PARTIAL |
+| G3 | Interpreter/script detection | M | T1059.004/006 | `process.interpreter` | EBPF `bprm->interp` vs `bprm->filename` | argv heuristics | – | low | none | attack sim | MISSING | MISSING |
+| G4 | comm, cwd, selected env (LD_PRELOAD, LD_LIBRARY_PATH, PATH) | M | T1574.006 | `process.env` | EBPF env read (allowlisted keys) | PROCFS environ | allowlisted keys only | low | values may be secrets → allowlist | attack sim | MISSING | PARTIAL |
+| G5 | stdio types (pipe, socket, tty) | S | Reverse shells | `process.stdio` | PROCFS fd readlink at exec | – | racy for short-lived | low | none | attack sim | MISSING | MISSING |
+| H1 | Credentials (r/e/s/fs uid+gid, groups, securebits, no_new_privs) | M | T1548 | `process.creds` | EBPF `task->cred` | PROCFS status | – | low | none | ground truth | PARTIAL | PARTIAL |
+| H2 | Credential change with before/after | M | T1548; kernel exploit | `process.cred_change` | EBPF-FENTRY `commit_creds` | CNPROC uid/gid | no capability deltas in fallback | low | none | attack sim | MISSING | PARTIAL |
+| I1 | User/group names, login uid, audit session | M | T1078 | `user.*` | passwd/group cache + `loginuid` | – | NSS/LDAP users show uid only | – | usernames | unit | MISSING | PARTIAL |
+| J1 | Capability sets | M | T1548; breakout | `process.caps` | EBPF `cred->cap_*` | PROCFS status | – | low | none | ground truth | MISSING | PARTIAL |
+| K1 | Namespace inode numbers | M | T1611 | `process.ns` | EBPF `nsproxy` | PROCFS `ns/*` | – | low | none | ground truth | MISSING | PARTIAL |
+| K2 | Namespace changes (setns/unshare) | M | T1611 | `process.ns_change` | EBPF-FENTRY on namespace switch | reconcile diff | – | low | none | attack sim | MISSING | MISSING |
+| L1 | cgroup path and systemd unit | M | Attribution | `process.cgroup`, `process.unit` | EBPF cgroup id + PROCFS path | PROCFS cgroup | v1 multi-hierarchy → name=systemd | low | none | VM | PARTIAL | PARTIAL |
+| M1 | Container id, runtime, image | M | T1610/T1611 | `container.*` | cgroup parse + RUNTIME | id only | rootless paths vary | low | image names | VM docker+podman | MISSING | MISSING |
+| M2 | Container lifecycle | S | T1610 | `container.started/stopped` | derived from first/last process in new container cgroup | RUNTIME poll | derived, not runtime events | low | none | VM | MISSING | MISSING |
+| N1 | Kubernetes pod uid/name/namespace | S | Workload context | `container.k8s.*` | RUNTIME CRI annotations | cgroup pod uid | no API server calls | low | labels | VM (optional kind) | MISSING | MISSING |
 
 ### O–Y. Image, file, memory, IPC and syscalls
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| O1 | Executable image metadata (ELF class/type/machine, interpreter, setuid bit, owner, mode, mtime, package owner) | M | T1036, T1554 | `process.executable.*` | ELF header via `/proc/pid/exe` | path stat | – | low (cached) | none | unit | MISSING | |
-| P1 | File create / open-for-write | M | T1105, T1486 | `file.create`, `file.modify` | EBPF-FENTRY `security_file_open` (write) + `security_inode_create` | FANOTIFY → FIM diff | modify is per open-for-write, not per write() | med; in-kernel rate limit | paths | attack sim + file storm | MISSING | |
-| P2 | Delete / rename / link | M | T1070.004, T1036 | `file.delete`, `file.rename`, `file.link` | EBPF-FENTRY `security_inode_unlink/rename/link` | FANOTIFY DFID_NAME | – | low | paths | attack sim | MISSING | |
-| P3 | chmod / chown / setxattr | M | T1222.002 | `file.chmod`, `file.chown`, `file.setxattr` | EBPF-FENTRY `security_path_chmod/chown`, `security_inode_setxattr` | FANOTIFY attrib | fallback lacks old/new values | low | none | attack sim | MISSING | |
-| P4 | Sensitive-file reads (shadow, SSH keys, kube/cloud creds) | M | T1003.008, T1552 | `file.open_sensitive` | EBPF-FENTRY `security_file_open` + in-kernel prefix filter | FANOTIFY on watched files | policy-defined prefixes | low | sensitive | attack sim | MISSING | |
-| Q1 | File integrity monitoring (baseline + diff for critical paths) | M | T1543, T1546, T1574 | `fim.changed` | FSSCAN baseline + real-time P1–P3 | FSSCAN periodic | – | budgeted | none | VM | MISSING | |
-| R1 | Hashing (SHA-256, SHA-1, MD5) of executed images/created executables | M | IOC matching | `*.hash.*` | hash worker | – | large files `hash_pending` | budgeted | none | unit + perf | PARTIAL | |
-| S1 | Anonymous executable mappings, mprotect→X, W+X | M | T1055, T1620 | `memory.exec_mapping`, `memory.mprotect` | EBPF-FENTRY `security_mmap_file`, `security_file_mprotect` | PROCFS maps scan | JIT noise → per-image suppression | med | none | attack sim | MISSING | |
-| T1 | Injection: ptrace attach, `process_vm_writev`, `/proc/pid/mem` write | M | T1055.008/009 | `process.inject` | EBPF-FENTRY `security_ptrace_access_check` + kprobe on `process_vm_rw` | CNPROC ptrace | fallback: attach only | low | none | attack sim | MISSING | |
-| U1 | Shared library loads | S | T1574.006 | `library.load` | EBPF-FENTRY `security_mmap_file` (PROT_EXEC, file-backed) | PROCFS maps diff | dedup per (process, inode) | med | none | attack sim | MISSING | |
-| U2 | LD_PRELOAD / `/etc/ld.so.preload` | M | T1574.006 | `process.env`, `fim.changed` | G4 + Q1 | – | – | low | none | attack sim | MISSING | |
-| V1 | Fileless exec (memfd + execveat, deleted exe, `/dev/shm`) | M | T1620 | `process.exec` (`executable.kind`) | EBPF exec + flags | PROCFS `(deleted)`/`memfd:` | – | low | none | attack sim | MISSING | |
-| W1 | IPC objects (UNIX sockets) | O | Lateral comms | `state.unix_sockets` | SOCKDIAG unix_diag | – | event-level IPC not traced (noise) | – | none | VM | MISSING | |
-| X1 | Fatal signals to non-children / protected processes | S | T1562.001 | `process.signal` | EBPF-TP `signal_generate` filtered | – | – | low | none | attack sim | MISSING | |
-| Y1 | Security syscalls: `init_module`, `bpf`, `perf_event_open`, `keyctl`, `userfaultfd`, `io_uring_setup`, `kexec_load`, `ptrace` | M | T1547.006, T1014, evasion | specific types | EBPF-FENTRY on security hooks | AUDIT if rules exist | io_uring ops bypass syscall hooks (LSM hooks still fire) | low | none | attack sim | MISSING | |
+| O1 | Executable image metadata (ELF class/type/machine, interpreter, setuid bit, owner, mode, mtime, package owner) | M | T1036, T1554 | `process.executable.*` | ELF header via `/proc/pid/exe` | path stat | – | low (cached) | none | unit | MISSING | MISSING |
+| P1 | File create / open-for-write | M | T1105, T1486 | `file.create`, `file.modify` | EBPF-FENTRY `security_file_open` (write) + `security_inode_create` | FANOTIFY → FIM diff | modify is per open-for-write, not per write() | med; in-kernel rate limit | paths | attack sim + file storm | MISSING | MISSING |
+| P2 | Delete / rename / link | M | T1070.004, T1036 | `file.delete`, `file.rename`, `file.link` | EBPF-FENTRY `security_inode_unlink/rename/link` | FANOTIFY DFID_NAME | – | low | paths | attack sim | MISSING | MISSING |
+| P3 | chmod / chown / setxattr | M | T1222.002 | `file.chmod`, `file.chown`, `file.setxattr` | EBPF-FENTRY `security_path_chmod/chown`, `security_inode_setxattr` | FANOTIFY attrib | fallback lacks old/new values | low | none | attack sim | MISSING | MISSING |
+| P4 | Sensitive-file reads (shadow, SSH keys, kube/cloud creds) | M | T1003.008, T1552 | `file.open_sensitive` | EBPF-FENTRY `security_file_open` + in-kernel prefix filter | FANOTIFY on watched files | policy-defined prefixes | low | sensitive | attack sim | MISSING | MISSING |
+| Q1 | File integrity monitoring (baseline + diff for critical paths) | M | T1543, T1546, T1574 | `fim.changed` | FSSCAN baseline + real-time P1–P3 | FSSCAN periodic | – | budgeted | none | VM | MISSING | MISSING |
+| R1 | Hashing (SHA-256, SHA-1, MD5) of executed images/created executables | M | IOC matching | `*.hash.*` | hash worker | – | large files `hash_pending` | budgeted | none | unit + perf | PARTIAL | PARTIAL |
+| S1 | Anonymous executable mappings, mprotect→X, W+X | M | T1055, T1620 | `memory.exec_mapping`, `memory.mprotect` | EBPF-FENTRY `security_mmap_file`, `security_file_mprotect` | PROCFS maps scan | JIT noise → per-image suppression | med | none | attack sim | MISSING | MISSING |
+| T1 | Injection: ptrace attach, `process_vm_writev`, `/proc/pid/mem` write | M | T1055.008/009 | `process.inject` | EBPF-FENTRY `security_ptrace_access_check` + kprobe on `process_vm_rw` | CNPROC ptrace | fallback: attach only | low | none | attack sim | MISSING | PARTIAL |
+| U1 | Shared library loads | S | T1574.006 | `library.load` | EBPF-FENTRY `security_mmap_file` (PROT_EXEC, file-backed) | PROCFS maps diff | dedup per (process, inode) | med | none | attack sim | MISSING | MISSING |
+| U2 | LD_PRELOAD / `/etc/ld.so.preload` | M | T1574.006 | `process.env`, `fim.changed` | G4 + Q1 | – | – | low | none | attack sim | MISSING | MISSING |
+| V1 | Fileless exec (memfd + execveat, deleted exe, `/dev/shm`) | M | T1620 | `process.exec` (`executable.kind`) | EBPF exec + flags | PROCFS `(deleted)`/`memfd:` | – | low | none | attack sim | MISSING | PARTIAL |
+| W1 | IPC objects (UNIX sockets) | O | Lateral comms | `state.unix_sockets` | SOCKDIAG unix_diag | – | event-level IPC not traced (noise) | – | none | VM | MISSING | MISSING |
+| X1 | Fatal signals to non-children / protected processes | S | T1562.001 | `process.signal` | EBPF-TP `signal_generate` filtered | – | – | low | none | attack sim | MISSING | MISSING |
+| Y1 | Security syscalls: `init_module`, `bpf`, `perf_event_open`, `keyctl`, `userfaultfd`, `io_uring_setup`, `kexec_load`, `ptrace` | M | T1547.006, T1014, evasion | specific types | EBPF-FENTRY on security hooks | AUDIT if rules exist | io_uring ops bypass syscall hooks (LSM hooks still fire) | low | none | attack sim | MISSING | MISSING |
 
 ### Z–AD. Network
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Z1 | Outbound TCP connect with process attribution | M | T1071 | `network.connect` | EBPF-FENTRY `tcp_connect` | SOCKDIAG diff + fd scan | fallback misses short connections | low | remote IPs | attack sim | MISSING | |
-| Z2 | Inbound accept | M | T1021, backdoors | `network.accept` | EBPF fexit `inet_csk_accept` | SOCKDIAG diff | – | low | remote IPs | attack sim | MISSING | |
-| Z3 | UDP flows (first datagram per 5-tuple per process) | S | DNS tunnelling, UDP C2 | `network.udp_flow` | EBPF `udp_sendmsg`/`udpv6_sendmsg` + LRU dedup | SOCKDIAG | 60 s dedup window | med | remote IPs | attack sim | MISSING | |
-| Z4 | Close with byte counts | S | T1041 | `network.close` | EBPF `tcp_close` (`bytes_acked/received`) | – | – | low | none | VM | MISSING | |
-| Z5 | Raw / packet sockets | S | T1040 | `network.raw_socket` | EBPF `security_socket_create` | – | – | low | none | attack sim | MISSING | |
-| AA1 | Listening sockets (state + listen events) | M | T1205, backdoors | `state.listeners`, `network.listen` | SOCKDIAG + EBPF `security_socket_listen` | PROCFS `/proc/net/*` | – | low | none | VM | PARTIAL | |
-| AB1 | Interface/address/route changes | S | T1599 | `network.config_changed` | RTNL multicast | periodic diff | – | low | none | VM | MISSING | |
-| AC1 | Firewall state and changes | M | T1562.004 | `state.firewall`, `firewall.changed` | NFNL monitor | iptables-legacy table hash diff | legacy not decoded | low | none | VM | MISSING | |
-| AD1 | DNS queries/answers with process attribution | M | T1071.004, DGA | `dns.query` | EBPF payload capture on UDP/TCP :53 + user-space parse | – | DoH/DoT invisible (§4) | med | queried names | attack sim | MISSING | |
+| Z1 | Outbound TCP connect with process attribution | M | T1071 | `network.connect` | EBPF-FENTRY `tcp_connect` | SOCKDIAG diff + fd scan | fallback misses short connections | low | remote IPs | attack sim | MISSING | MISSING |
+| Z2 | Inbound accept | M | T1021, backdoors | `network.accept` | EBPF fexit `inet_csk_accept` | SOCKDIAG diff | – | low | remote IPs | attack sim | MISSING | MISSING |
+| Z3 | UDP flows (first datagram per 5-tuple per process) | S | DNS tunnelling, UDP C2 | `network.udp_flow` | EBPF `udp_sendmsg`/`udpv6_sendmsg` + LRU dedup | SOCKDIAG | 60 s dedup window | med | remote IPs | attack sim | MISSING | MISSING |
+| Z4 | Close with byte counts | S | T1041 | `network.close` | EBPF `tcp_close` (`bytes_acked/received`) | – | – | low | none | VM | MISSING | MISSING |
+| Z5 | Raw / packet sockets | S | T1040 | `network.raw_socket` | EBPF `security_socket_create` | – | – | low | none | attack sim | MISSING | MISSING |
+| AA1 | Listening sockets (state + listen events) | M | T1205, backdoors | `state.listeners`, `network.listen` | SOCKDIAG + EBPF `security_socket_listen` | PROCFS `/proc/net/*` | – | low | none | VM | PARTIAL | PARTIAL |
+| AB1 | Interface/address/route changes | S | T1599 | `network.config_changed` | RTNL multicast | periodic diff | – | low | none | VM | MISSING | MISSING |
+| AC1 | Firewall state and changes | M | T1562.004 | `state.firewall`, `firewall.changed` | NFNL monitor | iptables-legacy table hash diff | legacy not decoded | low | none | VM | MISSING | MISSING |
+| AD1 | DNS queries/answers with process attribution | M | T1071.004, DGA | `dns.query` | EBPF payload capture on UDP/TCP :53 + user-space parse | – | DoH/DoT invisible (§4) | med | queried names | attack sim | MISSING | MISSING |
 
 ### AE–AM. Authentication, accounts and persistence
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| AE1 | Authentication success/failure (PAM) | M | T1110, T1078 | `auth.login`, `auth.failure` | AUDIT `USER_AUTH`/`USER_LOGIN`/`USER_START` | JOURNAL → `auth.log`/`secure` tail | text formats vary per distro → per-distro parser tests | low | usernames, IPs | attack sim | MISSING | |
-| AF1 | SSH sessions (source, user, method, key fingerprint) | M | T1021.004 | `auth.ssh` | JOURNAL sshd + AUDIT | auth log | – | low | IPs | attack sim | MISSING | |
-| AF2 | `authorized_keys` changes | M | T1098.004 | `fim.changed` (class `ssh_keys`) | Q1 | FSSCAN | network-FS homes only by scan | low | none | attack sim | MISSING | |
-| AG1 | sudo / su / pkexec | M | T1548.003 | `auth.privilege` | AUDIT `USER_CMD` + exec correlation | JOURNAL sudo | – | low | commands | attack sim | MISSING | |
-| AH1 | PAM configuration / module changes | M | T1556.003 | `fim.changed` (class `pam`) | Q1 | FSSCAN | – | low | none | attack sim | MISSING | |
-| AI1 | Account/group create/delete/modify | M | T1136.001, T1098 | `account.*` | AUDIT `ADD_USER`/`DEL_USER`/`USER_MGMT` + passwd/group diff | passwd/group FIM diff (writer from P1) | – | low | usernames | attack sim | MISSING | |
-| AJ1 | Credential/secret access | M | T1552, T1555 | `file.open_sensitive` | P4 | – | – | low | sensitive | attack sim | MISSING | |
-| AK1 | systemd units (state + new/changed/enabled) | M | T1543.002 | `state.services`, `persistence.systemd` | Q1 on unit dirs + unit-file parse | JOURNAL | transient D-Bus units seen via cgroup only | low | none | attack sim | MISSING | |
-| AL1 | cron / at / timers | M | T1053.003/002/006 | `persistence.scheduled` | Q1 on cron/at/timer paths | FSSCAN | – | low | none | attack sim | MISSING | |
-| AM1 | Other persistence (shell rc, rc.local, init.d, udev, XDG autostart, motd, ld.so.preload, modules-load.d, package-manager hooks) | M | T1546.004, T1037, T1547 | `persistence.*` | Q1 over persistence catalog | FSSCAN | catalog is explicit; unknown locations are a gap | low | none | attack sim | MISSING | |
+| AE1 | Authentication success/failure (PAM) | M | T1110, T1078 | `auth.login`, `auth.failure` | AUDIT `USER_AUTH`/`USER_LOGIN`/`USER_START` | JOURNAL → `auth.log`/`secure` tail | text formats vary per distro → per-distro parser tests | low | usernames, IPs | attack sim | MISSING | MISSING |
+| AF1 | SSH sessions (source, user, method, key fingerprint) | M | T1021.004 | `auth.ssh` | JOURNAL sshd + AUDIT | auth log | – | low | IPs | attack sim | MISSING | MISSING |
+| AF2 | `authorized_keys` changes | M | T1098.004 | `fim.changed` (class `ssh_keys`) | Q1 | FSSCAN | network-FS homes only by scan | low | none | attack sim | MISSING | MISSING |
+| AG1 | sudo / su / pkexec | M | T1548.003 | `auth.privilege` | AUDIT `USER_CMD` + exec correlation | JOURNAL sudo | – | low | commands | attack sim | MISSING | MISSING |
+| AH1 | PAM configuration / module changes | M | T1556.003 | `fim.changed` (class `pam`) | Q1 | FSSCAN | – | low | none | attack sim | MISSING | MISSING |
+| AI1 | Account/group create/delete/modify | M | T1136.001, T1098 | `account.*` | AUDIT `ADD_USER`/`DEL_USER`/`USER_MGMT` + passwd/group diff | passwd/group FIM diff (writer from P1) | – | low | usernames | attack sim | MISSING | MISSING |
+| AJ1 | Credential/secret access | M | T1552, T1555 | `file.open_sensitive` | P4 | – | – | low | sensitive | attack sim | MISSING | MISSING |
+| AK1 | systemd units (state + new/changed/enabled) | M | T1543.002 | `state.services`, `persistence.systemd` | Q1 on unit dirs + unit-file parse | JOURNAL | transient D-Bus units seen via cgroup only | low | none | attack sim | MISSING | MISSING |
+| AL1 | cron / at / timers | M | T1053.003/002/006 | `persistence.scheduled` | Q1 on cron/at/timer paths | FSSCAN | – | low | none | attack sim | MISSING | MISSING |
+| AM1 | Other persistence (shell rc, rc.local, init.d, udev, XDG autostart, motd, ld.so.preload, modules-load.d, package-manager hooks) | M | T1546.004, T1037, T1547 | `persistence.*` | Q1 over persistence catalog | FSSCAN | catalog is explicit; unknown locations are a gap | low | none | attack sim | MISSING | MISSING |
 
 ### AN–AW. Software, kernel and platform
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| AN1 | Package install/remove events | M | T1072, supply chain | `package.changed` | PKGDB change detection + diff | periodic diff | – | low | none | VM | MISSING | |
-| AO1 | Software inventory (deb, rpm; snap/flatpak optional) | M | Vulnerability management | `state.packages` | PKGDB | – | – | periodic | none | VM | MISSING | |
-| AO2 | Package file verification | S | T1554 | `evidence.package_verify` | dpkg md5sums / `rpm -V` | – | on demand | med | none | VM | MISSING | |
-| AP1 | Kernel module load/unload + inventory + taint | M | T1547.006, T1014 | `kernel.module_load`, `state.modules` | EBPF-FENTRY `do_init_module` + SYSFS | `/proc/modules` diff | – | low | none | attack sim | MISSING | |
-| AP2 | Hidden-module cross-view | S | T1014 | `detection` | `/sys/module` vs `/proc/modules` vs kallsyms | – | heuristic | low | none | unit | MISSING | |
-| AQ1 | BPF program/map load + inventory | M | eBPF rootkits | `kernel.bpf_load`, `state.bpf` | EBPF-FENTRY `security_bpf` + `BPF_PROG_GET_NEXT_ID` | periodic enumeration | – | low | none | attack sim | MISSING | |
-| AR1 | LSM / SELinux / AppArmor state and denials | M | T1562.001 | `posture.changed`, `lsm.denial` | SYSFS + AUDIT AVC/APPARMOR | JOURNAL kernel | – | low | none | VM | MISSING | |
-| AS1 | seccomp mode per process | S | Sandbox context | `process.seccomp` | PROCFS status | – | – | low | none | VM | MISSING | |
-| AT1 | Mounts (state + mount/umount events) | M | T1611, T1564 | `state.mounts`, `mount.changed` | EBPF-FENTRY `security_sb_mount` + mountinfo | mountinfo poll (POLLPRI) | – | low | none | attack sim | MISSING | |
-| AU1 | USB / removable media | S | T1091, T1052 | `device.attached` | UEVENT | `/sys/bus/usb` diff | – | low | device serials | VM | MISSING | |
-| AV1 | Log tampering (truncate/delete logs, `auditctl -D`) | M | T1070.002 | `file.*` + `audit.config_changed` | P1–P2 on log paths + AUDIT `CONFIG_CHANGE` | FSSCAN | – | low | none | attack sim | MISSING | |
-| AV2 | Selected log forwarding | O | context | `log.record` | JOURNAL | file tail | policy volume cap | med | log content | VM | MISSING | |
-| AW1 | Cloud instance identity (AWS/Azure/GCP) | S | Asset context | `state.cloud` | IMDS (IMDSv2) at start, opt-in | DMI hints | – | – | account ids | mocked IMDS | MISSING | |
-| AW2 | IMDS access by processes | S | T1552.005 | `network.connect` tagged `imds` | Z1 | – | – | low | none | attack sim | MISSING | |
+| AN1 | Package install/remove events | M | T1072, supply chain | `package.changed` | PKGDB change detection + diff | periodic diff | – | low | none | VM | MISSING | MISSING |
+| AO1 | Software inventory (deb, rpm; snap/flatpak optional) | M | Vulnerability management | `state.packages` | PKGDB | – | – | periodic | none | VM | MISSING | MISSING |
+| AO2 | Package file verification | S | T1554 | `evidence.package_verify` | dpkg md5sums / `rpm -V` | – | on demand | med | none | VM | MISSING | MISSING |
+| AP1 | Kernel module load/unload + inventory + taint | M | T1547.006, T1014 | `kernel.module_load`, `state.modules` | EBPF-FENTRY `do_init_module` + SYSFS | `/proc/modules` diff | – | low | none | attack sim | MISSING | MISSING |
+| AP2 | Hidden-module cross-view | S | T1014 | `detection` | `/sys/module` vs `/proc/modules` vs kallsyms | – | heuristic | low | none | unit | MISSING | MISSING |
+| AQ1 | BPF program/map load + inventory | M | eBPF rootkits | `kernel.bpf_load`, `state.bpf` | EBPF-FENTRY `security_bpf` + `BPF_PROG_GET_NEXT_ID` | periodic enumeration | – | low | none | attack sim | MISSING | MISSING |
+| AR1 | LSM / SELinux / AppArmor state and denials | M | T1562.001 | `posture.changed`, `lsm.denial` | SYSFS + AUDIT AVC/APPARMOR | JOURNAL kernel | – | low | none | VM | MISSING | MISSING |
+| AS1 | seccomp mode per process | S | Sandbox context | `process.seccomp` | PROCFS status | – | – | low | none | VM | MISSING | PARTIAL |
+| AT1 | Mounts (state + mount/umount events) | M | T1611, T1564 | `state.mounts`, `mount.changed` | EBPF-FENTRY `security_sb_mount` + mountinfo | mountinfo poll (POLLPRI) | – | low | none | attack sim | MISSING | MISSING |
+| AU1 | USB / removable media | S | T1091, T1052 | `device.attached` | UEVENT | `/sys/bus/usb` diff | – | low | device serials | VM | MISSING | MISSING |
+| AV1 | Log tampering (truncate/delete logs, `auditctl -D`) | M | T1070.002 | `file.*` + `audit.config_changed` | P1–P2 on log paths + AUDIT `CONFIG_CHANGE` | FSSCAN | – | low | none | attack sim | MISSING | MISSING |
+| AV2 | Selected log forwarding | O | context | `log.record` | JOURNAL | file tail | policy volume cap | med | log content | VM | MISSING | MISSING |
+| AW1 | Cloud instance identity (AWS/Azure/GCP) | S | Asset context | `state.cloud` | IMDS (IMDSv2) at start, opt-in | DMI hints | – | – | account ids | mocked IMDS | MISSING | MISSING |
+| AW2 | IMDS access by processes | S | T1552.005 | `network.connect` tagged `imds` | Z1 | – | – | low | none | attack sim | MISSING | MISSING |
 
 ### AX–BB. Intelligence, forensics, state, prevention and response
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| AX1 | Indicator matching (hash, IP, domain, path) from policy | M | IOC hits | `detection` (`ioc.*`) | pipeline matcher | – | bounded set size | low | none | unit | MISSING | |
-| AY1 | Forensic evidence (process, maps, fds, env, sockets, exe copy, persistence, logs, packages, container) | M | Investigation | `evidence.*` | responder + state engine | – | memory capture bounded | on demand | high → audit trail | e2e | PARTIAL | |
-| AZ1 | Live host-state query for every §9 object | M | Hunting | `state.*` on demand | state engine + `QUERY_STATE` + `panopticon-ctl query` | – | – | on demand | per object | e2e | MISSING | |
-| BA1 | Exec prevention by hash/path | M | T1204 | `prevention.blocked` | EBPF-LSM `bprm_check_security` | FANOTIFY `FAN_OPEN_EXEC_PERM` | fanotify adds exec latency | low | none | attack sim | MISSING | |
-| BA2 | Network destination blocking | S | C2 | `prevention.blocked` | EBPF-LSM `socket_connect` | nft set via helper | – | low | none | attack sim | MISSING | |
-| BA3 | Kernel module / BPF load prevention | S | T1547.006 | `prevention.blocked` | EBPF-LSM `kernel_read_file`, `bpf` | – (detect only) | – | low | none | attack sim | MISSING | |
-| BA4 | Modes off/audit/protect, expiry, kill switch, protected allowlist | M | Safety | `policy.applied` | policy engine | – | – | – | none | unit + VM | MISSING | |
-| BB1 | Terminate process (pidfd, identity-verified) | M | Containment | `response.result` | PIDFD | kill() after start-time check | fallback race window | – | none | e2e | PARTIAL | |
-| BB2 | Terminate process tree | M | Containment | `response.result` | PIDFD stop-then-kill | `cgroup.kill` (5.14) for container scope | – | – | none | e2e | MISSING | |
-| BB3 | Quarantine / restore | M | Containment | `response.result` | OPENAT2 + quarantine store | `O_NOFOLLOW` walk | – | – | content retained | e2e | PARTIAL | |
-| BB4 | Block hash / path | M | Containment | `policy.applied` | BA1 | – | – | – | none | e2e | MISSING | |
-| BB5 | Block network destination | S | Containment | `policy.applied` | BA2 | – | – | – | none | e2e | MISSING | |
-| BB6 | Host isolation / release | M | Containment | `response.result` | NFT helper | – | – | – | none | e2e | IMPL | |
+| AX1 | Indicator matching (hash, IP, domain, path) from policy | M | IOC hits | `detection` (`ioc.*`) | pipeline matcher | – | bounded set size | low | none | unit | MISSING | MISSING |
+| AY1 | Forensic evidence (process, maps, fds, env, sockets, exe copy, persistence, logs, packages, container) | M | Investigation | `evidence.*` | responder + state engine | – | memory capture bounded | on demand | high → audit trail | e2e | PARTIAL | PARTIAL |
+| AZ1 | Live host-state query for every §9 object | M | Hunting | `state.*` on demand | state engine + `QUERY_STATE` + `panopticon-ctl query` | – | – | on demand | per object | e2e | MISSING | MISSING |
+| BA1 | Exec prevention by hash/path | M | T1204 | `prevention.blocked` | EBPF-LSM `bprm_check_security` | FANOTIFY `FAN_OPEN_EXEC_PERM` | fanotify adds exec latency | low | none | attack sim | MISSING | MISSING |
+| BA2 | Network destination blocking | S | C2 | `prevention.blocked` | EBPF-LSM `socket_connect` | nft set via helper | – | low | none | attack sim | MISSING | MISSING |
+| BA3 | Kernel module / BPF load prevention | S | T1547.006 | `prevention.blocked` | EBPF-LSM `kernel_read_file`, `bpf` | – (detect only) | – | low | none | attack sim | MISSING | MISSING |
+| BA4 | Modes off/audit/protect, expiry, kill switch, protected allowlist | M | Safety | `policy.applied` | policy engine | – | – | – | none | unit + VM | MISSING | MISSING |
+| BB1 | Terminate process (pidfd, identity-verified) | M | Containment | `response.result` | PIDFD | kill() after start-time check | fallback race window | – | none | e2e | PARTIAL | PARTIAL |
+| BB2 | Terminate process tree | M | Containment | `response.result` | PIDFD stop-then-kill | `cgroup.kill` (5.14) for container scope | – | – | none | e2e | MISSING | MISSING |
+| BB3 | Quarantine / restore | M | Containment | `response.result` | OPENAT2 + quarantine store | `O_NOFOLLOW` walk | – | – | content retained | e2e | PARTIAL | PARTIAL |
+| BB4 | Block hash / path | M | Containment | `policy.applied` | BA1 | – | – | – | none | e2e | MISSING | MISSING |
+| BB5 | Block network destination | S | Containment | `policy.applied` | BA2 | – | – | – | none | e2e | MISSING | MISSING |
+| BB6 | Host isolation / release | M | Containment | `response.result` | NFT helper | – | – | – | none | e2e | IMPL | IMPL |
 
 ### BC–BO. Product, reliability and operations
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| BC1 | Tamper detection (kill attempts, unit disable, binary/config replacement, BPF detach, WAL deletion) | M | T1562.001 | `tamper.*` | EBPF signal + file hooks on sensor paths; watchdog; self-integrity | FIM of sensor paths | root can stop any agent; detection emitted before death where possible | low | none | attack sim | MISSING | |
-| BC2 | Tamper prevention (protect mode) | S | T1562.001 | `prevention.blocked` | EBPF-LSM `task_kill`, `file_open`, `bpf` | detection only | needs BPF-LSM | low | none | attack sim | MISSING | |
-| BD1 | Per-provider health, coverage, reasons | M | Silent blind spots | `health` | coverage manager | – | – | low | none | VM matrix | PARTIAL | |
-| BD2 | Diagnostics bundle | S | Supportability | file | `panopticon-ctl diagnose` | – | redacted | on demand | redaction | e2e | MISSING | |
-| BE1 | Loss accounting (kernel, queue, WAL, shedding) | M | Silent loss | `loss` | counters at every stage | – | – | – | none | perf/chaos | MISSING | |
-| BF1 | Durable offline operation (crash-safe WAL, quota, accounted drop) | M | Evidence loss | – | WAL | – | – | budgeted | 0700 state dir | chaos | PARTIAL | |
-| BG1 | Secure resilient transport (TLS 1.2+, CA pinning, identity, seq ack, backoff, compression) | M | MITM, loss | – | libcurl | – | – | – | in transit | e2e + chaos | PARTIAL | |
-| BG2 | Low latency (p95 host→Manager < 5 s normal load) | S | Timeliness | – | uplink | – | – | – | – | perf | MISSING | |
-| BH1 | Strict config + signed versioned policy | M | Tampering | `policy.applied` | config loader + policy engine | – | – | – | none | unit | PARTIAL | |
-| BI1 | Update / rollback | M | Bricked fleet | `sensor.updated` | package + rollback check | – | – | – | none | VM | MISSING | |
-| BJ1 | deb/rpm, systemd units, SBOM, signing | M | Supply chain | – | CPack + scripts | – | signing key is a release secret | – | none | VM install | MISSING | |
-| BK1 | Kernel/distro compatibility with per-capability fallback | M | Silent failure | `health.coverage` | prober | – | – | – | none | matrix | MISSING | |
-| BL1 | Performance budgets and governor | M | Host destabilisation | `health.resources`, `loss` | governor | – | – | – | none | perf | MISSING | |
-| BM1 | Recovery (crash restart, WAL replay, re-attach, resync) | M | Gaps after crash | `sensor.started` | systemd + WAL + reconcile | – | – | – | none | chaos | PARTIAL | |
-| BN1 | Test infrastructure (unit, ground truth, attack, fuzz, chaos, matrix) | M | Regressions | – | – | – | – | – | – | CI + VM | PARTIAL | |
-| BO1 | Hardening (systemd sandboxing, capability bounding, FORTIFY, PIE/RELRO/NX, stack protector, no shell-outs) | M | Sensor as attack surface | – | build + units | – | – | – | – | checksec + review | PARTIAL | |
+| BC1 | Tamper detection (kill attempts, unit disable, binary/config replacement, BPF detach, WAL deletion) | M | T1562.001 | `tamper.*` | EBPF signal + file hooks on sensor paths; watchdog; self-integrity | FIM of sensor paths | root can stop any agent; detection emitted before death where possible | low | none | attack sim | MISSING | MISSING |
+| BC2 | Tamper prevention (protect mode) | S | T1562.001 | `prevention.blocked` | EBPF-LSM `task_kill`, `file_open`, `bpf` | detection only | needs BPF-LSM | low | none | attack sim | MISSING | MISSING |
+| BD1 | Per-provider health, coverage, reasons | M | Silent blind spots | `health` | coverage manager | – | – | low | none | VM matrix | PARTIAL | PARTIAL |
+| BD2 | Diagnostics bundle | S | Supportability | file | `panopticon-ctl diagnose` | – | redacted | on demand | redaction | e2e | MISSING | MISSING |
+| BE1 | Loss accounting (kernel, queue, WAL, shedding) | M | Silent loss | `loss` | counters at every stage | – | – | – | none | perf/chaos | MISSING | PARTIAL |
+| BF1 | Durable offline operation (crash-safe WAL, quota, accounted drop) | M | Evidence loss | – | WAL | – | – | budgeted | 0700 state dir | chaos | PARTIAL | PARTIAL |
+| BG1 | Secure resilient transport (TLS 1.2+, CA pinning, identity, seq ack, backoff, compression) | M | MITM, loss | – | libcurl | – | – | – | in transit | e2e + chaos | PARTIAL | PARTIAL |
+| BG2 | Low latency (p95 host→Manager < 5 s normal load) | S | Timeliness | – | uplink | – | – | – | – | perf | MISSING | MISSING |
+| BH1 | Strict config + signed versioned policy | M | Tampering | `policy.applied` | config loader + policy engine | – | – | – | none | unit | PARTIAL | PARTIAL |
+| BI1 | Update / rollback | M | Bricked fleet | `sensor.updated` | package + rollback check | – | – | – | none | VM | MISSING | MISSING |
+| BJ1 | deb/rpm, systemd units, SBOM, signing | M | Supply chain | – | CPack + scripts | – | signing key is a release secret | – | none | VM install | MISSING | MISSING |
+| BK1 | Kernel/distro compatibility with per-capability fallback | M | Silent failure | `health.coverage` | prober | – | – | – | none | matrix | MISSING | MISSING |
+| BL1 | Performance budgets and governor | M | Host destabilisation | `health.resources`, `loss` | governor | – | – | – | none | perf | MISSING | MISSING |
+| BM1 | Recovery (crash restart, WAL replay, re-attach, resync) | M | Gaps after crash | `sensor.started` | systemd + WAL + reconcile | – | – | – | none | chaos | PARTIAL | PARTIAL |
+| BN1 | Test infrastructure (unit, ground truth, attack, fuzz, chaos, matrix) | M | Regressions | – | – | – | – | – | – | CI + VM | PARTIAL | PARTIAL |
+| BO1 | Hardening (systemd sandboxing, capability bounding, FORTIFY, PIE/RELRO/NX, stack protector, no shell-outs) | M | Sensor as attack surface | – | build + units | – | – | – | – | checksec + review | PARTIAL | PARTIAL |
 
 ### Additional categories found during research
 
 | ID | Capability | Req | Why added | Primary | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- |
-| EX1 | io_uring visibility | S | io_uring operations bypass syscall-level hooks — a publicly demonstrated EDR blind spot in 2025; LSM/security hooks still fire for file and network operations issued through it | security_* fentry/LSM hooks rather than syscall hooks; `io_uring_setup` recorded | MISSING | |
-| EX2 | Clock tampering | O | Timeline integrity | EBPF `security_settime64` | MISSING | |
-| EX3 | Core dumps and `core_pattern` changes | S | Credential dumping via cores; `core_pattern` persistence | C1 re-poll + CNPROC coredump | MISSING | |
-| EX4 | Sysctl changes | S | Posture weakening | C1 re-poll + file hooks on `/proc/sys` | MISSING | |
-| EX5 | Reverse-shell composite | M | Very common intrusion step | G5 + Z1 → local rule | MISSING | |
-| EX6 | comm/argv rewrite masquerade (`prctl(PR_SET_NAME)`) | S | T1036.004 | `task_rename` tracepoint | MISSING | |
-| EX7 | Clock domain alignment (boot-time ns → wall clock) | M | Timeline correctness across providers | periodic `CLOCK_BOOTTIME`↔`CLOCK_REALTIME` sampling | MISSING | |
+| EX1 | io_uring visibility | S | io_uring operations bypass syscall-level hooks — a publicly demonstrated EDR blind spot in 2025; LSM/security hooks still fire for file and network operations issued through it | security_* fentry/LSM hooks rather than syscall hooks; `io_uring_setup` recorded | MISSING | MISSING |
+| EX2 | Clock tampering | O | Timeline integrity | EBPF `security_settime64` | MISSING | MISSING |
+| EX3 | Core dumps and `core_pattern` changes | S | Credential dumping via cores; `core_pattern` persistence | C1 re-poll + CNPROC coredump | MISSING | MISSING |
+| EX4 | Sysctl changes | S | Posture weakening | C1 re-poll + file hooks on `/proc/sys` | MISSING | MISSING |
+| EX5 | Reverse-shell composite | M | Very common intrusion step | G5 + Z1 → local rule | MISSING | MISSING |
+| EX6 | comm/argv rewrite masquerade (`prctl(PR_SET_NAME)`) | S | T1036.004 | `task_rename` tracepoint | MISSING | PARTIAL |
+| EX7 | Clock domain alignment (boot-time ns → wall clock) | M | Timeline correctness across providers | periodic `CLOCK_BOOTTIME`↔`CLOCK_REALTIME` sampling | MISSING | PARTIAL |
 
 ## 3. Per-capability completion rule
 
@@ -240,3 +240,4 @@ A row moves to **IMPL** only when all of the following are true and recorded in
 | Date | Commit | Run | Summary |
 | --- | --- | --- | --- |
 | 2026-10-06 | 335dae0 (baseline) | 0 | 1 IMPL (host isolation), 18 PARTIAL, the rest MISSING. Weakest subsystem: everything continuous — there is no resident sensor. |
+| 2026-10-06 | S1 (resident sensor core) | 1 | Resident `panopticon-sensord` with CNPROC lifecycle + procfs enrichment/reconcile, entity graph, endpoint/1.0 serializer, CRC-checked WAL, provider health and loss records. 17 rows moved MISSING → PARTIAL (C2, D1, D3, D4, E2, F2, G4, H2, I1, J1, K1, T1, V1, AS1, BE1, EX6, EX7) and 11 baseline-PARTIAL rows (D2, E1, F1, G1, G2, H1, L1, BD1, BF1, BM1, BN1) now have resident, real-kernel evidence — fallback mechanisms only; every primary eBPF mechanism is S2. Totals: 1 IMPL, 38 PARTIAL, 75 MISSING. (Correction to run 0: the Baseline column holds 21 PARTIAL, not 18.) Still 1 IMPL: no row satisfies rule §3.1 (primary mechanism on two kernels) or §3.5 (Manager + Detection Engine consumption). Weakest subsystem now: kernel-level visibility (no eBPF) and everything beyond process lifecycle. |

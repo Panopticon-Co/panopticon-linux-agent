@@ -36,4 +36,14 @@ not copied. Each result records commit, environment and tool.
 
 | Date | Commit | Environment | Workload | Result |
 | --- | --- | --- | --- | --- |
-| – | – | – | – | No measurements yet; first run after the resident sensor lands. |
+| 2026-10-06 | S1 (uncommitted tree, release build) | Ubuntu 22.04 VM, 5.15.0-91, 2 vCPU, ext4 | Idle 20 s, `--stdout` to file | 85 ms CPU total (≈0.4 % of one core, mostly the startup procfs scan); 5 MB RSS |
+| 2026-10-06 | S1, first version | same | `stress-ng --fork 4`, 4 s, CNPROC + procfs | 0 losses, all fork/exec/exit captured, seq contiguous; ≈480 µs CPU per event; 22 MB RSS |
+| 2026-10-06 | S1, after queue batching + JSON fast path | same | same | 0 losses; ≈168 µs CPU per event |
+| 2026-10-06 | S1, after netlink drain pause (5 ms) | same | same | 0 losses; 107–125 µs CPU per event (includes startup and ≈2.5 KB of JSON per event written to ext4); 17.8 MB RSS |
+
+S1 notes: CPU per event is measured from the sensor's own `health` record (`getrusage`)
+divided by emitted records; `/usr/bin/time` was not installed in the VM. The remaining
+hotspots are the output write, `poll`, JSON string escaping and the `open` of
+`/proc/<pid>/stat` on every fork. Exec latency overhead and kernel→WAL p99 latency are not
+measured yet; they need the eBPF provider (S2) and are scheduled for S11. Record size can
+shrink (an exit does not need the full parent object).

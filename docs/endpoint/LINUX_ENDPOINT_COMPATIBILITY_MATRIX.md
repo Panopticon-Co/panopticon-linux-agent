@@ -40,6 +40,7 @@ The Status column only changes after a real run recorded in §3.
 | Date | Commit | Distro / kernel / arch | Result |
 | --- | --- | --- | --- |
 | 2026-10-05 | 335dae0 | Ubuntu 22.04 / 5.15.0-91 / x86_64 | Build + unit tests pass (umask 022); isolation e2e pass; BTF, ring buffer, fentry available; BPF-LSM compiled in but inactive |
+| 2026-10-06 | S1 (feat/flagship-endpoint) | Ubuntu 22.04 / 5.15.0-91 / x86_64 | `panopticon-sensor-tests` 21/21 pass as root (live CNPROC fork/exec/exit included), 20/21 + 1 skip as a normal user; clang ASAN+UBSAN and TSAN clean; `sensord --probe` reports `netlink_proc` available; live `--stdout` run and a fork storm with 0 losses. This VM has `bpf` active in `/sys/kernel/security/lsm`. |
 
 ## 4. Test environment
 

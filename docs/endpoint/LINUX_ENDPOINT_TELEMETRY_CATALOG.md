@@ -53,6 +53,10 @@ Implementation state per type is tracked in [IMPLEMENTATION_STATUS.md](IMPLEMENT
 | `start_time` | RFC 3339 | `task->start_time` / stat starttime | |
 | `start_ticks` | uint | normalised to `CLK_TCK` | identity input |
 | `name` | string ≤ 15 | `task->comm` / `/proc/pid/comm` | never derived from the exe path |
+| `state` | string | stat state letter | `R`, `S`, `D`, `Z`, … at observation time |
+| `kernel_thread` | bool | `PF_KTHREAD` in stat flags | kernel threads have no executable or args |
+| `threads` | uint | stat `num_threads` | at observation time |
+| `confidence` | object | `identity`, `attributes` | identity can be `observed` while attributes copied from the parent at fork are `inferred` until exec or reconcile |
 | `executable` | object | §3.2 | |
 | `args` | string[] | `mm->arg_start..arg_end` / cmdline | bounded (64 args, 4 KiB) |
 | `args_truncated` | bool | | |
@@ -69,7 +73,11 @@ Implementation state per type is tracked in [IMPLEMENTATION_STATUS.md](IMPLEMENT
 | `user` | object | `name`, `group` | resolved from uid/gid |
 | `container` | object | §3.4 | |
 | `ancestry` | array | up to 8 `{entity_id, pid, name, executable}` | nearest first |
-| `exit_code`, `exit_signal` | int | exit events only | |
+| `exit_code`, `exit_signal`, `core_dumped` | int / bool | exit events only | decoded from the kernel wait status |
+
+Event-level fields alongside `process`: `previous_executable` (exec: the image the entity ran
+before this exec), `previous_name` (`process.rename`), `creds_before` (`process.cred_change`),
+`technique` (`process.inject`).
 
 ### 3.2 `executable` / `file`
 
@@ -104,6 +112,7 @@ Implementation state per type is tracked in [IMPLEMENTATION_STATUS.md](IMPLEMENT
 | `process.exec` | process, parent | ebpf `sched_process_exec` | netlink_proc + procfs |
 | `process.exit` | process (`exit_code`, `exit_signal`) | ebpf `sched_process_exit` | netlink_proc; reconcile (`inferred`) |
 | `process.discovered` | process | procfs reconcile (`reconstructed`) | – |
+| `process.rename` | process, `previous_name` | ebpf `task_rename` | netlink_proc comm |
 | `process.cred_change` | process, `creds_before`, `caps_before` | ebpf `commit_creds` | netlink_proc uid/gid |
 | `process.ns_change` | process, `ns_before` | ebpf | reconcile |
 | `process.inject` | process (actor), `target`, `technique` (`ptrace_attach`, `vm_writev`, `proc_mem_write`) | ebpf | netlink_proc ptrace |
@@ -141,9 +150,12 @@ start, on a schedule, and on `QUERY_STATE` commands.
 ## 6. Health, loss and policy
 
 * `health`: `health {status, providers[{name, state, reason, capabilities[], events, drops}],
-  coverage {capability: provider|null}, resources {rss_bytes, cpu_seconds, wal_bytes,
+  coverage {capability: provider|null}, resources {rss_bytes, cpu_milliseconds, wal_bytes,
   wal_records}, kernel {release, btf, bpf_lsm, ringbuf}}`.
-* `loss`: `loss {stage (kernel, queue, wal, governor, transport), count, by_type{}}`.
+* `loss`: `loss {stage (kernel, queue, wal, governor, transport), count, by_type{}, detail}`.
+  WAL losses carry the reason in `detail`: `torn_tail`, `corrupt_segment`, `gap`, `quota`.
+* The `procfs` provider always appears in `providers[]`: it is the reconciler that backs every
+  process capability when no kernel provider is active.
 * `policy`: `policy {version, applied, errors[]}`.
 
 ## 7. Detection, evidence, response
