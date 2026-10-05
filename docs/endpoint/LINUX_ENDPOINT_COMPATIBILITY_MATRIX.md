@@ -41,6 +41,7 @@ The Status column only changes after a real run recorded in §3.
 | --- | --- | --- | --- |
 | 2026-10-05 | 335dae0 | Ubuntu 22.04 / 5.15.0-91 / x86_64 | Build + unit tests pass (umask 022); isolation e2e pass; BTF, ring buffer, fentry available; BPF-LSM compiled in but inactive |
 | 2026-10-06 | S1 (feat/flagship-endpoint) | Ubuntu 22.04 / 5.15.0-91 / x86_64 | `panopticon-sensor-tests` 21/21 pass as root (live CNPROC fork/exec/exit included), 20/21 + 1 skip as a normal user; clang ASAN+UBSAN and TSAN clean; `sensord --probe` reports `netlink_proc` available; live `--stdout` run and a fork storm with 0 losses. This VM has `bpf` active in `/sys/kernel/security/lsm`. |
+| 2026-10-06 | S2 (feat/flagship-endpoint) | Ubuntu 22.04 / 5.15.0-91 / x86_64 | eBPF process provider: all six programs (fork, exec, exit, rename, commit_creds, security_ptrace_access_check) load and attach through the real verifier; `panopticon-ebpf-tests` 12/12 pass as root (4 decoder, 1 wiring, 7 live ground truth); ASAN+UBSAN and TSAN clean; `sensord --probe` reports `ebpf_process` available; `--no-ebpf` falls back to `netlink_proc`; fork storm with 0 losses. Single kernel only: a second kernel (e.g. 6.x on Ubuntu 24.04) is still needed before any row is marked IMPLEMENTED. |
 
 ## 4. Test environment
 

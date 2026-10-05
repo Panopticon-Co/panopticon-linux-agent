@@ -115,7 +115,7 @@ before this exec), `previous_name` (`process.rename`), `creds_before` (`process.
 | `process.rename` | process, `previous_name` | ebpf `task_rename` | netlink_proc comm |
 | `process.cred_change` | process, `creds_before`, `caps_before` | ebpf `commit_creds` | netlink_proc uid/gid |
 | `process.ns_change` | process, `ns_before` | ebpf | reconcile |
-| `process.inject` | process (actor), `target`, `technique` (`ptrace_attach`, `vm_writev`, `proc_mem_write`) | ebpf | netlink_proc ptrace |
+| `process.inject` | process (actor), `target`, `technique` (`ptrace_attach` from netlink_proc; `ptrace_access` from eBPF, which also covers `process_vm_*` and `/proc/<pid>/mem` access checks; `vm_writev`, `proc_mem_write` later) | ebpf | netlink_proc ptrace |
 | `process.signal` | process (sender), `target`, `signal` | ebpf `signal_generate` | – |
 | `memory.exec_mapping` | process, `prot`, `flags`, file, `technique` (`anon_exec`, `mprotect_exec`, `wx`) | ebpf | procfs maps |
 | `library.load` | process, file | ebpf `security_mmap_file` | procfs maps diff |
@@ -137,6 +137,8 @@ before this exec), `previous_name` (`process.rename`), `creds_before` (`process.
 | `posture.changed` | `posture {item, before, after}` | sysfs/procfs poll | – |
 | `container.started`, `container.stopped` | container | cgroup-derived | runtime poll |
 | `tamper.*` | process (actor), `tamper {target, technique}` | ebpf | file events |
+
+Process images: when procfs can no longer be read at exec time (short-lived processes), `process.executable.path` is the string given to `execve` (it may be relative, or a symlink such as `/bin/true`), `kind` is `file`, and the file metadata (`dev`, `inode`, `size`) is absent; `process.name` is its basename. The pre-exec image is never carried over.
 
 ## 5. State records
 

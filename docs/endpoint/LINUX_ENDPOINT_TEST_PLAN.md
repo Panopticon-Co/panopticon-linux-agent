@@ -68,10 +68,12 @@ foreign BPF detach attempts; binary replacement; downgrade attempt.
 | Binary | Level | Contents |
 | --- | --- | --- |
 | `panopticon-sensor-tests` | unit + ground truth + provider integration | JSON escaping and UTF-8 replacement; clock round trip; `stat` parsing with a hostile `comm`; `status` parsing; cmdline bounds; exe-link classification; fake-procfs read; ground truth on the real kernel: exec with argv and env allowlist (secret keys excluded), exec of a deleted binary, memfd `fexecve`; entity-graph lifecycle (fork, exec, rename, cred change, ptrace inject, exit, duplicate exit, PID reuse); reconcile infers a missed exit; exit-status decoding; CNPROC message decoding; live CNPROC fork/exec/exit (root, skipped otherwise); CRC-32C check value; WAL append/read/ack/recover across segments, torn tail, quota and corruption; pipeline end to end with a scripted provider; strict config; record-queue FIFO and drop counting |
+| `panopticon-ebpf-tests` | unit + live ground truth | decoder for every event kind (fork, exec with argv containing spaces and empty arguments, exit, rename, credential change of uid/gid, ptrace access), argv truncation by limit and by kernel flag, rejection of malformed samples (null, short, oversized, unknown kind, `args_len` beyond the buffer or the received bytes); `ebpf_process` and `netlink_proc` declare one provider family; live on the real kernel through a self re-exec child: exact exit code and argv, in-kernel start time equals `/proc/<pid>/stat`, death by `SIGKILL`, exactly one rename (the kernel's own exec rename is not reported), uid and gid change with no event for a plain exec, ptrace access with the correct tracer, one process exit for a multi-threaded process whose leader exits first (reported when the last thread ends). Live tests need root and a BTF kernel and print SKIP otherwise |
 | `panopticon-linux-agent-core-tests` | unit | pre-existing command/config/isolation tests. Known environmental failure: "regular configuration file must load" fails when the umask is 0002 (the test file is group-writable and correctly rejected); passes with umask 022 |
 
-Ground-truth items from §2 covered so far: 1, 3 (in the entity graph), 9, 11. The rest need
-the eBPF provider or a PID namespace harness (S2).
+Ground-truth items from §2 covered so far: 1, 3 (in the entity graph), 9, 11, and with the eBPF
+provider the short-lived process, exit status, rename, credential and thread-group cases. The
+rest need a PID namespace / container harness.
 
 ## 8. Commands
 
@@ -80,5 +82,6 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ctest --test-dir build --output-on-failure      # unit + contract
 sudo build/panopticon-sensor-tests              # includes live netlink proc
+sudo build/panopticon-ebpf-tests                # live eBPF ground truth (skips without BPF)
 sudo tests/ground_truth/run.sh build            # process model (root, VM)
 ```

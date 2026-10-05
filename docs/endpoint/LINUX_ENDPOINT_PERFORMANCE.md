@@ -41,6 +41,18 @@ not copied. Each result records commit, environment and tool.
 | 2026-10-06 | S1, after queue batching + JSON fast path | same | same | 0 losses; ≈168 µs CPU per event |
 | 2026-10-06 | S1, after netlink drain pause (5 ms) | same | same | 0 losses; 107–125 µs CPU per event (includes startup and ≈2.5 KB of JSON per event written to ext4); 17.8 MB RSS |
 
+| 2026-10-06 | S2, debug build | same | 2000 × `/bin/true` (6071 events), eBPF process provider (netlink on standby) + procfs | 0 losses; ≈640 µs CPU per event over the storm window |
+| 2026-10-06 | S2 | same | same workload, `--no-ebpf` (netlink_proc + procfs) | 0 losses; ≈520 µs CPU per event |
+| 2026-10-06 | S2 | same | 4 × 4000 `/bin/true` (48 024 events, 16 003 execs), eBPF | 0 losses; 16 003 execs for 16 000 spawns (+3 from the harness shell); fork, exec and exit counts equal |
+
+S2 notes: the eBPF provider does **not** lower user-space CPU per event. The entity graph's
+procfs enrichment (`read_process` per exec, reconcile) dominates, so the provider's gain is
+correctness: argv captured at exec, in-kernel start time, no PID-reuse race, exact last-thread
+exit semantics, and drop accounting from the ring buffer. These per-event numbers come from a
+shared 2-vCPU VM with the workload generator competing for CPU and are not comparable with the
+S1 rows (different workload and event mix); S11 re-measures both providers on a quiet host and
+profiles `read_process`. Exec latency overhead and provider start-up cost are still unmeasured.
+
 S1 notes: CPU per event is measured from the sensor's own `health` record (`getrusage`)
 divided by emitted records; `/usr/bin/time` was not installed in the VM. The remaining
 hotspots are the output write, `poll`, JSON string escaping and the `open` of

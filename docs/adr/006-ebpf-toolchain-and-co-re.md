@@ -30,6 +30,13 @@ loaders which do not fit the C++20 codebase (ADR 003).
 ## Consequences
 
 * One binary per architecture covers all supported kernels with BTF.
-* Build hosts need clang ≥ 12 and libelf/zlib (for libbpf).
+* Build hosts need clang ≥ 12 and libelf/zlib (for libbpf). libbpf itself is vendored and
+  linked statically, but libelf (and zlib) are still dynamic **runtime** dependencies of the
+  sensor binary; packaging (S10) must declare them or link them statically.
+* A committed `vmlinux.h` exists for x86_64 only. aarch64 builds disable the eBPF provider with
+  an explanatory CMake message until one is generated on an aarch64 kernel; the sensor then runs
+  on netlink_proc + procfs.
+* Optional programs that a kernel cannot host leave their capability uncovered even though the
+  fallback provider is on standby; the fallback only takes over when the whole provider fails.
 * Verifier limits are a design constraint (bounded loops, 512-byte stack, per-CPU scratch maps
   for large records).
