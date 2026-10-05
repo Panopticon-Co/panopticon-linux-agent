@@ -202,6 +202,13 @@ std::vector<process_event> entity_graph::on_exec(const raw_record& record, const
     } else if (prior) {
         entity->info = prior->info;
         entity->info.unavailable.clear();
+        // exec replaced the image: the pre-exec executable and name describe a program that no
+        // longer runs, so they must not survive when procfs can no longer tell us the new one.
+        entity->info.executable = {};
+        if (exec.filename.has_value()) {
+            const auto slash = exec.filename->find_last_of('/');
+            entity->info.comm = exec.filename->substr(slash == std::string::npos ? 0U : slash + 1U, 15U);
+        }
         entity->attributes = confidence::inferred;
         entity->identity = prior->identity;
         entity->info.mark_unavailable("process.executable", unavailable_reason::process_exited);
@@ -223,15 +230,22 @@ std::vector<process_event> entity_graph::on_exec(const raw_record& record, const
         }
     }
     if (exec.start_ticks.has_value()) entity->info.start_ticks = *exec.start_ticks;
-    // Values captured in-kernel at exec time are authoritative over a later procfs read.
-    if (exec.filename.has_value()) {
+    // The kernel-captured path is what execve() was given (possibly relative, or /dev/fd/N for
+    // fexecve), so it is only used when procfs could not resolve the executable; a resolved
+    // /proc/<pid>/exe is more informative (absolute, and it exposes memfd and deleted images).
+    if (exec.filename.has_value() && entity->info.executable.kind == executable_kind::unknown) {
         auto [path, kind] = classify_exe_link(*exec.filename);
         entity->info.executable.path = std::move(path);
-        if (entity->info.executable.kind == executable_kind::unknown) entity->info.executable.kind = kind;
+        entity->info.executable.kind = kind;
+        std::erase_if(entity->info.unavailable, [](const unavailable_field& field) { return field.field == "process.executable"; });
     }
+    // Arguments captured in-kernel at exec time are authoritative over a later procfs read: the
+    // process may already have rewritten its argv, or be gone.
     if (exec.args.has_value()) {
         entity->info.args = *exec.args;
+        entity->info.args_truncated = exec.args_truncated;
         entity->attributes = confidence::observed;
+        std::erase_if(entity->info.unavailable, [](const unavailable_field& field) { return field.field == "process.args"; });
     }
 
     entity->exec_gen = prior ? prior->exec_gen + 1U : 1U;
@@ -295,7 +309,7 @@ std::vector<process_event> entity_graph::on_ptrace(const raw_record& record, con
     const auto target = lookup_or_load(trace.tgid, record.time_unix_ns);
     auto event = make_event("process.inject", record, tracer);
     event.target = target;
-    event.technique = "ptrace_attach";
+    event.technique = trace.technique;
     if (!tracer) event.unavailable.push_back({"process", unavailable_reason::process_exited});
     return {std::move(event)};
 }

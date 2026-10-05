@@ -30,6 +30,7 @@ struct sensor_config {
     std::uint64_t health_interval_seconds{60U};
     std::uint64_t state_interval_seconds{3600U};
     bool collect_environment{true};
+    bool enable_ebpf{true};  // false: skip the eBPF provider; netlink_proc and procfs only
     std::size_t maximum_args{64U};
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};
@@ -95,7 +96,8 @@ public:
                     std::vector<std::unique_ptr<provider>> providers);
     ~sensor_pipeline();
 
-    // Starts providers (an unavailable provider degrades coverage, it is not fatal), seeds the
+    // Starts providers (an unavailable provider degrades coverage, it is not fatal; of several
+    // providers in one family only the first that starts runs), seeds the
     // entity graph and emits the initial health and state.processes records.
     [[nodiscard]] result<bool> start();
     // Processes queued records and periodic work until `stop` becomes true or `deadline_ns`
@@ -125,6 +127,7 @@ private:
     entity_graph graph_;
     record_queue queue_;
     std::vector<std::unique_ptr<provider>> providers_;
+    std::vector<std::string> standby_;  // per provider: name of the family member that superseded it, else empty
     pipeline_metrics metrics_;
     std::vector<raw_record> batch_;
     std::uint64_t last_reconcile_ns_{};

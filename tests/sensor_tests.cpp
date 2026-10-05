@@ -362,6 +362,68 @@ void test_entity_graph_lifecycle() {
     require(events.size() == 1U && events[0].process->entity_id != child_id, "reused pid gets a new entity id");
 }
 
+void test_entity_graph_prefers_kernel_arguments_and_paths() {
+    const auto root = fresh_directory("graphkernel");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "bash", 500U, "/usr/bin/bash", {"-bash"}}.write(root);
+    // procfs shows arguments the process rewrote after exec; the kernel saw the original ones.
+    fake_process{200U, 100U, "curl", 900U, "/usr/bin/curl", {"curl", "-s", "https://rewritten.invalid"}}.write(root);
+    clock_domain clock;
+    entity_graph graph{{"host-1", "boot-1", root, {}, 30'000'000'000ULL, 1024U, 8U}, clock};
+    (void)graph.reconcile(1U, false);
+
+    raw_exec observed;
+    observed.tgid = 200U;
+    observed.pid = 200U;
+    observed.filename = "./curl";
+    observed.args = std::vector<std::string>{"curl", "-s", "http://original.invalid"};
+    observed.start_ticks = 900U;
+    auto events = graph.apply(record_of(observed));
+    require(events.size() == 1U && events[0].type == "process.exec", "exec event");
+    const auto& info = events[0].process->info;
+    require(info.args == std::vector<std::string>({"curl", "-s", "http://original.invalid"}), "kernel-captured argv wins over procfs");
+    require(events[0].process->attributes == confidence::observed, "attributes are observed when argv came from the kernel");
+    require(info.executable.path == "/usr/bin/curl" && info.executable.kind == executable_kind::file,
+            "a resolved procfs executable wins over the raw execve string");
+
+    // The process is already gone from procfs: the kernel-captured path and argv are all there is.
+    raw_exec gone;
+    gone.tgid = 300U;
+    gone.pid = 300U;
+    gone.filename = "./tool";
+    gone.args = std::vector<std::string>{"tool", "--x"};
+    gone.start_ticks = 777U;
+    gone.args_truncated = true;
+    events = graph.apply(record_of(gone));
+    require(events.size() == 1U, "exec of a process that has already exited");
+    const auto& vanished = *events[0].process;
+    require(vanished.entity_id == compute_entity_id("host-1", "boot-1", 300U, 777U), "identity from the kernel start time");
+    require(vanished.identity == confidence::observed && vanished.attributes == confidence::observed, "observed provenance");
+    require(vanished.info.executable.path == "./tool" && vanished.info.args.size() == 2U && vanished.info.args_truncated,
+            "kernel path, argv and truncation flag survive");
+    for (const auto& field : vanished.info.unavailable) {
+        require(field.field != "process.executable" && field.field != "process.args", "no stale unavailable marker for " + field.field);
+    }
+
+    // A short-lived child: seen as a copy of its parent at fork, gone from procfs by the time its
+    // exec is processed. The exec must describe the new program, not the pre-exec parent image.
+    fake_process{400U, 100U, "bash", 1200U, "/usr/bin/bash", {"-bash"}}.write(root);
+    (void)graph.apply(record_of(raw_fork{100U, 100U, 400U, 400U, std::nullopt}));
+    fs::remove_all(root / "400");
+    raw_exec shortlived;
+    shortlived.tgid = 400U;
+    shortlived.pid = 400U;
+    shortlived.filename = "/usr/bin/true";
+    shortlived.args = std::vector<std::string>{"/bin/true"};
+    shortlived.start_ticks = 1200U;
+    events = graph.apply(record_of(shortlived));
+    require(events.size() == 1U && events[0].type == "process.exec", "exec of a short-lived child");
+    const auto& child = *events[0].process;
+    require(child.info.executable.path == "/usr/bin/true", "executable is the exec'd program, not the inherited parent image");
+    require(child.info.comm == "true", "name follows the exec'd program");
+    require(events[0].previous_executable == "/usr/bin/bash", "the previous image is still reported as such");
+}
+
 void test_entity_graph_reconcile_infers_missed_exit() {
     const auto root = fresh_directory("reconcileproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
@@ -625,6 +687,80 @@ void test_pipeline_end_to_end_with_scripted_provider() {
     require(!contains(*exec, "hunter2"), "secret environment never serialised");
 }
 
+// A provider that belongs to a family and can be told to fail, for the fallback chain.
+class family_provider final : public provider {
+public:
+    family_provider(std::string name, std::string probe_failure)
+        : name_{std::move(name)}, probe_failure_{std::move(probe_failure)} {}
+    std::string_view name() const noexcept override { return name_; }
+    std::string_view family() const noexcept override { return "process"; }
+    std::vector<std::string> capabilities() const override { return {"process.fork", "process.exec", "process.exit"}; }
+    std::string probe() override { return probe_failure_; }
+    result<bool> start(record_queue&) override {
+        active_ = true;
+        started = true;
+        return true;
+    }
+    void stop() override { active_ = false; }
+    provider_health health() const override {
+        return {name_, active_ ? "active" : "unavailable", active_ ? "" : probe_failure_, capabilities(), 0U, 0U};
+    }
+    std::uint64_t take_losses() override { return 0U; }
+    bool started{false};
+
+private:
+    std::string name_;
+    std::string probe_failure_;
+    bool active_{false};
+};
+
+health_snapshot health_of_family(const std::string& first_failure, bool& first_started, bool& second_started) {
+    const auto root = fresh_directory("familyproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    auto first = std::make_unique<family_provider>("preferred", first_failure);
+    auto second = std::make_unique<family_provider>("fallback", "");
+    const auto* first_ptr = first.get();
+    const auto* second_ptr = second.get();
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::move(first));
+    providers.push_back(std::move(second));
+    sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+    value_of(pipeline.start(), "pipeline start");
+    first_started = first_ptr->started;
+    second_started = second_ptr->started;
+    auto snapshot = pipeline.health_now();
+    pipeline.shutdown();
+    std::fclose(stream);
+    return snapshot;
+}
+
+void test_provider_family_prefers_first_and_falls_back() {
+    bool first_started = false;
+    bool second_started = false;
+    auto healthy = health_of_family("", first_started, second_started);
+    require(first_started && !second_started, "only the preferred provider of a family starts");
+    const auto standby = std::find_if(healthy.providers.begin(), healthy.providers.end(), [](const provider_health& h) { return h.name == "fallback"; });
+    require(standby != healthy.providers.end() && standby->state == "standby" && contains(standby->reason, "preferred"),
+            "the other provider is reported as standby, naming who superseded it");
+    require(healthy.status == "healthy", "standby is not degradation");
+    require(healthy.coverage["process.exec"] == "preferred", "coverage names the serving provider");
+
+    auto degraded = health_of_family("kernel_feature_missing: test", first_started, second_started);
+    require(!first_started && second_started, "an unavailable preferred provider hands over to the fallback");
+    const auto failed = std::find_if(degraded.providers.begin(), degraded.providers.end(), [](const provider_health& h) { return h.name == "preferred"; });
+    require(failed != degraded.providers.end() && failed->state == "unavailable" && contains(failed->reason, "kernel_feature_missing"),
+            "the failure reason reaches health");
+    require(degraded.status == "degraded", "running on the fallback is degraded, not healthy");
+    require(degraded.coverage["process.exec"] == "fallback", "coverage follows the fallback");
+}
+
 void test_sensor_config_is_strict() {
     const auto& config = value_of(parse_sensor_config("sensor_id = s-1\nhost_id=h-1\n# comment\nqueue_capacity=4096\n"), "valid config");
     require(config.queue_capacity == 4096U && config.wal_path == "/var/lib/panopticon/wal", "values and defaults");
@@ -632,6 +768,9 @@ void test_sensor_config_is_strict() {
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nqueue_capacity=1\n")), "out of range rejected");
     require(!succeeded(parse_sensor_config("sensor_id=s\nsensor_id=t\nhost_id=h\n")), "duplicate rejected");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nwal_path=relative\n")), "relative path rejected");
+    require(!value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_ebpf=false\n"), "ebpf off").enable_ebpf, "enable_ebpf=false");
+    require(value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "defaults").enable_ebpf, "eBPF is on by default");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_ebpf=maybe\n")), "non-boolean enable_ebpf rejected");
 }
 
 void test_record_queue_counts_drops_and_keeps_order() {
@@ -669,6 +808,7 @@ int main() {
     run("ground_truth_deleted_executable", test_ground_truth_deleted_executable);
     run("ground_truth_memfd_execution", test_ground_truth_memfd_execution);
     run("entity_graph_lifecycle", test_entity_graph_lifecycle);
+    run("entity_graph_prefers_kernel_arguments_and_paths", test_entity_graph_prefers_kernel_arguments_and_paths);
     run("entity_graph_reconcile_infers_missed_exit", test_entity_graph_reconcile_infers_missed_exit);
     run("exit_status_decoding", test_exit_status_decoding);
     run("decode_proc_events", test_decode_proc_events);
@@ -677,6 +817,7 @@ int main() {
     run("wal_append_read_ack_and_recover", test_wal_append_read_ack_and_recover);
     run("wal_detects_corruption_and_enforces_quota", test_wal_detects_corruption_and_enforces_quota);
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
+    run("provider_family_prefers_first_and_falls_back", test_provider_family_prefers_first_and_falls_back);
     run("sensor_config_is_strict", test_sensor_config_is_strict);
     run("record_queue_counts_drops_and_keeps_order", test_record_queue_counts_drops_and_keeps_order);
     std::error_code ignored;

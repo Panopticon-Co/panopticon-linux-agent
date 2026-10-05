@@ -3,8 +3,10 @@
 //   panopticon-sensord --config /etc/panopticon/sensord.conf
 //   panopticon-sensord --stdout [--duration SECONDS]     development: NDJSON on stdout, no WAL
 //   panopticon-sensord --probe                           print provider availability and exit
+//   panopticon-sensord ... --no-ebpf                     skip the eBPF provider (fallback testing)
 
 #include "panopticon/linux_agent/host.hpp"
+#include "panopticon/linux_agent/sensor/ebpf_process.hpp"
 #include "panopticon/linux_agent/sensor/netlink_proc.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 
@@ -44,7 +46,7 @@ void install_signal_handlers() {
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: panopticon-sensord (--config PATH | --stdout) [--duration SECONDS] [--proc-root PATH] [--wal PATH]\n"
+                 "usage: panopticon-sensord (--config PATH | --stdout) [--duration SECONDS] [--proc-root PATH] [--wal PATH] [--no-ebpf]\n"
                  "       panopticon-sensord --probe\n");
     return 2;
 }
@@ -64,6 +66,7 @@ int main(int argc, char** argv) {
     std::string wal_path;
     bool to_stdout = false;
     bool probe_only = false;
+    bool no_ebpf = false;
     std::uint64_t duration_seconds = 0U;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument{argv[index]};
@@ -76,6 +79,8 @@ int main(int argc, char** argv) {
             to_stdout = true;
         } else if (argument == "--probe") {
             probe_only = true;
+        } else if (argument == "--no-ebpf") {
+            no_ebpf = true;
         } else if (argument == "--duration") {
             const auto* value = next();
             if (value == nullptr) return usage();
@@ -95,6 +100,10 @@ int main(int argc, char** argv) {
 
     sensor::clock_domain clock;
     if (probe_only) {
+        sensor::ebpf_process_provider ebpf{clock};
+        const auto ebpf_reason = ebpf.probe();
+        std::printf("{\"provider\":\"ebpf_process\",\"built\":%s,\"available\":%s,\"reason\":\"%s\"}\n",
+                    sensor::ebpf_process_built() ? "true" : "false", ebpf_reason.empty() ? "true" : "false", ebpf_reason.c_str());
         sensor::netlink_proc_provider netlink{clock};
         const auto reason = netlink.probe();
         std::printf("{\"provider\":\"netlink_proc\",\"available\":%s,\"reason\":\"%s\"}\n", reason.empty() ? "true" : "false",
@@ -148,6 +157,13 @@ int main(int argc, char** argv) {
 
     install_signal_handlers();
     std::vector<std::unique_ptr<sensor::provider>> providers;
+    // Preference order within the `process` family: eBPF first (in-kernel exec path, argv and exit
+    // status), the proc connector as the fallback.
+    if (config.enable_ebpf && !no_ebpf) {
+        sensor::ebpf_process_options ebpf_options;
+        ebpf_options.limits = sensor::procfs_limits{config.maximum_args, config.maximum_args_bytes, 4096U, config.collect_environment};
+        providers.push_back(std::make_unique<sensor::ebpf_process_provider>(clock, ebpf_options));
+    }
     providers.push_back(std::make_unique<sensor::netlink_proc_provider>(clock));
     sensor::sensor_pipeline pipeline{config, identity, clock, *sink, std::move(providers)};
     if (auto started = pipeline.start(); !succeeded(started)) {

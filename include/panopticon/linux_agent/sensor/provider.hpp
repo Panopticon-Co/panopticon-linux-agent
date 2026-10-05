@@ -109,6 +109,10 @@ class provider {
 public:
     virtual ~provider() = default;
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
+    // Providers of the same non-empty family are alternatives for one capability set, listed in
+    // preference order: the pipeline runs the first that starts and keeps the rest on standby
+    // (e.g. ebpf_process supersedes netlink_proc). Empty means an independent provider.
+    [[nodiscard]] virtual std::string_view family() const noexcept { return {}; }
     [[nodiscard]] virtual std::vector<std::string> capabilities() const = 0;
     // Empty when the provider can run here, otherwise the reason it cannot.
     [[nodiscard]] virtual std::string probe() = 0;

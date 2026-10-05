@@ -41,6 +41,7 @@ struct raw_exec {
     std::optional<std::string> filename;
     std::optional<std::vector<std::string>> args;
     std::optional<std::uint64_t> start_ticks;
+    bool args_truncated{false};  // `args` was cut at a limit
 };
 
 struct raw_exit {
@@ -63,6 +64,9 @@ struct raw_ptrace {
     std::uint32_t pid{};
     std::uint32_t tracer_tgid{};  // 0 on detach
     std::uint32_t tracer_pid{};
+    // CNPROC reports PTRACE_ATTACH itself; the eBPF access check also covers process_vm_* and
+    // /proc/<pid>/mem, so it reports the broader "ptrace_access".
+    std::string technique{"ptrace_attach"};
 };
 
 struct raw_comm_change {

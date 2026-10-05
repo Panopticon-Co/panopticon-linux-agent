@@ -63,10 +63,10 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 14U> allowed{
+    constexpr std::array<std::string_view, 15U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
-        "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root"};
+        "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -102,6 +102,10 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     if (const auto value = text("collect_environment"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.collect_environment = *value == "true";
+    }
+    if (const auto value = text("enable_ebpf"); value.has_value()) {
+        if (*value != "true" && *value != "false") valid = false;
+        config.enable_ebpf = *value == "true";
     }
     if (!valid) return error{error_code::invalid_input, "configuration value is out of range"};
     if (!is_valid_identifier(config.sensor_id) || !is_valid_identifier(config.host_id)) {
@@ -157,7 +161,8 @@ sensor_pipeline::sensor_pipeline(const sensor_config& config, sensor_identity id
                                   30U * ns_per_second, config.maximum_entities, 8U},
              clock},
       queue_{config.queue_capacity},
-      providers_{std::move(providers)} {}
+      providers_{std::move(providers)},
+      standby_(providers_.size()) {}
 
 sensor_pipeline::~sensor_pipeline() { shutdown(); }
 
@@ -194,22 +199,36 @@ result<bool> sensor_pipeline::emit_loss(loss_report report) {
 health_snapshot sensor_pipeline::health_now() const {
     health_snapshot snapshot;
     std::size_t active = 0U;
-    for (const auto& source : providers_) {
-        auto health = source->health();
-        if (health.state == "active") {
-            ++active;
-            for (const auto& capability : health.capabilities) snapshot.coverage.emplace(capability, health.name);
-        } else {
-            for (const auto& capability : health.capabilities) snapshot.coverage.emplace(capability, "");
+    std::size_t expected = 0U;
+    std::vector<provider_health> reported;
+    for (std::size_t index = 0U; index < providers_.size(); ++index) {
+        const auto& source = providers_[index];
+        if (!standby_[index].empty()) {
+            // Not started on purpose: another provider of its family does the same job.
+            reported.push_back({std::string{source->name()}, "standby", "superseded by " + standby_[index], source->capabilities(), 0U, 0U});
+            continue;
         }
-        snapshot.providers.push_back(std::move(health));
+        ++expected;
+        auto health = source->health();
+        if (health.state == "active") ++active;
+        reported.push_back(std::move(health));
     }
+    // A capability is covered by the first active provider that offers it; capabilities nobody
+    // active offers are listed as uncovered rather than omitted.
+    for (const auto& health : reported) {
+        if (health.state != "active") continue;
+        for (const auto& capability : health.capabilities) snapshot.coverage.emplace(capability, health.name);
+    }
+    for (const auto& health : reported) {
+        for (const auto& capability : health.capabilities) snapshot.coverage.emplace(capability, "");
+    }
+    for (auto& health : reported) snapshot.providers.push_back(std::move(health));
     // The procfs reconciler is always active: it discovers processes and infers missed exits.
     snapshot.coverage["process.discovered"] = "procfs";
     if (snapshot.coverage["process.exit"].empty()) snapshot.coverage["process.exit"] = "procfs";
     snapshot.providers.push_back({"procfs", "active", "", {"process.discovered", "process.exit", "state.processes"},
                                   graph_.metrics().discovered + graph_.metrics().reconciled_exits, 0U});
-    snapshot.status = metrics_.sink_errors > 0U ? "degraded" : (active == providers_.size() ? "healthy" : "degraded");
+    snapshot.status = metrics_.sink_errors > 0U ? "degraded" : (active == expected ? "healthy" : "degraded");
 
     const auto statm = read_small_file("/proc/self/statm");
     unsigned long long size_pages = 0U;
@@ -288,9 +307,21 @@ result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
 
 result<bool> sensor_pipeline::start() {
     if (started_) return true;
-    for (auto& source : providers_) {
+    // Providers of one family are alternatives in preference order (e.g. eBPF before the proc
+    // connector). The first that starts runs; later ones stay on standby so events are not
+    // reported twice.
+    std::map<std::string, std::string> running;  // family -> provider that serves it
+    for (std::size_t index = 0U; index < providers_.size(); ++index) {
+        auto& source = providers_[index];
+        const std::string family{source->family()};
+        if (!family.empty()) {
+            if (const auto serving = running.find(family); serving != running.end()) {
+                standby_[index] = serving->second;
+                continue;
+            }
+        }
         if (const auto reason = source->probe(); !reason.empty()) continue;  // reported as unavailable in health
-        (void)source->start(queue_);
+        if (succeeded(source->start(queue_)) && !family.empty()) running.emplace(family, std::string{source->name()});
     }
     const auto now = clock_domain::now_monotonic_ns();
     const auto unix_now = clock_domain::now_unix_ns();

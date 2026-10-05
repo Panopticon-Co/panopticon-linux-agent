@@ -5,12 +5,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install --yes libcurl4-openssl-dev libssl-dev libmnl-dev libnftnl-dev
+        with:
+          submodules: true
+      - run: sudo apt-get update && sudo apt-get install --yes clang libelf-dev zlib1g-dev libcurl4-openssl-dev libssl-dev libmnl-dev libnftnl-dev
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build --parallel
       - run: ctest --test-dir build --output-on-failure
       - name: Sensor tests as root (live netlink proc connector)
         run: sudo ./build/panopticon-sensor-tests
+      - name: eBPF provider tests as root (live ground truth; skips if the runner kernel refuses BPF)
+        run: sudo ./build/panopticon-ebpf-tests
       - run: ./build/panopticon-linux-agent tests/agent-test.conf > /tmp/panopticon.ndjson
       - run: test -s /tmp/panopticon.ndjson
       - name: ADR 004 netlink de-risking spike (unprivileged network namespace)
@@ -36,7 +40,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install --yes clang libcurl4-openssl-dev libssl-dev
+        with:
+          submodules: true
+      - run: sudo apt-get update && sudo apt-get install --yes clang libelf-dev zlib1g-dev libcurl4-openssl-dev libssl-dev
       - run: cmake -S . -B build-sanitized -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DPANOPTICON_ENABLE_ASAN=ON -DPANOPTICON_ENABLE_UBSAN=ON
       - run: cmake --build build-sanitized --parallel
       - run: ctest --test-dir build-sanitized --output-on-failure

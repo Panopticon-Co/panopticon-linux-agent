@@ -19,6 +19,7 @@ public:
     ~netlink_proc_provider() override;
 
     [[nodiscard]] std::string_view name() const noexcept override { return "netlink_proc"; }
+    [[nodiscard]] std::string_view family() const noexcept override { return "process"; }
     [[nodiscard]] std::vector<std::string> capabilities() const override;
     [[nodiscard]] std::string probe() override;
     [[nodiscard]] result<bool> start(record_queue& queue) override;
