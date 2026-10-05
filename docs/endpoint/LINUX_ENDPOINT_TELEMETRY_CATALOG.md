@@ -1,0 +1,154 @@
+# Linux Endpoint Telemetry Catalog — `panopticon.endpoint/1.0`
+
+The canonical record model produced by the Linux endpoint. The machine-readable definition is
+`panopticon-contracts/schemas/endpoint/1.0/` (JSON Schema 2020-12); this document explains it.
+Implementation state per type is tracked in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
+## 1. Principles
+
+1. **Record kinds are separate.** Raw provider data never leaves the sensor. What leaves is one
+   of `event` (something happened), `state` (what exists now), `health`, `loss`, `detection`,
+   `evidence`, `response` and `policy`. Detections never masquerade as telemetry and telemetry
+   never masquerades as state.
+2. **Provenance is mandatory.** Every record names its provider and mechanism and a confidence:
+   `observed` (kernel hook), `reconstructed` (rebuilt from a snapshot, e.g. a process found by a
+   procfs scan), `inferred` (deduced, e.g. an exit inferred from absence) or
+   `user_space_reported` (from logs written by user space).
+3. **Absence is explicit.** A field the provider could not supply is listed in `unavailable`
+   with a reason code; it is never zero-filled or guessed.
+4. **Identity is entity-based.** Processes, files and containers carry entity ids; PIDs are
+   attributes.
+5. **Sequence is contiguous.** `seq` is per sensor, starts at 1, increases by exactly one per
+   record and survives restarts (persisted by the WAL). A gap at Manager is either a reported
+   `loss` record or tampering.
+
+## 2. Envelope
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `schema_version` | `"1.0"` | Model version |
+| `record_type` | enum | `event`, `state`, `health`, `loss`, `detection`, `evidence`, `response`, `policy` |
+| `id` | 32 hex | `SHA-256(sensor_id ‖ boot_id ‖ seq)` truncated; deterministic |
+| `seq` | uint64 ≥ 1 | Per-sensor contiguous sequence |
+| `type` | string | Dotted type, e.g. `process.exec` (§4) |
+| `time` | RFC 3339 UTC, ns | When it happened (kernel boot-time clock converted to wall clock) |
+| `observed_time` | RFC 3339 UTC, ns | When the sensor processed it |
+| `host` | object | `id`, `boot_id`, `hostname` |
+| `sensor` | object | `id`, `version`, `policy_version` |
+| `provenance` | object | `provider` (`ebpf`, `netlink_proc`, `procfs`, `fanotify`, `audit`, `journal`, `inventory`, `sensor`), `mechanism` (hook or source), `confidence` |
+| `unavailable` | array | `{field, reason}`; reasons: `not_supported_by_provider`, `process_exited`, `permission_denied`, `truncated`, `budget_exceeded`, `not_applicable`, `kernel_feature_missing` |
+| family objects | object | `process`, `parent`, `target`, `file`, `network`, `dns`, `auth`, `account`, `persistence`, `package`, `kernel`, `mount`, `device`, `container`, `state`, `health`, `loss`, `detection`, `evidence`, `response`, `policy`, `tamper` |
+
+## 3. Shared objects
+
+### 3.1 `process`
+
+| Field | Type | Source (primary / fallback) | Notes |
+| --- | --- | --- | --- |
+| `entity_id` | 32 hex | entity graph | `SHA-256(host_id ‖ boot_id ‖ tgid ‖ start_ticks)` truncated |
+| `exec_gen` | uint | entity graph | 0 before the first observed exec |
+| `pid` | uint | kernel tgid / procfs | host pid namespace |
+| `vpid` | uint | innermost-namespace pid / `NSpid` | |
+| `ppid` | uint | `real_parent` tgid / stat | |
+| `start_time` | RFC 3339 | `task->start_time` / stat starttime | |
+| `start_ticks` | uint | normalised to `CLK_TCK` | identity input |
+| `name` | string ≤ 15 | `task->comm` / `/proc/pid/comm` | never derived from the exe path |
+| `executable` | object | §3.2 | |
+| `args` | string[] | `mm->arg_start..arg_end` / cmdline | bounded (64 args, 4 KiB) |
+| `args_truncated` | bool | | |
+| `cwd` | string | `/proc/pid/cwd` | |
+| `interpreter` | string | `bprm->interp` when it differs from `bprm->filename` | scripts, `ld.so` invocations |
+| `creds` | object | `uid euid suid fsuid gid egid sgid fsgid groups[] loginuid sessionid` | |
+| `caps` | object | `effective permitted inheritable bounding ambient` as 16-hex masks | |
+| `ns` | object | `mnt pid net user uts ipc cgroup` inode numbers | |
+| `cgroup` | string | `/proc/pid/cgroup` (v2 path or v1 `name=systemd`) | |
+| `unit` | string | parsed from cgroup | systemd unit |
+| `tty` | string | stat `tty_nr` | |
+| `pgid`, `sid` | uint | stat | |
+| `env` | object | allowlisted keys only | |
+| `user` | object | `name`, `group` | resolved from uid/gid |
+| `container` | object | §3.4 | |
+| `ancestry` | array | up to 8 `{entity_id, pid, name, executable}` | nearest first |
+| `exit_code`, `exit_signal` | int | exit events only | |
+
+### 3.2 `executable` / `file`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `path` | string | as resolved; `kind` qualifies it |
+| `kind` | enum | `file`, `deleted`, `memfd`, `anonymous`, `unknown` |
+| `dev`, `inode` | uint | identity |
+| `size`, `mode`, `uid`, `gid` | | `fstat` on the opened handle |
+| `mtime`, `ctime` | RFC 3339 | |
+| `setuid`, `setgid` | bool | |
+| `hash` | object | `sha256`, `sha1`, `md5`, `status` (`computed`, `pending`, `too_large`, `unreadable`) |
+| `elf` | object | `class`, `machine`, `type`, `interp` |
+| `package` | object | owning package `name`, `version` |
+
+### 3.3 `network`
+
+`transport` (`tcp`, `udp`), `family` (`ipv4`, `ipv6`), `direction` (`outbound`, `inbound`,
+`listen`), `local {ip, port}`, `remote {ip, port}`, `bytes_sent`, `bytes_received`,
+`socket_inode`, `tags[]` (e.g. `imds`, `loopback`).
+
+### 3.4 `container`
+
+`id`, `runtime` (`docker`, `containerd`, `cri-o`, `podman`, `unknown`), `image`, `image_id`,
+`k8s {pod_uid, pod_name, namespace}`.
+
+## 4. Event types
+
+| Type | Family objects | Primary provider | Fallback |
+| --- | --- | --- | --- |
+| `process.fork` | process, parent | ebpf `sched_process_fork` | netlink_proc |
+| `process.exec` | process, parent | ebpf `sched_process_exec` | netlink_proc + procfs |
+| `process.exit` | process (`exit_code`, `exit_signal`) | ebpf `sched_process_exit` | netlink_proc; reconcile (`inferred`) |
+| `process.discovered` | process | procfs reconcile (`reconstructed`) | – |
+| `process.cred_change` | process, `creds_before`, `caps_before` | ebpf `commit_creds` | netlink_proc uid/gid |
+| `process.ns_change` | process, `ns_before` | ebpf | reconcile |
+| `process.inject` | process (actor), `target`, `technique` (`ptrace_attach`, `vm_writev`, `proc_mem_write`) | ebpf | netlink_proc ptrace |
+| `process.signal` | process (sender), `target`, `signal` | ebpf `signal_generate` | – |
+| `memory.exec_mapping` | process, `prot`, `flags`, file, `technique` (`anon_exec`, `mprotect_exec`, `wx`) | ebpf | procfs maps |
+| `library.load` | process, file | ebpf `security_mmap_file` | procfs maps diff |
+| `file.create`, `file.modify`, `file.delete`, `file.rename` (`file`, `target`), `file.link`, `file.chmod`, `file.chown`, `file.setxattr`, `file.open_sensitive` | process, file | ebpf `security_*` hooks | fanotify |
+| `network.connect`, `network.accept`, `network.listen`, `network.close`, `network.udp_flow`, `network.raw_socket` | process, network | ebpf | sock_diag diff |
+| `network.config_changed` | `change` (`link`, `addr`, `route`) | rtnetlink | poll diff |
+| `firewall.changed` | `firewall {table, chain, operation}` | nfnetlink | poll |
+| `dns.query` | process, `dns {qname, qtype, rcode, answers[], server}` | ebpf payload capture | – |
+| `auth.login`, `auth.failure`, `auth.logout` | `auth {service, method, user, source_ip, result, session_id}` | audit | journal → auth log |
+| `auth.privilege` | `auth {service, user, target_user, command, result}` | audit `USER_CMD` | journal |
+| `account.created`, `account.deleted`, `account.modified`, `group.*` | `account {name, uid, gid, shell, home, changes[]}`, writer process if known | audit + passwd diff | passwd diff |
+| `persistence.created`, `persistence.modified`, `persistence.deleted` | `persistence {class, path, content_hash, summary}`, writer process if known | file events on the persistence catalog | scan diff |
+| `fim.changed` | file, `before`, `after`, `class` | file events | scan diff |
+| `package.installed`, `package.removed`, `package.upgraded` | `package {manager, name, version, arch}` | package DB diff | – |
+| `kernel.module_load`, `kernel.module_unload` | process, `module {name, path}` | ebpf | `/proc/modules` diff |
+| `kernel.bpf_load` | process, `bpf {prog_id, prog_type, name}` | ebpf | enumeration diff |
+| `mount.changed` | process, `mount {source, target, fstype, operation}` | ebpf | mountinfo diff |
+| `device.attached`, `device.removed` | `device {subsystem, vendor_id, product_id, devpath}` | uevent | sysfs diff |
+| `posture.changed` | `posture {item, before, after}` | sysfs/procfs poll | – |
+| `container.started`, `container.stopped` | container | cgroup-derived | runtime poll |
+| `tamper.*` | process (actor), `tamper {target, technique}` | ebpf | file events |
+
+## 5. State records
+
+`state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,
+`state.sessions`, `state.services`, `state.scheduled`, `state.packages`, `state.listeners`,
+`state.connections`, `state.interfaces`, `state.routes`, `state.mounts`, `state.modules`,
+`state.bpf`, `state.firewall`, `state.persistence`, `state.containers`. Each carries
+`state {object, snapshot_id, part, parts, items[]}` so large snapshots split cleanly. Emitted at
+start, on a schedule, and on `QUERY_STATE` commands.
+
+## 6. Health, loss and policy
+
+* `health`: `health {status, providers[{name, state, reason, capabilities[], events, drops}],
+  coverage {capability: provider|null}, resources {rss_bytes, cpu_seconds, wal_bytes,
+  wal_records}, kernel {release, btf, bpf_lsm, ringbuf}}`.
+* `loss`: `loss {stage (kernel, queue, wal, governor, transport), count, by_type{}}`.
+* `policy`: `policy {version, applied, errors[]}`.
+
+## 7. Detection, evidence, response
+
+* `detection`: `detection {rule_id, rule_version, severity, confidence, mitre[], summary}` plus
+  the triggering family objects and `related_records[]` (record ids).
+* `evidence`: `evidence {command_id, kind, items[], truncated}`.
+* `response`: `response {command_id, action, result, summary, target}`.
