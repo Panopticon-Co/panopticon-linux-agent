@@ -9,6 +9,8 @@ jobs:
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build --parallel
       - run: ctest --test-dir build --output-on-failure
+      - name: Sensor tests as root (live netlink proc connector)
+        run: sudo ./build/panopticon-sensor-tests
       - run: ./build/panopticon-linux-agent tests/agent-test.conf > /tmp/panopticon.ndjson
       - run: test -s /tmp/panopticon.ndjson
       - name: ADR 004 netlink de-risking spike (unprivileged network namespace)

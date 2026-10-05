@@ -70,6 +70,39 @@ if(BUILD_TESTING)
     add_test(NAME panopticon-linux-keypair-tests COMMAND panopticon-linux-keypair-tests)
 endif()
 
+# Resident endpoint sensor (ADR 005). Linux-only: it uses netlink, procfs and POSIX file APIs
+# directly. Kept in its own library so the one-shot agent above does not change.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Threads REQUIRED)
+    add_library(panopticon-sensor-core STATIC
+        src/sensor/json.cpp
+        src/sensor/clock.cpp
+        src/sensor/process_info.cpp
+        src/sensor/entity_graph.cpp
+        src/sensor/serializer.cpp
+        src/sensor/wal.cpp
+        src/sensor/netlink_proc.cpp
+        src/sensor/pipeline.cpp
+    )
+    target_include_directories(panopticon-sensor-core PUBLIC include)
+    target_compile_features(panopticon-sensor-core PUBLIC cxx_std_20)
+    target_link_libraries(panopticon-sensor-core PUBLIC panopticon-linux-core Threads::Threads)
+    target_compile_options(panopticon-sensor-core PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+    add_executable(panopticon-sensord src/sensor/sensord_main.cpp)
+    target_compile_definitions(panopticon-sensord PRIVATE PANOPTICON_SENSOR_VERSION="${PROJECT_VERSION}")
+    target_compile_options(panopticon-sensord PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_link_libraries(panopticon-sensord PRIVATE panopticon-sensor-core)
+    install(TARGETS panopticon-sensord RUNTIME DESTINATION bin)
+
+    if(BUILD_TESTING)
+        add_executable(panopticon-sensor-tests tests/sensor_tests.cpp)
+        target_compile_options(panopticon-sensor-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(panopticon-sensor-tests PRIVATE panopticon-sensor-core)
+        add_test(NAME panopticon-sensor-tests COMMAND panopticon-sensor-tests)
+    endif()
+endif()
+
 install(TARGETS panopticon-linux-agent RUNTIME DESTINATION bin)
 install(FILES systemd/panopticon-linux-agent.service DESTINATION lib/systemd/system)
 
