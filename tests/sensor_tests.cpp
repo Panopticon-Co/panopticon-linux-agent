@@ -27,6 +27,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -612,7 +613,8 @@ void test_wal_detects_corruption_and_enforces_quota() {
 
 class scripted_provider final : public provider {
 public:
-    explicit scripted_provider(std::vector<raw_record> records) : records_{std::move(records)} {}
+    explicit scripted_provider(std::vector<raw_record> records, const std::uint64_t governed = 0U)
+        : records_{std::move(records)}, governed_{governed} {}
     std::string_view name() const noexcept override { return "scripted"; }
     std::vector<std::string> capabilities() const override { return {"process.fork", "process.exec", "process.exit"}; }
     std::string probe() override { return {}; }
@@ -624,9 +626,11 @@ public:
     void stop() override { active_ = false; }
     provider_health health() const override { return {"scripted", active_ ? "active" : "stopped", "", capabilities(), records_.size(), 0U}; }
     std::uint64_t take_losses() override { return 0U; }
+    std::uint64_t take_governed() override { return std::exchange(governed_, 0U); }
 
 private:
     std::vector<raw_record> records_;
+    std::uint64_t governed_{0U};
     bool active_{false};
 };
 
@@ -685,6 +689,63 @@ void test_pipeline_end_to_end_with_scripted_provider() {
     require(contains(*exec, "\"id\":\"" + compute_record_id("sensor-test", "boot-test", static_cast<std::uint64_t>(exec - lines.begin()) + 1U) + "\""),
             "record id derived from seq");
     require(!contains(*exec, "hunter2"), "secret environment never serialised");
+}
+
+void test_pipeline_enriches_file_events() {
+    const auto root = fresh_directory("fileproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "bash", 500U, "/usr/bin/bash", {"-bash"}}.write(root);
+    const auto scratch = fresh_directory("filedata");
+    write_file(scratch / "dropped.sh", "#!/bin/sh\n");
+    const auto existing = (scratch / "dropped.sh").string();
+    const auto make = [](const std::uint32_t pid, const file_operation operation, std::string path) {
+        raw_file_event event;
+        event.pid = pid;
+        event.operation = operation;
+        event.path = std::move(path);
+        return record_of(event);
+    };
+    auto moved = make(100U, file_operation::rename, existing);
+    std::get<raw_file_event>(moved.payload).old_path = "/tmp/old.sh";
+    std::vector<raw_record> script{make(100U, file_operation::create, existing), std::move(moved),
+                                   make(4242U, file_operation::remove, "/tmp/gone.sh"),
+                                   make(100U, file_operation::modify, "/tmp/vanished.sh")};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script, 7U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    const auto find = [&](const std::string_view type) {
+        const auto found = std::find_if(lines.begin(), lines.end(), [&](const std::string& line) {
+            return contains(line, std::string{"\"type\":\""} + std::string{type} + "\"");
+        });
+        require(found != lines.end(), std::string{"record present: "} + std::string{type});
+        return *found;
+    };
+    const auto create = find("file.create");
+    require(contains(create, "\"file\":{\"path\":\"" + existing + "\",\"name\":\"dropped.sh\",\"directory\":false,\"stat\":{\"mode\":"), "file path, name and stat");
+    require(contains(create, "\"name\":\"bash\"") && contains(create, "\"pid\":100") && contains(create, "\"entity_id\":\""), "actor resolved from the entity graph");
+    require(contains(find("file.rename"), "\"old_path\":\"/tmp/old.sh\""), "rename carries the old path");
+    const auto removed = find("file.delete");
+    require(contains(removed, "{\"field\":\"process\",\"reason\":\"process_exited\"}") && !contains(removed, "\"stat\":"), "unknown actor is reported, deleted file has no stat");
+    require(contains(find("file.modify"), "{\"field\":\"file.stat\",\"reason\":\"object_gone\"}"), "a vanished path is reported, not invented");
+    const auto loss = find("loss");
+    require(contains(loss, "\"stage\":\"governor\"") && contains(loss, "\"count\":7"), "governed events become an exact loss record");
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "seq stays contiguous with file records");
+    }
 }
 
 void test_pipeline_emits_host_state_parts() {
@@ -813,6 +874,11 @@ void test_sensor_config_is_strict() {
     require(!value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_ebpf=false\n"), "ebpf off").enable_ebpf, "enable_ebpf=false");
     require(value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "defaults").enable_ebpf, "eBPF is on by default");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_ebpf=maybe\n")), "non-boolean enable_ebpf rejected");
+    const auto& files = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_file_events=false\nfile_include=/etc, /opt/app\nfile_exclude=/etc/ssl\n"), "file keys");
+    require(!files.enable_file_events && files.file_include == std::vector<std::string>{"/etc", "/opt/app"} && files.file_exclude == std::vector<std::string>{"/etc/ssl"}, "file telemetry keys parse");
+    require(value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "defaults").enable_file_events, "file telemetry is on by default");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfile_include=relative\n")), "relative file prefix rejected");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfile_exclude=/etc/../root\n")), "parent traversal in a file prefix rejected");
 }
 
 void test_record_queue_counts_drops_and_keeps_order() {
@@ -860,6 +926,7 @@ int main() {
     run("wal_detects_corruption_and_enforces_quota", test_wal_detects_corruption_and_enforces_quota);
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
+    run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);
     run("provider_family_prefers_first_and_falls_back", test_provider_family_prefers_first_and_falls_back);
     run("sensor_config_is_strict", test_sensor_config_is_strict);
     run("record_queue_counts_drops_and_keeps_order", test_record_queue_counts_drops_and_keeps_order);

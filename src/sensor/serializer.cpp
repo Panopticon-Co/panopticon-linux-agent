@@ -306,6 +306,50 @@ std::string record_serializer::loss(const loss_report& report, const std::uint64
     return out.take();
 }
 
+std::string record_serializer::file_event(const file_record& record, const std::uint64_t seq,
+                                          const std::uint64_t observed_unix_ns) const {
+    json_writer out;
+    begin(out, "event", record.type, seq, record.time_unix_ns, observed_unix_ns, record.source);
+    std::vector<unavailable_field> unavailable = record.unavailable;
+    if (record.actor) {
+        out.key("process");
+        write_process(out, *record.actor);
+        out.end_object();
+    } else {
+        out.key("process").begin_object();
+        out.field("pid", record.pid);
+        out.end_object();
+        unavailable.push_back({"process", unavailable_reason::process_exited});
+    }
+    out.key("file").begin_object();
+    out.field("path", record.path);
+    const auto slash = record.path.find_last_of('/');
+    if (!record.path.empty() && slash != std::string::npos && slash + 1U < record.path.size()) {
+        out.field("name", std::string_view{record.path}.substr(slash + 1U));
+    }
+    out.field("directory", record.directory);
+    if (record.old_path.has_value()) out.field("old_path", *record.old_path);
+    if (record.stat.has_value()) {
+        const auto& stat = *record.stat;
+        out.key("stat").begin_object();
+        out.field("mode", stat.mode).field("uid", stat.uid).field("gid", stat.gid).field("size", stat.size);
+        out.field("inode", stat.inode).field("device", stat.device);
+        out.field("mtime", format_rfc3339_ns(stat.mtime_unix_ns));
+        out.end_object();
+    }
+    out.end_object();
+    out.key("unavailable").begin_array();
+    for (const auto& field : unavailable) {
+        out.begin_object();
+        out.field("field", field.field);
+        out.field("reason", to_string(field.reason));
+        out.end_object();
+    }
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::process_state(const std::vector<entity_ptr>& items, const std::string_view snapshot_id,
                                              const std::uint32_t part, const std::uint32_t parts, const std::uint64_t seq,
                                              const std::uint64_t now_unix_ns) const {

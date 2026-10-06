@@ -50,6 +50,31 @@ struct loss_report {
     std::string detail;
 };
 
+// A file.* event after the pipeline attached the acting process (if it still exists) and an
+// optional lstat of the path.
+struct file_stat {
+    std::uint32_t mode{};
+    std::uint32_t uid{};
+    std::uint32_t gid{};
+    std::uint64_t size{};
+    std::uint64_t inode{};
+    std::uint64_t device{};
+    std::uint64_t mtime_unix_ns{};
+};
+
+struct file_record {
+    std::string type;  // file.create / file.modify / file.delete / file.rename / file.attrib
+    std::uint64_t time_unix_ns{};
+    provenance source;
+    entity_ptr actor;  // null when the process was gone before it could be identified
+    std::uint32_t pid{};
+    std::string path;
+    std::optional<std::string> old_path;
+    bool directory{false};
+    std::optional<file_stat> stat;
+    std::vector<unavailable_field> unavailable;
+};
+
 class record_serializer {
 public:
     record_serializer(sensor_identity identity, const clock_domain& clock);
@@ -65,6 +90,8 @@ public:
     [[nodiscard]] std::string process_state(const std::vector<entity_ptr>& items, std::string_view snapshot_id,
                                             std::uint32_t part, std::uint32_t parts, std::uint64_t seq,
                                             std::uint64_t now_unix_ns) const;
+
+    [[nodiscard]] std::string file_event(const file_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
 
     // state.<object> snapshot part for host-state inventory objects (catalog §5). `items` are
     // already-serialised JSON objects; `unavailable` is carried on part 1 only.

@@ -32,6 +32,9 @@ struct sensor_config {
     std::uint64_t state_interval_seconds{3600U};
     bool collect_environment{true};
     bool enable_ebpf{true};  // false: skip the eBPF provider; netlink_proc and procfs only
+    bool enable_file_events{true};  // false: no fanotify file telemetry
+    std::vector<std::string> file_include;  // empty: the built-in persistence/credential/binary/staging set
+    std::vector<std::string> file_exclude;  // added to the built-in exclusions
     std::size_t maximum_args{64U};
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};
@@ -123,6 +126,10 @@ private:
 
     result<bool> emit(const std::function<std::string(std::uint64_t)>& serialise);
     result<bool> emit_events(const std::vector<process_event>& events, std::uint64_t observed_ns);
+    // Routes one dequeued record: file events are enriched and written, everything else feeds the
+    // entity graph.
+    void process_record(const raw_record& record, std::uint64_t observed_ns);
+    result<bool> emit_file_event(const raw_record& record, const raw_file_event& file, std::uint64_t observed_ns);
     result<bool> emit_loss(loss_report report);
     result<bool> emit_health(std::uint64_t now_ns);
     result<bool> emit_process_state(std::uint64_t now_ns);

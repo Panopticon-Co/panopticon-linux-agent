@@ -83,6 +83,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/serializer.cpp
         src/sensor/wal.cpp
         src/sensor/netlink_proc.cpp
+        src/sensor/fanotify_file.cpp
         src/sensor/ebpf_process.cpp
         src/sensor/host_state.cpp
         src/sensor/control.cpp
@@ -139,6 +140,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(panopticon-control-tests PRIVATE panopticon-sensor-core)
         add_dependencies(panopticon-control-tests panopticon-ctl)
         add_test(NAME panopticon-control-tests COMMAND panopticon-control-tests)
+        add_executable(panopticon-file-tests tests/file_tests.cpp)
+        target_compile_options(panopticon-file-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(panopticon-file-tests PRIVATE panopticon-sensor-core)
+        add_test(NAME panopticon-file-tests COMMAND panopticon-file-tests)
     endif()
 endif()
 

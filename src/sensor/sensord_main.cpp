@@ -9,6 +9,7 @@
 #include "panopticon/linux_agent/host.hpp"
 #include "panopticon/linux_agent/sensor/control.hpp"
 #include "panopticon/linux_agent/sensor/ebpf_process.hpp"
+#include "panopticon/linux_agent/sensor/fanotify_file.hpp"
 #include "panopticon/linux_agent/sensor/netlink_proc.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 
@@ -172,6 +173,15 @@ int main(int argc, char** argv) {
         providers.push_back(std::make_unique<sensor::ebpf_process_provider>(clock, ebpf_options));
     }
     providers.push_back(std::make_unique<sensor::netlink_proc_provider>(clock));
+    if (config.enable_file_events) {
+        sensor::fanotify_options file_options;
+        if (!config.file_include.empty()) file_options.filter.include = config.file_include;
+        file_options.filter.exclude.insert(file_options.filter.exclude.end(), config.file_exclude.begin(), config.file_exclude.end());
+        // The daemon's own state is never telemetry: its WAL and control socket would feed back.
+        file_options.filter.exclude.push_back(config.wal_path.string());
+        if (!control_socket.empty()) file_options.filter.exclude.push_back(std::filesystem::path{control_socket}.parent_path().string());
+        providers.push_back(std::make_unique<sensor::fanotify_file_provider>(std::move(file_options)));
+    }
     sensor::sensor_pipeline pipeline{config, identity, clock, *sink, std::move(providers)};
     if (auto started = pipeline.start(); !succeeded(started)) {
         std::fprintf(stderr, "panopticon-sensord: start: %s\n", std::get<error>(started).message.c_str());

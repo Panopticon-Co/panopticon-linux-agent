@@ -9,6 +9,7 @@
 #include <map>
 #include <sstream>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
@@ -63,10 +64,11 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 15U> allowed{
+    constexpr std::array<std::string_view, 18U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
-        "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf"};
+        "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
+        "file_include", "file_exclude"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -107,6 +109,24 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
         if (*value != "true" && *value != "false") valid = false;
         config.enable_ebpf = *value == "true";
     }
+    if (const auto value = text("enable_file_events"); value.has_value()) {
+        if (*value != "true" && *value != "false") valid = false;
+        config.enable_file_events = *value == "true";
+    }
+    // Comma-separated absolute directory prefixes.
+    const auto prefixes = [&](const char* key, std::vector<std::string>& target) {
+        const auto value = text(key);
+        if (!value.has_value()) return;
+        std::istringstream stream{*value};
+        std::string item;
+        while (std::getline(stream, item, ',')) {
+            item = std::string{trim(item)};
+            if (item.empty() || item.front() != '/' || item.find("..") != std::string::npos || target.size() >= 256U) valid = false;
+            else target.push_back(item);
+        }
+    };
+    prefixes("file_include", config.file_include);
+    prefixes("file_exclude", config.file_exclude);
     if (!valid) return error{error_code::invalid_input, "configuration value is out of range"};
     if (!is_valid_identifier(config.sensor_id) || !is_valid_identifier(config.host_id)) {
         return error{error_code::invalid_input, "sensor_id and host_id are required identifiers"};
@@ -187,6 +207,42 @@ result<bool> sensor_pipeline::emit_events(const std::vector<process_event>& even
         else outcome = emitted;
     }
     return outcome;
+}
+
+void sensor_pipeline::process_record(const raw_record& record, const std::uint64_t observed_ns) {
+    if (const auto* file = std::get_if<raw_file_event>(&record.payload)) {
+        (void)emit_file_event(record, *file, observed_ns);
+        return;
+    }
+    (void)emit_events(graph_.apply(record), observed_ns);
+}
+
+result<bool> sensor_pipeline::emit_file_event(const raw_record& record, const raw_file_event& file, const std::uint64_t observed_ns) {
+    file_record out;
+    out.type = std::string{"file."} + to_string(file.operation);
+    out.time_unix_ns = record.time_unix_ns;
+    out.source = record.source;
+    out.actor = graph_.find(file.pid);
+    out.pid = file.pid;
+    out.path = file.path;
+    out.old_path = file.old_path;
+    out.directory = file.directory;
+    out.unavailable = file.unavailable;
+    // The state after the event; a deleted or moved-away path legitimately has none.
+    if (file.operation != file_operation::remove && !file.path.empty()) {
+        struct stat info {};
+        if (::lstat(file.path.c_str(), &info) == 0) {
+            out.stat = file_stat{info.st_mode, info.st_uid, info.st_gid, static_cast<std::uint64_t>(info.st_size),
+                                 info.st_ino, info.st_dev,
+                                 static_cast<std::uint64_t>(info.st_mtim.tv_sec) * 1000000000ULL +
+                                     static_cast<std::uint64_t>(info.st_mtim.tv_nsec)};
+        } else {
+            out.unavailable.push_back({"file.stat", unavailable_reason::object_gone});
+        }
+    }
+    auto emitted = emit([&](const std::uint64_t seq) { return serializer_.file_event(out, seq, observed_ns); });
+    if (succeeded(emitted)) ++metrics_.events;
+    return emitted;
 }
 
 result<bool> sensor_pipeline::emit_loss(loss_report report) {
@@ -325,6 +381,10 @@ result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
         reconcile_now = true;
     }
     for (const auto& source : providers_) {
+        if (const auto governed = source->take_governed(); governed > 0U) {
+            (void)emit_loss({"governor", governed, {},
+                             std::string{source->name()} + " exceeded its event budget; " + std::to_string(governed) + " event(s) skipped"});
+        }
         if (const auto lost = source->take_losses(); lost > 0U) {
             (void)emit_loss({"kernel", lost, {},
                              std::string{source->name()} + " receive buffer overflowed " + std::to_string(lost) +
@@ -388,7 +448,7 @@ result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono
     batch_.clear();
     queue_.pop_batch(batch_, 1024U, wait, wait.count() > 0 ? batch_linger : std::chrono::milliseconds{0});
     const auto observed = clock_domain::now_unix_ns();
-    for (const auto& record : batch_) (void)emit_events(graph_.apply(record), observed);
+    for (const auto& record : batch_) process_record(record, observed);
     (void)collect_losses(now_ns);
 
     if (now_ns - last_reconcile_ns_ >= config_.reconcile_interval_seconds * ns_per_second) {
@@ -432,7 +492,7 @@ void sensor_pipeline::shutdown() {
         batch_.clear();
         queue_.pop_batch(batch_, 1024U, std::chrono::milliseconds{0});
         const auto observed = clock_domain::now_unix_ns();
-        for (const auto& record : batch_) (void)emit_events(graph_.apply(record), observed);
+        for (const auto& record : batch_) process_record(record, observed);
     }
     (void)emit_health(clock_domain::now_unix_ns());
     (void)sink_.flush(clock_domain::now_monotonic_ns(), true);
