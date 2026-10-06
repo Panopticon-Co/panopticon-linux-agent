@@ -350,6 +350,64 @@ std::string record_serializer::file_event(const file_record& record, const std::
     return out.take();
 }
 
+std::string record_serializer::fim_changed(const fim_change& change, const entity_ptr& actor, const std::uint64_t seq,
+                                           const std::uint64_t observed_unix_ns) const {
+    json_writer out;
+    const bool attributed = change.actor_pid != 0U;
+    const provenance source{"fim", attributed ? "FSSCAN+FANOTIFY" : "FSSCAN", confidence::observed};
+    begin(out, "event", "fim.changed", seq, attributed ? change.actor_time_unix_ns : observed_unix_ns, observed_unix_ns, source);
+    std::vector<unavailable_field> unavailable;
+    if (actor) {
+        out.key("process");
+        write_process(out, *actor);
+        out.end_object();
+    } else if (attributed) {
+        out.key("process").begin_object();
+        out.field("pid", change.actor_pid);
+        out.end_object();
+        unavailable.push_back({"process", unavailable_reason::process_exited});
+    } else {
+        // Found by comparing states, not by watching the write: nobody was seen doing it.
+        unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+    }
+    out.key("fim").begin_object();
+    out.field("path", change.path);
+    out.field("category", change.category);
+    out.field("change", change.change);
+    out.key("fields").begin_array();
+    for (const auto& field : change.fields) out.value(field);
+    out.end_array();
+    if (change.before) out.key("before").raw(persistence_item_json(*change.before));
+    if (change.after) out.key("after").raw(persistence_item_json(*change.after));
+    out.end_object();
+    out.key("unavailable").begin_array();
+    for (const auto& field : unavailable) {
+        out.begin_object();
+        out.field("field", field.field);
+        out.field("reason", to_string(field.reason));
+        out.end_object();
+    }
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
+std::string record_serializer::fim_baseline_record(const fim_start_result& start, const std::uint64_t seq,
+                                                   const std::uint64_t now_unix_ns) const {
+    json_writer out;
+    begin(out, "event", "fim.baseline", seq, now_unix_ns, now_unix_ns, {"fim", "FSSCAN", confidence::observed});
+    out.key("fim").begin_object();
+    out.field("state", start.state);
+    if (!start.reset_reason.empty()) out.field("reason", start.reset_reason);
+    out.field("items", static_cast<std::uint64_t>(start.items));
+    out.field("changes", static_cast<std::uint64_t>(start.changes.size()));
+    out.end_object();
+    out.key("unavailable").begin_array();
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::process_state(const std::vector<entity_ptr>& items, const std::string_view snapshot_id,
                                              const std::uint32_t part, const std::uint32_t parts, const std::uint64_t seq,
                                              const std::uint64_t now_unix_ns) const {

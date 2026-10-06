@@ -35,6 +35,11 @@ struct sensor_config {
     bool enable_file_events{true};  // false: no fanotify file telemetry
     std::vector<std::string> file_include;  // empty: the built-in persistence/credential/binary/staging set
     std::vector<std::string> file_exclude;  // added to the built-in exclusions
+    // File-integrity monitoring of the persistence catalog. Off in the struct so embedders and
+    // tests opt in; parse_sensor_config() turns it on unless the file says otherwise.
+    bool enable_fim{false};
+    std::filesystem::path fim_path;          // empty: baseline kept in memory only
+    std::uint64_t fim_interval_seconds{300U};  // full rescan period
     std::size_t maximum_args{64U};
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};
@@ -134,6 +139,7 @@ private:
     result<bool> emit_health(std::uint64_t now_ns);
     result<bool> emit_process_state(std::uint64_t now_ns);
     result<bool> emit_host_state(std::uint64_t now_ns);
+    result<bool> emit_fim_changes(const std::vector<fim_change>& changes, std::uint64_t observed_ns);
     result<bool> collect_losses(std::uint64_t now_ns);
 
     sensor_config config_;
@@ -150,6 +156,8 @@ private:
     std::uint64_t last_health_ns_{};
     std::uint64_t last_state_ns_{};
     std::uint64_t last_resample_ns_{};
+    std::uint64_t last_fim_ns_{};
+    std::unique_ptr<fim_monitor> fim_;
     std::uint64_t snapshots_{};
     mutable std::mutex status_mutex_;
     std::string status_cache_{"{}"};

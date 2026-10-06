@@ -87,6 +87,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/ebpf_process.cpp
         src/sensor/host_state.cpp
         src/sensor/persistence.cpp
+        src/sensor/fim.cpp
         src/sensor/control.cpp
         src/sensor/pipeline.cpp
     )

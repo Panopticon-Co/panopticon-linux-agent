@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/sensor/clock.hpp"
 #include "panopticon/linux_agent/sensor/entity_graph.hpp"
+#include "panopticon/linux_agent/sensor/fim.hpp"
 #include "panopticon/linux_agent/sensor/host_state.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
 #include "panopticon/linux_agent/sensor/provider.hpp"
@@ -92,6 +93,13 @@ public:
                                             std::uint64_t now_unix_ns) const;
 
     [[nodiscard]] std::string file_event(const file_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+
+    // fim.changed (catalog §4.2). `actor` is the acting process when a file event named the path
+    // and the process was still known; otherwise the process is reported as unavailable.
+    [[nodiscard]] std::string fim_changed(const fim_change& change, const entity_ptr& actor, std::uint64_t seq,
+                                          std::uint64_t observed_unix_ns) const;
+    // fim.baseline: what the monitor started from and how many offline changes it found.
+    [[nodiscard]] std::string fim_baseline_record(const fim_start_result& start, std::uint64_t seq, std::uint64_t now_unix_ns) const;
 
     // state.<object> snapshot part for host-state inventory objects (catalog §5). `items` are
     // already-serialised JSON objects; `unavailable` is carried on part 1 only.

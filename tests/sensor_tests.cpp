@@ -748,6 +748,59 @@ void test_pipeline_enriches_file_events() {
     }
 }
 
+void test_pipeline_reports_integrity_changes() {
+    const auto proc = fresh_directory("fimproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
+    fake_process{100U, 1U, "vim", 500U, "/usr/bin/vim", {"vim", "/etc/cron.d/job"}}.write(proc);
+    const auto host = fresh_directory("fimhost");
+    write_file(host / "etc/passwd", "root:x:0:0:root:/root:/bin/bash\n");
+    write_file(host / "etc/cron.d/job", "* * * * * root /bin/true\n");
+    const auto stored = fresh_directory("fimstate") / "fim.baseline";
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = proc;
+    config.host_root = host;
+    config.enable_fim = true;
+    config.fim_path = stored;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    raw_file_event event;
+    event.pid = 100U;
+    event.operation = file_operation::modify;
+    event.path = "/etc/cron.d/job";
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(std::vector<raw_record>{record_of(event)}, 0U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        write_file(host / "etc/cron.d/job", "* * * * * root /tmp/payload\n");  // the change the file event reports
+        value_of(pipeline.step(clock_domain::now_monotonic_ns() + 3000000000ULL, std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    const auto find = [&](const std::string_view type) {
+        const auto found = std::find_if(lines.begin(), lines.end(), [&](const std::string& line) {
+            return contains(line, std::string{"\"type\":\""} + std::string{type} + "\"");
+        });
+        require(found != lines.end(), std::string{"record present: "} + std::string{type});
+        return *found;
+    };
+    const auto baseline = find("fim.baseline");
+    require(contains(baseline, "\"state\":\"created\"") && contains(baseline, "\"changes\":0"), "first start creates the baseline");
+    const auto changed = find("fim.changed");
+    require(contains(changed, "\"path\":\"/etc/cron.d/job\"") && contains(changed, "\"change\":\"modified\"") &&
+                contains(changed, "\"fields\":[\"content\"]") && contains(changed, "\"before\":{") && contains(changed, "\"after\":{"),
+            "change names the path, the field and both states");
+    require(contains(changed, "\"name\":\"vim\"") && contains(changed, "\"mechanism\":\"FSSCAN+FANOTIFY\""), "actor attached from the file event");
+    require(std::filesystem::exists(stored), "baseline persisted");
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "seq stays contiguous with fim records");
+    }
+}
+
 void test_pipeline_emits_host_state_parts() {
     const auto proc = fresh_directory("hostproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
@@ -877,6 +930,13 @@ void test_sensor_config_is_strict() {
     const auto& files = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_file_events=false\nfile_include=/etc, /opt/app\nfile_exclude=/etc/ssl\n"), "file keys");
     require(!files.enable_file_events && files.file_include == std::vector<std::string>{"/etc", "/opt/app"} && files.file_exclude == std::vector<std::string>{"/etc/ssl"}, "file telemetry keys parse");
     require(value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "defaults").enable_file_events, "file telemetry is on by default");
+    const auto& integrity = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nwal_path=/data/wal\n"), "fim defaults");
+    require(integrity.enable_fim && integrity.fim_path == "/data/fim.baseline" && integrity.fim_interval_seconds == 300U, "FIM is on by default, next to the WAL");
+    const auto& tuned = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_fim=false\nfim_path=/x/b\nfim_interval_seconds=60\n"), "fim keys");
+    require(!tuned.enable_fim && tuned.fim_path == "/x/b" && tuned.fim_interval_seconds == 60U, "FIM keys parse");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfim_interval_seconds=59\n")), "FIM interval lower bound");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfim_path=relative\n")), "relative FIM path rejected");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_fim=maybe\n")), "non-boolean enable_fim rejected");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfile_include=relative\n")), "relative file prefix rejected");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfile_exclude=/etc/../root\n")), "parent traversal in a file prefix rejected");
 }
@@ -927,6 +987,7 @@ int main() {
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);
+    run("pipeline_reports_integrity_changes", test_pipeline_reports_integrity_changes);
     run("provider_family_prefers_first_and_falls_back", test_provider_family_prefers_first_and_falls_back);
     run("sensor_config_is_strict", test_sensor_config_is_strict);
     run("record_queue_counts_drops_and_keeps_order", test_record_queue_counts_drops_and_keeps_order);

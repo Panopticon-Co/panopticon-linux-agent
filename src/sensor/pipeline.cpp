@@ -64,11 +64,11 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 18U> allowed{
+    constexpr std::array<std::string_view, 21U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
-        "file_include", "file_exclude"};
+        "file_include", "file_exclude", "enable_fim", "fim_path", "fim_interval_seconds"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -112,6 +112,17 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     if (const auto value = text("enable_file_events"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.enable_file_events = *value == "true";
+    }
+    config.enable_fim = true;
+    config.fim_path = config.wal_path.parent_path() / "fim.baseline";
+    number("fim_interval_seconds", config.fim_interval_seconds, 60U, 86400U);
+    if (const auto value = text("enable_fim"); value.has_value()) {
+        if (*value != "true" && *value != "false") valid = false;
+        config.enable_fim = *value == "true";
+    }
+    if (const auto value = text("fim_path"); value.has_value()) {
+        config.fim_path = *value;
+        if (!config.fim_path.is_absolute() || value->find("..") != std::string::npos) valid = false;
     }
     // Comma-separated absolute directory prefixes.
     const auto prefixes = [&](const char* key, std::vector<std::string>& target) {
@@ -242,6 +253,7 @@ result<bool> sensor_pipeline::emit_file_event(const raw_record& record, const ra
     }
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.file_event(out, seq, observed_ns); });
     if (succeeded(emitted)) ++metrics_.events;
+    if (fim_ && file.pid != 0U) (void)fim_->note(file.path, file.old_path, file.pid, record.time_unix_ns, clock_domain::now_monotonic_ns());
     return emitted;
 }
 
@@ -374,6 +386,17 @@ result<bool> sensor_pipeline::emit_host_state(const std::uint64_t now_ns) {
     return outcome;
 }
 
+result<bool> sensor_pipeline::emit_fim_changes(const std::vector<fim_change>& changes, const std::uint64_t observed_ns) {
+    result<bool> outcome = true;
+    for (const auto& change : changes) {
+        const entity_ptr actor = change.actor_pid != 0U ? graph_.find(change.actor_pid) : nullptr;
+        auto emitted = emit([&](const std::uint64_t seq) { return serializer_.fim_changed(change, actor, seq, observed_ns); });
+        if (succeeded(emitted)) ++metrics_.events;
+        else outcome = emitted;
+    }
+    return outcome;
+}
+
 result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
     bool reconcile_now = false;
     if (const auto dropped = queue_.take_dropped(); dropped > 0U) {
@@ -434,7 +457,16 @@ result<bool> sensor_pipeline::start() {
     (void)emit_health(unix_now);
     (void)emit_process_state(unix_now);
     (void)emit_host_state(unix_now);
-    last_reconcile_ns_ = last_health_ns_ = last_state_ns_ = last_resample_ns_ = now;
+    if (config_.enable_fim) {
+        fim_options options;
+        options.persistence.root = config_.host_root;
+        options.baseline_path = config_.fim_path;
+        fim_ = std::make_unique<fim_monitor>(std::move(options));
+        const auto begun = fim_->start();
+        (void)emit([&](const std::uint64_t seq) { return serializer_.fim_baseline_record(begun, seq, unix_now); });
+        (void)emit_fim_changes(begun.changes, unix_now);
+    }
+    last_reconcile_ns_ = last_health_ns_ = last_state_ns_ = last_resample_ns_ = last_fim_ns_ = now;
     refresh_status(now);
     started_ = true;
     return sink_.flush(now, true);
@@ -467,6 +499,13 @@ result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono
         (void)emit_process_state(unix_now);
         (void)emit_host_state(unix_now);
         last_state_ns_ = now_ns;
+    }
+    if (fim_) {
+        if (now_ns - last_fim_ns_ >= config_.fim_interval_seconds * ns_per_second) {
+            (void)emit_fim_changes(fim_->rescan(), clock_domain::now_unix_ns());
+            last_fim_ns_ = now_ns;
+        }
+        if (fim_->pending() > 0U) (void)emit_fim_changes(fim_->take_due(now_ns), clock_domain::now_unix_ns());
     }
     if (now_ns - last_status_ns_ >= ns_per_second) refresh_status(now_ns);
     return sink_.flush(now_ns, false);
