@@ -12,6 +12,7 @@ add_library(panopticon-linux-core STATIC
     src/keypair.cpp
     src/spool.cpp
     src/command.cpp
+    src/response.cpp
     src/procfs.cpp
     src/event.cpp
     src/network.cpp
@@ -171,6 +172,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_options(panopticon-kernel-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-kernel-tests PRIVATE panopticon-sensor-core)
         add_test(NAME panopticon-kernel-tests COMMAND panopticon-kernel-tests)
+        add_executable(panopticon-response-tests tests/response_tests.cpp)
+        target_compile_options(panopticon-response-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(panopticon-response-tests PRIVATE panopticon-sensor-core)
+        add_test(NAME panopticon-response-tests COMMAND panopticon-response-tests)
         add_executable(panopticon-hash-tests tests/hash_tests.cpp)
         target_compile_options(panopticon-hash-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-hash-tests PRIVATE panopticon-sensor-core)

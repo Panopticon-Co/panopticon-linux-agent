@@ -1,6 +1,7 @@
 #include "panopticon/linux_agent/command.hpp"
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/procfs.hpp"
+#include "panopticon/linux_agent/response.hpp"
 
 #include <algorithm>
 #include <array>
@@ -275,17 +276,21 @@ result<bool> terminate_process(const std::filesystem::path& proc_root, const pro
     (void)proc_root;
     return error{error_code::unsupported_action, "process termination is available only on Linux"};
 #else
-    // Keep verification bounded even when procfs contains adversarially many entries.
-    constexpr std::size_t maximum_verification_observations{131072U};
-    const auto processes = collect_processes(proc_root, target.host_id, maximum_verification_observations);
-    if (!succeeded(processes)) return std::get<error>(processes);
-    const auto& observations = std::get<std::vector<process_observation>>(processes);
-    const auto found = std::find_if(observations.begin(), observations.end(), [&](const process_observation& observation) {
-        return observation.identity == target;
-    });
-    if (found == observations.end()) return error{error_code::target_mismatch, "process identity no longer matches"};
-    if (kill(static_cast<pid_t>(target.pid), SIGTERM) != 0) return error{error_code::io_failure, "SIGTERM was refused"};
-    return true;
+    // The signal goes through a pidfd taken before the identity is verified (ADR 015), so a PID
+    // reused between verification and signal cannot be hit.
+    response_options options;
+    options.proc_root = proc_root;
+    options.dry_run = false;
+    const auto outcome = respond_terminate_process(target, options);
+    switch (outcome.status) {
+        case response_status::signalled:
+        case response_status::terminated: return true;
+        case response_status::refused_mismatch:
+        case response_status::already_gone: return error{error_code::target_mismatch, "process identity no longer matches"};
+        case response_status::refused_invalid:
+        case response_status::refused_protected: return error{error_code::invalid_input, "process target is protected or invalid"};
+        default: return error{error_code::io_failure, "SIGTERM was refused"};
+    }
 #endif
 }
 
