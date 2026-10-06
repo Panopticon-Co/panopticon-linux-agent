@@ -142,5 +142,33 @@ used 11.1 s of CPU against 16.8 s (both under `perf`, 7,200 to 8,100 records).
   proposal for the team, not a change made here. Compression already collapses these repeats on the wire.
 * Health records (4.2 KB each, most of it static provider capability lists) are small in total at the default
   interval and are left alone.
-* Open: idle CPU is 1.85 % of a core against a budget of 1 %, 77 % of it in the kernel (wake-ups). Not yet
-  investigated; it may be a VM timer effect.
+* Idle CPU was 1.85 % of a core against a budget of 1 % when this section was first measured. It is
+  explained and fixed in section 5.
+
+## 5. Idle CPU and wake-ups (S11.4)
+
+`tests/perf/idle_wakeups.sh` starts the Release sensor with every provider on, waits 30 s, and reads per-thread
+user and system time and context switches from `/proc/<pid>/task/*` over 60 s, then `perf trace -s` for the
+syscalls. Same VM as section 4. `MANAGER=1` delivers to the chaos fake Manager over TLS.
+
+| Configuration | CPU of one core (user + sys) | wake-ups/s |
+| --- | --- | --- |
+| before: defaults, no Manager | 0.76 % (0.41 + 0.35) | 42 |
+| before: Manager, health every 10 s | 0.94 % (0.23 + 0.71) | 46 |
+| after: defaults, no Manager | 0.40 % (0.22 + 0.18) | 17.5 |
+| after: Manager, health every 10 s | 0.35 % (0.10 + 0.25) | 20.5 |
+
+What the wake-ups were: the three eBPF providers (process, network, security) each ran
+`ring_buffer__poll(ring, 100)`, 30 wake-ups a second for nothing, because the kernel wakes the poll as soon as a
+record is submitted (the programs submit with flags 0) and the timeout only bounds how long a stop request waits.
+It is now 1000 ms, with a two-phase stop (`provider::request_stop()` on every provider, then `stop()`) so the
+providers finish together; shutdown of an idle sensor takes 1.4 s. The remaining wake-ups are the pipeline loop
+(200 ms), the uplink idle poll (500 ms), the 1 s polls of the file and auth providers, and the once-a-second status
+refresh (reads `/proc` and the BPF maps, about 11 `bpf()` calls a second); together they cost about 0.1 %.
+
+The earlier 1.85 % was a run with the Manager attached, before the fix to the TLS connection per batch
+(section 4) and with `perf record` attached, which adds its own overhead; the two changes are not separated
+by an A/B run, so the split between them is not known. Both configurations are now under the 1 % budget
+by a factor of 2 or more, with the kernel share 40 to 70 %. Not measured: 6.x kernels, other hardware, a
+host with many mounts (the 30 s mount rescan and the 15 s sensitive-file re-mark scale with mount and
+pattern counts).

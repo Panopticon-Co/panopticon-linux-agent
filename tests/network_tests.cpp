@@ -29,8 +29,10 @@ void require(const bool condition, const char* message) {
 }
 
 void append(std::vector<unsigned char>& out, const void* data, const std::size_t size) {
-    const auto* bytes = static_cast<const unsigned char*>(data);
-    out.insert(out.end(), bytes, bytes + size);
+    // resize + memcpy: vector::insert from a raw range trips GCC 11's -Wstringop-overflow at -O3 (false positive)
+    const auto offset = out.size();
+    out.resize(offset + size);
+    if (size != 0U) std::memcpy(out.data() + offset, data, size);
 }
 
 // One sock_diag reply message, as the kernel lays it out.

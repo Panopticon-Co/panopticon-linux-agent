@@ -119,6 +119,8 @@ public:
     // Empty when the provider can run here, otherwise the reason it cannot.
     [[nodiscard]] virtual std::string probe() = 0;
     [[nodiscard]] virtual result<bool> start(record_queue& queue) = 0;
+    // Asks the provider to begin stopping without waiting, so that providers that wake on a timer finish together.
+    virtual void request_stop() noexcept {}
     virtual void stop() = 0;
     [[nodiscard]] virtual provider_health health() const = 0;
     // Records the kernel or the provider lost since the last call (e.g. netlink ENOBUFS); a

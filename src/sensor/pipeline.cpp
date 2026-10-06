@@ -896,6 +896,7 @@ result<bool> sensor_pipeline::run(const std::atomic<bool>& stop, const std::uint
 void sensor_pipeline::shutdown() {
     if (!started_) return;
     started_ = false;
+    for (auto& source : providers_) source->request_stop();
     for (auto& source : providers_) source->stop();
     // Drain what the providers queued before stopping.
     while (queue_.depth() > 0U) {

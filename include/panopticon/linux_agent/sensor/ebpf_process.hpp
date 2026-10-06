@@ -56,6 +56,7 @@ public:
     [[nodiscard]] std::vector<std::string> capabilities() const override;
     [[nodiscard]] std::string probe() override;
     [[nodiscard]] result<bool> start(record_queue& queue) override;
+    void request_stop() noexcept override { stop_ = true; }
     void stop() override;
     [[nodiscard]] provider_health health() const override;
     [[nodiscard]] std::uint64_t take_losses() override;

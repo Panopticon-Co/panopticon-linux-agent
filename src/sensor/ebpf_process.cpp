@@ -464,8 +464,10 @@ result<bool> ebpf_process_provider::start(record_queue& queue) {
 }
 
 void ebpf_process_provider::run() {
+    // The kernel wakes this poll as soon as a record is submitted (the programs submit with flags 0), so the
+    // timeout only bounds how long a stop request waits; a short one is 10 idle wake-ups a second per ring.
     while (!stop_.load(std::memory_order_relaxed)) {
-        const auto polled = ring_buffer__poll(ring_, 100);
+        const auto polled = ring_buffer__poll(ring_, 1000);
         if (polled < 0 && polled != -EINTR) {
             poll_failed_ = true;
             return;
