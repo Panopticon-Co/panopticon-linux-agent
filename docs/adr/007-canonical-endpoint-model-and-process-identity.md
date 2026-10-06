@@ -14,7 +14,7 @@ produced each record and which fields are unavailable.
 ## Decision
 
 1. A new model, `panopticon.endpoint/1.0`, is defined in `panopticon-contracts`
-   (`schemas/endpoint/1.0/`) and documented in
+   (`schema/linux-endpoint/1.0.schema.json`) and documented in
    [LINUX_ENDPOINT_TELEMETRY_CATALOG.md](../endpoint/LINUX_ENDPOINT_TELEMETRY_CATALOG.md).
 2. The envelope separates `record_type` (event, state, health, loss, detection, evidence,
    response, policy) from `type`, carries mandatory `provenance` and explicit `unavailable`

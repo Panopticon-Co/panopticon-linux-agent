@@ -1,7 +1,7 @@
 # Linux Endpoint Telemetry Catalog — `panopticon.endpoint/1.0`
 
 The canonical record model produced by the Linux endpoint. The machine-readable definition is
-`panopticon-contracts/schemas/endpoint/1.0/` (JSON Schema 2020-12); this document explains it.
+`panopticon-contracts/schema/linux-endpoint/1.0.schema.json` (JSON Schema 2020-12); this document explains it.
 Implementation state per type is tracked in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 ## 1. Principles

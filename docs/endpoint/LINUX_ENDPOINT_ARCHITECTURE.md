@@ -284,7 +284,7 @@ docs/endpoint/           this documentation set
 
 ## 6. Relationship to the rest of Panopticon
 
-The canonical model lives in `panopticon-contracts` (`schemas/endpoint/1.0/`). Manager accepts it
+The canonical model lives in `panopticon-contracts` (`schema/linux-endpoint/1.0.schema.json`). Manager accepts it
 on a new ingest route, stores it, and serves it to Detection Engine and Console; the 0.4 route
 stays for the Windows agent and older Linux agents until they migrate. See
 [CROSS_REPO_IMPACT.md](../CROSS_REPO_IMPACT.md).
