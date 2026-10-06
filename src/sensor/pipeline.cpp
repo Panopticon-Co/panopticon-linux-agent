@@ -65,12 +65,12 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 30U> allowed{
+    constexpr std::array<std::string_view, 31U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
         "file_include", "file_exclude", "enable_fim", "fim_path", "fim_interval_seconds", "enable_hashing", "hash_max_file_bytes",
-        "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events", "manager_url", "identity_path", "ca_bundle"};
+        "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events", "enable_sensitive_file_events", "manager_url", "identity_path", "ca_bundle"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -117,6 +117,10 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     if (const auto value = text("enable_file_events"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.enable_file_events = *value == "true";
+    }
+    if (const auto value = text("enable_sensitive_file_events"); value.has_value()) {
+        if (*value != "true" && *value != "false") valid = false;
+        config.enable_sensitive_file_events = *value == "true";
     }
     if (const auto value = text("enable_network_events"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
@@ -370,7 +374,7 @@ result<bool> sensor_pipeline::emit_file_event(const raw_record& record, const ra
     }
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.file_event(out, seq, observed_ns); });
     if (succeeded(emitted)) ++metrics_.events;
-    if (fim_ && file.pid != 0U) (void)fim_->note(file.path, file.old_path, file.pid, record.time_unix_ns, clock_domain::now_monotonic_ns());
+    if (fim_ && file.pid != 0U && file.operation != file_operation::open_sensitive) (void)fim_->note(file.path, file.old_path, file.pid, record.time_unix_ns, clock_domain::now_monotonic_ns());
     return emitted;
 }
 

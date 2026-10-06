@@ -1,4 +1,5 @@
 #include "panopticon/linux_agent/sensor/fanotify_file.hpp"
+#include "panopticon/linux_agent/sensor/sensitive_file.hpp"
 
 #include <fcntl.h>
 #include <sys/fanotify.h>
@@ -12,6 +13,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -257,6 +260,25 @@ void test_live_file_events_match_ground_truth() {
     (void)::rmdir(root.c_str());
 }
 
+void test_sensitive_patterns_expand_against_a_root() {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / ("panopticon-sensitive-" + std::to_string(::getpid()));
+    fs::remove_all(root);
+    fs::create_directories(root / "etc/ssh");
+    fs::create_directories(root / "home/alice/.ssh");
+    for (const auto* file : {"etc/shadow", "etc/ssh/ssh_host_ed25519_key", "etc/ssh/ssh_host_ed25519_key.pub", "home/alice/.ssh/id_rsa", "home/alice/.ssh/known_hosts"}) {
+        std::ofstream{root / file} << "x";
+    }
+    const auto found = expand_sensitive_patterns(sensitive_file_defaults(), {"/home/alice", "/home/bob"}, root, 100U);
+    const auto has = [&](const std::string& path) { return std::find(found.begin(), found.end(), path) != found.end(); };
+    require(has("/etc/shadow") && has("/etc/ssh/ssh_host_ed25519_key") && has("/home/alice/.ssh/id_rsa"), "existing credential files are found");
+    require(!has("/etc/ssh/ssh_host_ed25519_key.pub") && !has("/home/alice/.ssh/known_hosts"), "a wildcard does not over-match");
+    require(!has("/home/bob/.ssh/id_rsa") && !has("/etc/gshadow"), "files that do not exist are not reported");
+    require(expand_sensitive_patterns(sensitive_file_defaults(), {"/home/alice"}, root, 2U).size() <= 2U, "the watch count is bounded");
+    require(expand_sensitive_patterns({"relative/path", "/etc/*/shadow"}, {}, root, 10U).empty(), "relative paths and directory wildcards are refused");
+    fs::remove_all(root);
+}
+
 void run(const char* name, void (*test)()) {
     try {
         test();
@@ -276,6 +298,7 @@ int main() {
     run("decoder flags queue overflow", test_decoder_flags_queue_overflow);
     run("decoder fuzz never crashes", test_decoder_fuzz_never_crashes);
     run("filter prefixes respect directory boundaries", test_filter_prefixes_respect_directory_boundaries);
+    run("sensitive patterns expand against a root", test_sensitive_patterns_expand_against_a_root);
     run("live file events match ground truth", test_live_file_events_match_ground_truth);
     return 0;
 }

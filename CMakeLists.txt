@@ -88,6 +88,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/uplink_https.cpp
         src/sensor/netlink_proc.cpp
         src/sensor/fanotify_file.cpp
+        src/sensor/sensitive_file.cpp
         src/sensor/sockdiag_network.cpp
         src/sensor/auth_log.cpp
         src/sensor/audit_netlink.cpp

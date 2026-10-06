@@ -16,6 +16,7 @@
 #include "panopticon/linux_agent/sensor/fanotify_file.hpp"
 #include "panopticon/linux_agent/sensor/netlink_proc.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
+#include "panopticon/linux_agent/sensor/sensitive_file.hpp"
 #include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
 #include "panopticon/linux_agent/sensor/uplink.hpp"
 
@@ -218,6 +219,7 @@ int main(int argc, char** argv) {
         if (!control_socket.empty()) file_options.filter.exclude.push_back(std::filesystem::path{control_socket}.parent_path().string());
         providers.push_back(std::make_unique<sensor::fanotify_file_provider>(std::move(file_options)));
     }
+    if (config.enable_sensitive_file_events) providers.push_back(std::make_unique<sensor::sensitive_file_provider>());
     if (config.enable_network_events) providers.push_back(std::make_unique<sensor::sockdiag_network_provider>());
     if (config.enable_kernel_events) providers.push_back(std::make_unique<sensor::kernel_change_provider>());
     if (config.enable_auth_events) {

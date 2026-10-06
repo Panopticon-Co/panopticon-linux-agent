@@ -88,6 +88,7 @@ enum class file_operation : std::uint8_t {
     remove,
     rename,
     attrib,  // metadata change; the fanotify fallback cannot tell chmod from chown from setxattr
+    open_sensitive,  // a credential file was opened; the content read is not observed
 };
 [[nodiscard]] const char* to_string(file_operation value) noexcept;
 

@@ -38,6 +38,7 @@ struct sensor_config {
     bool collect_environment{true};
     bool enable_ebpf{true};  // false: skip the eBPF provider; netlink_proc and procfs only
     bool enable_file_events{true};  // false: no fanotify file telemetry
+    bool enable_sensitive_file_events{true};  // false: no reports of credential files being opened
     bool enable_network_events{true};  // false: no socket telemetry (sock_diag)
     bool enable_auth_events{true};     // false: no authentication telemetry (audit group, auth log)
     bool enable_kernel_events{true};   // false: no kernel module and mount change events

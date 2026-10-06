@@ -24,6 +24,7 @@ const char* to_string(const file_operation value) noexcept {
     case file_operation::remove: return "delete";
     case file_operation::rename: return "rename";
     case file_operation::attrib: return "attrib";
+    case file_operation::open_sensitive: return "open_sensitive";
     }
     return "modify";
 }
