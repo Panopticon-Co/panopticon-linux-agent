@@ -1,5 +1,7 @@
 #pragma once
 
+#include "panopticon/linux_agent/sensor/process_info.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -80,8 +82,28 @@ struct raw_session_change {
     std::uint32_t pid{};
 };
 
+enum class file_operation : std::uint8_t {
+    create,
+    modify,  // closed after being opened for writing (fanotify cannot see individual write() calls)
+    remove,
+    rename,
+    attrib,  // metadata change; the fanotify fallback cannot tell chmod from chown from setxattr
+};
+[[nodiscard]] const char* to_string(file_operation value) noexcept;
+
+// A filesystem change observed by a file provider. The actor is only a pid here; the pipeline
+// resolves it against the entity graph, which only it may touch.
+struct raw_file_event {
+    std::uint32_t pid{};
+    file_operation operation{file_operation::modify};
+    std::string path;                    // empty when it could not be resolved
+    std::optional<std::string> old_path; // rename only
+    bool directory{false};
+    std::vector<unavailable_field> unavailable;
+};
+
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
-                                 raw_session_change>;
+                                 raw_session_change, raw_file_event>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

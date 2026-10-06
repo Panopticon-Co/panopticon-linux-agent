@@ -122,6 +122,9 @@ public:
     // Records the kernel or the provider lost since the last call (e.g. netlink ENOBUFS); a
     // non-zero value means the entity graph must reconcile.
     [[nodiscard]] virtual std::uint64_t take_losses() = 0;
+    // Events the provider deliberately dropped to stay within its rate budget since the last
+    // call; the count is exact, so no reconcile is needed (reported as a `governor` loss).
+    [[nodiscard]] virtual std::uint64_t take_governed() { return 0U; }
 };
 
 }  // namespace panopticon::linux_agent::sensor

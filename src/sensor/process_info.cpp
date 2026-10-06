@@ -169,6 +169,7 @@ const char* to_string(const unavailable_reason reason) noexcept {
     case unavailable_reason::budget_exceeded: return "budget_exceeded";
     case unavailable_reason::not_applicable: return "not_applicable";
     case unavailable_reason::kernel_feature_missing: return "kernel_feature_missing";
+    case unavailable_reason::object_gone: return "object_gone";
     }
     return "unknown";
 }

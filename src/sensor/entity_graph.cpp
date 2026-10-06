@@ -17,6 +17,17 @@ const char* to_string(const confidence value) noexcept {
     return "inferred";
 }
 
+const char* to_string(const file_operation value) noexcept {
+    switch (value) {
+    case file_operation::create: return "create";
+    case file_operation::modify: return "modify";
+    case file_operation::remove: return "delete";
+    case file_operation::rename: return "rename";
+    case file_operation::attrib: return "attrib";
+    }
+    return "modify";
+}
+
 exit_details decode_exit_status(const std::uint32_t status) noexcept {
     exit_details details;
     const auto low = status & 0x7FU;
@@ -135,6 +146,7 @@ std::vector<process_event> entity_graph::apply(const raw_record& record) {
             else if constexpr (std::is_same_v<payload_type, raw_credential_change>) return on_credentials(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_ptrace>) return on_ptrace(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_comm_change>) return on_comm(record, payload);
+            else if constexpr (std::is_same_v<payload_type, raw_file_event>) return {};  // not a process change
             else return on_session(record, payload);
         },
         record.payload);

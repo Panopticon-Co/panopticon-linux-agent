@@ -25,6 +25,7 @@ enum class unavailable_reason : std::uint8_t {
     budget_exceeded,
     not_applicable,
     kernel_feature_missing,
+    object_gone,  // a file or directory no longer existed when it was resolved
 };
 [[nodiscard]] const char* to_string(unavailable_reason reason) noexcept;
 
