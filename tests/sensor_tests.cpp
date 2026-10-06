@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -1128,6 +1129,107 @@ void test_pipeline_reports_delivery_and_turns_rejections_into_loss() {
     require(contains(*loss, R"("count":1)") && contains(*loss, "sequence numbers 68") && contains(*loss, "schema_invalid"), "loss names the sequence and the reason");
 }
 
+// A sink that refuses records while `refuse` is set, as a full disk does.
+class refusing_sink final : public record_sink {
+public:
+    explicit refusing_sink(std::FILE* stream) : inner_{stream} {}
+    [[nodiscard]] std::uint64_t next_seq() const override { return inner_.next_seq(); }
+    [[nodiscard]] result<bool> append(const std::uint64_t seq, const std::string_view record) override {
+        if (refuse) return error{error_code::io_failure, "no space left on device"};
+        return inner_.append(seq, record);
+    }
+    [[nodiscard]] result<bool> flush(const std::uint64_t now_ns, const bool force) override { return inner_.flush(now_ns, force); }
+    bool refuse{false};
+
+private:
+    stream_sink inner_;
+};
+
+void test_pipeline_reports_records_the_sink_refused() {
+    const auto root = fresh_directory("refuseproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "bash", 500U, "/usr/bin/bash", {"-bash"}}.write(root);
+    fake_process{200U, 100U, "curl", 900U, "/usr/bin/curl", {"curl"}}.write(root);
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    refusing_sink sink{stream};
+    auto script = std::make_unique<scripted_provider>(std::vector<raw_record>{}, 7U);
+    auto* handle = script.get();
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::move(script));
+    std::uint64_t unwritten = 0U;
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        const auto before = pipeline.metrics().records;
+        sink.refuse = true;
+        handle->push({record_of(raw_fork{100U, 100U, 200U, 200U, std::nullopt}), record_of(raw_exec{200U, 200U, std::nullopt, std::nullopt, std::nullopt}),
+                      record_of(raw_exit{200U, 200U, 0U, 17U})});
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        unwritten = pipeline.metrics().records_unwritten;
+        require(unwritten >= 3U, "every refused data record is counted");
+        require(pipeline.metrics().records == before, "nothing was written while the sink refused");
+        sink.refuse = false;
+        // The retry is rate limited to one a second while the sink is failing; let a second pass.
+        const auto later = clock_domain::now_monotonic_ns() + 2'000'000'000ULL;
+        for (int i = 0; i < 3; ++i) (void)pipeline.step(later, std::chrono::milliseconds{0});
+        require(pipeline.metrics().records_unwritten == unwritten, "reporting the loss does not count as another loss");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "refused records do not use up sequence numbers");
+    }
+    const auto governor = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, R"("stage":"governor")"); });
+    require(governor != lines.end() && contains(*governor, R"("count":7)"), "a loss whose own record was refused is written once the sink recovers");
+    // The refused records may be reported in more than one loss record (one more can be refused
+    // after the first report is attempted); what matters is that every one is counted exactly once.
+    std::uint64_t reported = 0U;
+    bool cause_named = false;
+    for (const auto& line : lines) {
+        const auto at = line.find(R"("by_type":{"write_failed":)");
+        if (at == std::string::npos) continue;
+        require(contains(line, R"("stage":"wal")"), "refused records are reported as a wal loss");
+        reported += std::stoull(line.substr(at + std::string{R"("by_type":{"write_failed":)"}.size()));
+        cause_named = cause_named || contains(line, "no space left on device");
+    }
+    require(reported == unwritten, "the refused records are reported exactly once in total: " + std::to_string(reported) + " of " + std::to_string(unwritten));
+    require(cause_named, "the cause is named");
+}
+
+void test_pipeline_rebases_event_times_after_a_clock_step() {
+    const auto root = fresh_directory("clockstepproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    require(std::llabs(clock.boot_offset_drift_ns()) < 50'000'000LL, "no drift right after sampling");
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(std::vector<raw_record>{}, 0U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        require(pipeline.metrics().clock_steps == 0U, "a steady clock is not a step");
+        clock.shift_offsets_for_test(3'000'000'000LL);  // as if the wall clock had been stepped forward 3 s since sampling
+        require(clock.boot_offset_drift_ns() > 2'500'000'000LL, "the step is visible as drift");
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        require(pipeline.metrics().clock_steps == 1U, "the step is detected");
+        require(std::llabs(clock.boot_offset_drift_ns()) < 50'000'000LL, "offsets were re-sampled at once");
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        require(pipeline.metrics().clock_steps == 1U, "one step is counted once");
+    }
+    std::fclose(stream);
+}
+
 void test_pipeline_emits_host_state_parts() {
     const auto proc = fresh_directory("hostproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
@@ -1613,6 +1715,8 @@ int main() {
     run("wal_detects_corruption_and_enforces_quota", test_wal_detects_corruption_and_enforces_quota);
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
+    run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
+    run("pipeline_rebases_event_times_after_a_clock_step", test_pipeline_rebases_event_times_after_a_clock_step);
     run("pipeline_reports_delivery_and_turns_rejections_into_loss", test_pipeline_reports_delivery_and_turns_rejections_into_loss);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);
     run("pipeline_enriches_network_events", test_pipeline_enriches_network_events);

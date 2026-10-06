@@ -276,9 +276,13 @@ result<bool> sensor_pipeline::emit(const std::function<std::string(std::uint64_t
     auto appended = sink_.append(seq, record);
     if (!succeeded(appended)) {
         ++metrics_.sink_errors;
+        ++metrics_.records_unwritten;
+        write_failed_ = true;
+        last_write_error_ = std::get<error>(appended).message;
         if (std::get<error>(appended).code == error_code::resource_limit) ++metrics_.oversize_dropped;
         return appended;
     }
+    write_failed_ = false;
     ++metrics_.records;
     return true;
 }
@@ -522,7 +526,16 @@ result<bool> sensor_pipeline::emit_file_event(const raw_record& record, const ra
 result<bool> sensor_pipeline::emit_loss(loss_report report) {
     const auto now = clock_domain::now_unix_ns();
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.loss(report, seq, now); });
-    if (succeeded(emitted)) ++metrics_.loss_records;
+    if (succeeded(emitted)) {
+        ++metrics_.loss_records;
+        return emitted;
+    }
+    // Keep the report and write it once the sink accepts records again. It is not an unwritten
+    // data record, so it does not count towards records_unwritten while it waits.
+    --metrics_.records_unwritten;
+    constexpr std::size_t maximum_pending = 64U;
+    if (pending_losses_.size() < maximum_pending) pending_losses_.push_back(std::move(report));
+    else pending_losses_.back().count += report.count;
     return emitted;
 }
 
@@ -714,9 +727,23 @@ result<bool> sensor_pipeline::emit_fim_changes(const std::vector<fim_change>& ch
 
 result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
     bool reconcile_now = false;
-    if (const auto dropped = queue_.take_dropped(); dropped > 0U) {
-        (void)emit_loss({"queue", dropped, {}, "record queue full; process state will be reconciled"});
-        reconcile_now = true;
+    // While the sink refuses records a retry is attempted once a second (each failed attempt is
+    // counted); after a successful write it is attempted at once.
+    if (!write_failed_ || now_ns - last_loss_retry_ns_ >= ns_per_second) {
+        last_loss_retry_ns_ = now_ns;
+        if (!pending_losses_.empty()) {
+            auto deferred = std::move(pending_losses_);
+            pending_losses_.clear();
+            for (auto& report : deferred) (void)emit_loss(std::move(report));
+        }
+        if (metrics_.records_unwritten > unwritten_reported_) {
+            const auto total = metrics_.records_unwritten;
+            const auto lost = total - unwritten_reported_;
+            unwritten_reported_ = total;  // a refused loss record is kept in pending_losses_, so its count is not lost
+            (void)emit_loss({"wal", lost, {{"write_failed", lost}},
+                             "write_failed: " + std::to_string(lost) + " record(s) could not be written to the write-ahead log (" +
+                                 last_write_error_ + "); their sequence numbers were not used, so the stream has no gap"});
+        }
     }
     for (const auto& source : providers_) {
         if (const auto governed = source->take_governed(); governed > 0U) {
@@ -795,7 +822,16 @@ result<bool> sensor_pipeline::start() {
 }
 
 result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono::milliseconds wait) {
-    if (now_ns - last_resample_ns_ >= 60U * ns_per_second) {
+    // A stepped wall clock would leave event times wrong until the next periodic resample, so look
+    // for one every step (two clock reads) and resample at once.
+    constexpr std::int64_t step_threshold_ns = 250'000'000;
+    const auto drift = clock_.boot_offset_drift_ns();
+    const bool stepped = drift > step_threshold_ns || drift < -step_threshold_ns;
+    if (stepped) {
+        ++metrics_.clock_steps;
+        std::fprintf(stderr, "panopticon-sensord: wall clock stepped by %lld ms; event times re-based\n", static_cast<long long>(drift / 1'000'000));
+    }
+    if (stepped || now_ns - last_resample_ns_ >= 60U * ns_per_second) {
         clock_.resample();
         last_resample_ns_ = now_ns;
     }

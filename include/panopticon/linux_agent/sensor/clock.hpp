@@ -14,6 +14,12 @@ class clock_domain {
 public:
     clock_domain();
     void resample();
+    // How far the wall clock has moved against CLOCK_BOOTTIME since the offsets were sampled: near
+    // zero normally (slew is a few milliseconds a minute), large after the clock was stepped (NTP
+    // correcting a wrong boot time, `date -s`, a VM resumed).
+    [[nodiscard]] std::int64_t boot_offset_drift_ns() const noexcept;
+    // For tests: pretend the offsets were sampled when the wall clock read `shift_ns` less.
+    void shift_offsets_for_test(std::int64_t shift_ns) noexcept;
 
     [[nodiscard]] std::uint64_t boottime_to_unix_ns(std::uint64_t boottime_ns) const noexcept;
     [[nodiscard]] std::uint64_t monotonic_to_unix_ns(std::uint64_t monotonic_ns) const noexcept;

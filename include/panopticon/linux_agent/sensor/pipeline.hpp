@@ -121,6 +121,8 @@ struct pipeline_metrics {
     std::uint64_t reconciles{};
     std::uint64_t sink_errors{};
     std::uint64_t oversize_dropped{};
+    std::uint64_t clock_steps{};        // wall-clock steps detected; offsets were re-sampled at once
+    std::uint64_t records_unwritten{};  // records the sink refused (full or failing disk); reported as a wal loss
 };
 
 class sensor_pipeline {
@@ -209,6 +211,12 @@ private:
     std::uint64_t last_status_ns_{};
     delivery_probe delivery_probe_;
     std::uint64_t quarantine_reported_{};
+    // A loss record is a record: if the sink refuses it, the loss it describes must not vanish with it.
+    std::vector<loss_report> pending_losses_;
+    std::uint64_t unwritten_reported_{};
+    std::uint64_t last_loss_retry_ns_{};
+    std::string last_write_error_;
+    bool write_failed_{false};
     std::uint64_t started_ns_{};
     bool started_{false};
 };

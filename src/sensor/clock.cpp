@@ -45,6 +45,19 @@ void clock_domain::resample() {
                                std::memory_order_relaxed);
 }
 
+std::int64_t clock_domain::boot_offset_drift_ns() const noexcept {
+    const auto boot_before = now_boottime_ns();
+    const auto unix_now = now_unix_ns();
+    const auto boot_after = now_boottime_ns();
+    const auto current = static_cast<std::int64_t>(unix_now) - static_cast<std::int64_t>(boot_before + (boot_after - boot_before) / 2U);
+    return current - boot_offset_ns_.load(std::memory_order_relaxed);
+}
+
+void clock_domain::shift_offsets_for_test(const std::int64_t shift_ns) noexcept {
+    boot_offset_ns_.fetch_sub(shift_ns, std::memory_order_relaxed);
+    monotonic_offset_ns_.fetch_sub(shift_ns, std::memory_order_relaxed);
+}
+
 std::uint64_t clock_domain::boottime_to_unix_ns(const std::uint64_t boottime_ns) const noexcept {
     return apply(boottime_ns, boot_offset_ns_.load(std::memory_order_relaxed));
 }
