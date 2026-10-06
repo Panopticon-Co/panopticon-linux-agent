@@ -15,7 +15,11 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sched.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -609,6 +613,149 @@ void test_live_executable_memory_and_bpf() {
     ::close(self_file);
 }
 
+std::vector<std::uint8_t> dns_packet(const std::string& name, const std::uint16_t type, const std::uint16_t id, const std::uint16_t flags = 0x0100U) {
+    std::vector<std::uint8_t> out{static_cast<std::uint8_t>(id >> 8U), static_cast<std::uint8_t>(id & 0xffU), static_cast<std::uint8_t>(flags >> 8U),
+                                  static_cast<std::uint8_t>(flags & 0xffU), 0, 1, 0, 0, 0, 0, 0, 0};
+    std::size_t start = 0U;
+    while (start < name.size()) {
+        auto end = name.find('.', start);
+        if (end == std::string::npos) end = name.size();
+        out.push_back(static_cast<std::uint8_t>(end - start));
+        out.insert(out.end(), name.begin() + static_cast<std::ptrdiff_t>(start), name.begin() + static_cast<std::ptrdiff_t>(end));
+        start = end + 1U;
+    }
+    out.push_back(0);
+    out.push_back(static_cast<std::uint8_t>(type >> 8U));
+    out.push_back(static_cast<std::uint8_t>(type & 0xffU));
+    out.push_back(0);
+    out.push_back(1);
+    return out;
+}
+
+void test_decode_dns() {
+    clock_domain clock;
+    auto event = base_event(wire::PAN_EVENT_DNS_QUERY);
+    event.net_family = 2U;
+    event.net_proto = 17U;
+    event.net_sport = 40000U;
+    event.net_dport = 53U;
+    event.net_saddr[0] = 10U;
+    event.net_saddr[3] = 5U;
+    event.net_daddr[0] = 10U;
+    event.net_daddr[2] = 2U;
+    event.net_daddr[3] = 3U;
+    const auto packet = dns_packet("Evil.Example.COM", 16U, 0x1234U);
+    std::memcpy(event.filename, packet.data(), packet.size());
+    event.dns_len = static_cast<std::uint16_t>(packet.size());
+    bool malformed = true;
+    auto records = decode_ebpf_process_sample(&event, header_size + packet.size(), clock, {}, &malformed);
+    require(!malformed && records.size() == 1U, "dns query decodes");
+    const auto& query = std::get<raw_dns_query>(records[0].payload);
+    require(query.pid == 4242U && query.name == "Evil.Example.COM" && query.type == "TXT" && query.klass == "IN" && query.transaction_id == 0x1234U &&
+                query.recursion_desired && query.server_address == "10.0.2.3" && query.server_port == 53U && query.local_address == "10.0.0.5" &&
+                query.local_port == 40000U && query.family == "inet",
+            "question, endpoints and case are kept as sent");
+    require(records[0].source.mechanism == "udp_sendmsg" && records[0].source.level == confidence::observed, "provenance names the hook");
+
+    auto response = event;
+    const auto answer = dns_packet("example.com", 1U, 7U, 0x8180U);
+    std::memcpy(response.filename, answer.data(), answer.size());
+    response.dns_len = static_cast<std::uint16_t>(answer.size());
+    malformed = false;
+    require(decode_ebpf_process_sample(&response, header_size + answer.size(), clock, {}, &malformed).empty() && !malformed,
+            "a response is not a query and is not an error");
+
+    auto text = event;
+    const char note[] = "this is plain text sent to port fifty-three";
+    std::memcpy(text.filename, note, sizeof(note));
+    text.dns_len = sizeof(note);
+    malformed = false;
+    require(decode_ebpf_process_sample(&text, header_size + sizeof(note), clock, {}, &malformed).empty() && !malformed,
+            "port 53 traffic that is not DNS yields no dns record and is not an error");
+
+    auto oversize = event;
+    oversize.dns_len = wire::PAN_DNS_CAPTURE + 1U;
+    malformed = false;
+    require(decode_ebpf_process_sample(&oversize, sizeof(wire::pan_event), clock, {}, &malformed).empty() && malformed, "a length past the capture bound is malformed");
+    malformed = false;
+    require(decode_ebpf_process_sample(&event, header_size + packet.size() - 1U, clock, {}, &malformed).empty() && malformed, "a sample shorter than its length is malformed");
+    auto no_family = event;
+    no_family.net_family = 0U;
+    malformed = false;
+    require(decode_ebpf_process_sample(&no_family, header_size + packet.size(), clock, {}, &malformed).empty() && malformed, "an unknown family is malformed");
+}
+
+// The test process sends the datagrams itself, so the records are exactly what it did: a question
+// to an explicit destination, the same question again with a new transaction id (a retry, one
+// report), another type of the same name, a write on a connected socket, a sendmsg with one iovec,
+// text that is not DNS, and a datagram whose first iovec is too short to hold the question.
+void test_live_dns_query() {
+    live_provider live{ebpf_role::network};
+    if (!live.begin("live_dns_query")) return;
+
+    sockaddr_in server{};
+    server.sin_family = AF_INET;
+    server.sin_port = htons(53);
+    ::inet_pton(AF_INET, "127.0.0.1", &server.sin_addr);
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    require(fd >= 0, "udp socket");
+    const auto send_to = [&](const std::vector<std::uint8_t>& data) {
+        return ::sendto(fd, data.data(), data.size(), 0, reinterpret_cast<const sockaddr*>(&server), sizeof(server)) == static_cast<ssize_t>(data.size());
+    };
+    require(send_to(dns_packet("panopticon-probe.example.test", 16U, 0x1111U)), "first question sent");
+    require(send_to(dns_packet("panopticon-probe.example.test", 16U, 0x2222U)), "retry sent");
+    require(send_to(dns_packet("panopticon-probe.example.test", 28U, 0x3333U)), "second type sent");
+
+    const int connected = ::socket(AF_INET, SOCK_DGRAM, 0);
+    require(connected >= 0 && ::connect(connected, reinterpret_cast<const sockaddr*>(&server), sizeof(server)) == 0, "connected udp socket");
+    const auto on_connected = dns_packet("connected.example.test", 1U, 0x4444U);
+    require(::send(connected, on_connected.data(), on_connected.size(), 0) == static_cast<ssize_t>(on_connected.size()), "send on a connected socket");
+
+    const auto by_message = dns_packet("sendmsg.example.test", 1U, 0x5555U);
+    iovec vector{const_cast<std::uint8_t*>(by_message.data()), by_message.size()};
+    msghdr message{};
+    message.msg_name = &server;
+    message.msg_namelen = sizeof(server);
+    message.msg_iov = &vector;
+    message.msg_iovlen = 1;
+    require(::sendmsg(fd, &message, 0) == static_cast<ssize_t>(by_message.size()), "sendmsg with one iovec");
+
+    require(send_to(std::vector<std::uint8_t>(40U, 'x')), "text that is not DNS");
+
+    const auto split = dns_packet("split.example.test", 1U, 0x6666U);
+    iovec halves[2] = {{const_cast<std::uint8_t*>(split.data()), 20U}, {const_cast<std::uint8_t*>(split.data()) + 20U, split.size() - 20U}};
+    msghdr divided{};
+    divided.msg_name = &server;
+    divided.msg_namelen = sizeof(server);
+    divided.msg_iov = halves;
+    divided.msg_iovlen = 2;
+    require(::sendmsg(fd, &divided, 0) == static_cast<ssize_t>(split.size()), "sendmsg with two iovecs");
+    require(send_to(dns_packet("marker.example.test", 1U, 0x7777U)), "marker question sent last");
+
+    sockaddr_in bound{};
+    socklen_t bound_length = sizeof(bound);
+    require(::getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &bound_length) == 0, "local port");
+
+    const auto self = static_cast<std::uint32_t>(::getpid());
+    const auto asked = [&](const records_t& seen, const std::string& name) {
+        return select<raw_dns_query>(seen, [&](const raw_dns_query& e) { return e.pid == self && e.name == name; });
+    };
+    records_t all;
+    require(collect(live.queue(), all, [&](const records_t& seen) { return !asked(seen, "marker.example.test").empty(); }), "the questions were reported for this process");
+
+    const auto probes = asked(all, "panopticon-probe.example.test");
+    require(probes.size() == 2U, "the retry is a duplicate; the other type is a new question");
+    const auto& first = std::get<raw_dns_query>(probes[0]->payload);
+    const auto& second = std::get<raw_dns_query>(probes[1]->payload);
+    require(first.type == "TXT" && first.transaction_id == 0x1111U && second.type == "AAAA" && second.transaction_id == 0x3333U, "types and ids of the two reports");
+    require(first.server_address == "127.0.0.1" && first.server_port == 53U && first.local_port == ntohs(bound.sin_port) && first.family == "inet", "endpoints");
+    require(asked(all, "connected.example.test").size() == 1U, "a send on a connected socket is attributed too");
+    require(asked(all, "sendmsg.example.test").size() == 1U, "sendmsg with an iovec is read");
+    require(asked(all, "split.example.test").empty(), "a question split across iovecs is not reported (only the first iovec is read)");
+    ::close(fd);
+    ::close(connected);
+}
+
 std::uint64_t namespace_inode(const char* path) {
     struct stat status {};
     if (::stat(path, &status) != 0) throw std::runtime_error{std::string{"stat failed: "} + path};
@@ -813,6 +960,7 @@ int main(int argc, char** argv) {
     run("decode_network", test_decode_network);
     run("decode_security", test_decode_security);
     run("decode_namespace_change", test_decode_namespace_change);
+    run("decode_dns", test_decode_dns);
     run("decode_credentials_and_ptrace", test_decode_credentials_and_ptrace);
     run("decode_rejects_malformed_samples", test_decode_rejects_malformed_samples);
     run("process_providers_share_a_family", test_process_providers_share_a_family);
@@ -826,6 +974,7 @@ int main(int argc, char** argv) {
     run("live_network_connect_accept_listen_udp", test_live_network_connect_accept_listen_udp);
     run("live_executable_memory_and_bpf", test_live_executable_memory_and_bpf);
     run("live_namespace_change", test_live_namespace_change);
+    run("live_dns_query", test_live_dns_query);
     std::cout << (failures == 0 ? std::string{"ALL PASSED"} : "FAILURES: " + std::to_string(failures)) << " (skipped " << skipped << ")\n";
     return failures == 0 ? 0 : 1;
 }

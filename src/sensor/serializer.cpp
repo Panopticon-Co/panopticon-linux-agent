@@ -482,6 +482,54 @@ std::string record_serializer::network_event(const network_record& record, const
     return out.take();
 }
 
+std::string record_serializer::dns_event(const dns_record& record, const std::uint64_t seq, const std::uint64_t observed_unix_ns) const {
+    const auto& dns = record.dns;
+    json_writer out;
+    begin(out, "event", "dns.query", seq, record.time_unix_ns, observed_unix_ns, record.source);
+    std::vector<unavailable_field> unavailable;
+    if (record.actor) {
+        out.key("process");
+        write_process(out, *record.actor);
+        out.end_object();
+    } else {
+        if (dns.pid != 0U) {
+            out.key("process").begin_object();
+            out.field("pid", dns.pid);
+            out.end_object();
+            unavailable.push_back({"process", unavailable_reason::process_exited});
+        } else {
+            unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+        }
+    }
+    out.key("dns").begin_object();
+    out.field("name", dns.name);
+    out.field("type", dns.type);
+    out.field("class", dns.klass);
+    out.field("transaction_id", static_cast<std::uint32_t>(dns.transaction_id));
+    out.field("recursion_desired", dns.recursion_desired);
+    out.field("transport", "udp");
+    out.field("family", dns.family == "inet" ? "ipv4" : "ipv6");
+    out.key("server").begin_object();
+    out.field("ip", dns.server_address);
+    out.field("port", static_cast<std::uint32_t>(dns.server_port));
+    out.end_object();
+    out.key("local").begin_object();
+    out.field("ip", dns.local_address);
+    out.field("port", static_cast<std::uint32_t>(dns.local_port));
+    out.end_object();
+    out.end_object();
+    out.key("unavailable").begin_array();
+    for (const auto& field : unavailable) {
+        out.begin_object();
+        out.field("field", field.field);
+        out.field("reason", to_string(field.reason));
+        out.end_object();
+    }
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::auth_event(const auth_record& record, const std::uint64_t seq,
                                           const std::uint64_t observed_unix_ns) const {
     const auto& auth = record.auth;

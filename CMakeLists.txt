@@ -81,6 +81,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/clock.cpp
         src/sensor/process_info.cpp
         src/sensor/container_identity.cpp
+        src/sensor/dns_message.cpp
         src/sensor/entity_graph.cpp
         src/sensor/serializer.cpp
         src/sensor/wal.cpp

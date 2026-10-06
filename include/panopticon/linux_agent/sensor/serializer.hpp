@@ -111,6 +111,14 @@ struct network_record {
     raw_network_event network;
 };
 
+// A dns.query event after the pipeline attached the asking process (if it still exists).
+struct dns_record {
+    std::uint64_t time_unix_ns{};
+    provenance source;
+    entity_ptr actor;
+    raw_dns_query dns;
+};
+
 // An auth.* event after the pipeline attached the logging process (if it still exists).
 struct auth_record {
     std::uint64_t time_unix_ns{};
@@ -154,6 +162,9 @@ public:
 
     // network.connect / network.accept / network.listen (catalog §4.3).
     [[nodiscard]] std::string network_event(const network_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+
+    // dns.query (catalog 4.8).
+    [[nodiscard]] std::string dns_event(const dns_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
 
     // memory.exec_mapping / kernel.bpf_load (catalog 4.6).
     [[nodiscard]] std::string security_event(const security_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;

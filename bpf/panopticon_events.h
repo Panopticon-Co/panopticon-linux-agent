@@ -41,6 +41,7 @@ enum pan_event_kind {
     PAN_EVENT_MEM_PROTECT = 12, /* mprotect() made a non-executable mapping executable */
     PAN_EVENT_BPF = 13,         /* bpf() syscall that loads or attaches a program */
     PAN_EVENT_NS_CHANGE = 14,   /* setns() or unshare() moved a task into other namespaces */
+    PAN_EVENT_DNS_QUERY = 15,   /* UDP datagram to port 53; its first bytes ride in `filename` */
 };
 
 enum pan_mem_backing {
@@ -55,6 +56,7 @@ enum {
     PAN_FILENAME_LEN = 448,
     PAN_ARGS_LEN = 3072,
     PAN_ARGS_MAX = 128,
+    PAN_DNS_CAPTURE = 320, /* enough for the header and a 255-byte name and its type and class */
 };
 
 enum pan_event_flags {
@@ -113,6 +115,8 @@ struct pan_event {
     char obj_name[PAN_COMM_LEN]; /* bpf: program name (PROG_LOAD) or tracepoint name (RAW_TRACEPOINT_OPEN) */
     u32 ns_old[6]; /* ns change: inode numbers before: mnt, pid_for_children, net, uts, ipc, cgroup */
     u32 ns_new[6]; /* ns change: inode numbers after, same order */
+    u16 dns_len;   /* dns: bytes of the datagram stored at the start of `filename` (at most PAN_DNS_CAPTURE) */
+    u16 dns_pad[3];
 
     char comm[PAN_COMM_LEN];      /* task->comm (rename: the new name) */
     char filename[PAN_FILENAME_LEN]; /* exec: bprm->filename */

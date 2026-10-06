@@ -367,7 +367,128 @@ int BPF_PROG(on_tcp_listen, struct socket *sock, int backlog, int ret)
     return 0;
 }
 
-static __always_inline int udp_flow(struct sock *sk, struct msghdr *msg)
+// ---- DNS queries (ADR 022) ---------------------------------------------------------------------
+//
+// A UDP datagram to port 53 is read where it leaves the process: the first bytes are copied from
+// the sender's buffer and the question is parsed in user space. The sender is `current`, so the
+// process that asked is exact even when a stub resolver is not used. Only plain UDP DNS is seen:
+// DNS over TLS or HTTPS looks like any other TCP connection.
+#define PAN_DNS_PORT 53
+#define PAN_DNS_MIN 17 /* header, a root name and a type and class */
+#define PAN_DNS_HASHED 96
+#define PAN_DNS_WINDOW_NS (5ULL * 1000000000ULL)
+
+struct pan_dns_key {
+    u32 tgid;
+    u32 hash;
+};
+
+// A resolver often asks the same question twice in a row (A and AAAA, retries). One report per
+// (process, question) per window; the transaction id is excluded so a retry is a duplicate.
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 8192);
+    __type(key, struct pan_dns_key);
+    __type(value, u64);
+} dns_seen SEC(".maps");
+
+// struct iov_iter changed shape across kernels: the iovec array is `iov` before 6.4 and `__iov`
+// after, and 6.0 added `ubuf` for a single user buffer. libbpf resolves each field by name against
+// the running kernel; the guards below keep a field that does not exist from being used.
+struct iov_iter___dns {
+    u8 iter_type;
+    const struct iovec *iov;
+    const struct iovec *__iov;
+    void *ubuf;
+};
+
+// The user buffer of the datagram being sent, and how many bytes of it are valid there. Returned
+// by value: a length whose address is taken lives in a stack slot, and the verifier loses what it
+// knew about its range when it is reloaded.
+struct user_buffer {
+    void *base;
+    u64 limit;
+};
+
+static __always_inline struct user_buffer msg_user_buffer(struct msghdr *msg, u64 len)
+{
+    struct user_buffer none = {};
+    struct user_buffer found = {};
+    struct iov_iter___dns *it = (struct iov_iter___dns *)&msg->msg_iter;
+    u8 type = BPF_CORE_READ(it, iter_type);
+    if (type != bpf_core_enum_value(enum iter_type, ITER_IOVEC)) {
+        if (!bpf_core_field_exists(it->ubuf))
+            return none;
+        found.base = BPF_CORE_READ(it, ubuf);
+        found.limit = len;
+        return found;
+    }
+    const struct iovec *vec;
+    if (bpf_core_field_exists(it->__iov))
+        vec = BPF_CORE_READ(it, __iov);
+    else
+        vec = BPF_CORE_READ(it, iov);
+    if (!vec)
+        return none;
+    struct iovec first = {};
+    if (bpf_probe_read_kernel(&first, sizeof(first), vec))
+        return none;
+    found.base = first.iov_base;
+    found.limit = first.iov_len < len ? first.iov_len : len;
+    return found;
+}
+
+static __always_inline void dns_query(struct sock *sk, struct msghdr *msg, size_t len, u8 family, const u8 *daddr, u16 dport)
+{
+    struct user_buffer buffer = msg_user_buffer(msg, len);
+    if (!buffer.base || buffer.limit < PAN_DNS_MIN)
+        return;
+    struct pan_event *e = event_base(PAN_EVENT_DNS_QUERY);
+    if (!e)
+        return;
+    u64 avail = buffer.limit;
+    if (avail > PAN_DNS_CAPTURE)
+        avail = PAN_DNS_CAPTURE;
+    barrier_var(avail); // keep the clamp in a register up to the helper calls that take it as a size
+    if (bpf_probe_read_user(e->filename, avail, buffer.base))
+        return;
+
+    u32 hash = 2166136261u ^ (u32)avail;
+#pragma unroll
+    for (int i = 2; i < PAN_DNS_HASHED; i++) {
+        if (i >= avail)
+            break;
+        hash = (hash ^ (u8)e->filename[i]) * 16777619u;
+    }
+    struct pan_dns_key key = {};
+    key.tgid = bpf_get_current_pid_tgid() >> 32;
+    key.hash = hash;
+    u64 now = bpf_ktime_get_boot_ns();
+    u64 *last = bpf_map_lookup_elem(&dns_seen, &key);
+    if (last && now - *last < PAN_DNS_WINDOW_NS)
+        return;
+    bpf_map_update_elem(&dns_seen, &key, &now, BPF_ANY);
+
+    e->net_family = family;
+    e->net_proto = 17;
+    e->net_sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+    e->net_dport = dport;
+    __builtin_memcpy(e->net_daddr, daddr, 16);
+    if (family == PAN_AF_INET) {
+        u32 local = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+        __builtin_memcpy(e->net_saddr, &local, sizeof(local));
+    } else {
+        struct in6_addr local6 = {};
+        BPF_CORE_READ_INTO(&local6, sk, __sk_common.skc_v6_rcv_saddr);
+        __builtin_memcpy(e->net_saddr, &local6, sizeof(local6));
+    }
+    e->dns_len = (u16)avail;
+    net_actor(e);
+    if (bpf_ringbuf_output(&events, e, __builtin_offsetof(struct pan_event, filename) + avail, 0))
+        count_drop();
+}
+
+static __always_inline int udp_flow(struct sock *sk, struct msghdr *msg, size_t len)
 {
     struct pan_udp_key key = {};
     u16 dport = 0;
@@ -408,6 +529,8 @@ static __always_inline int udp_flow(struct sock *sk, struct msghdr *msg)
     }
     if (!family || !dport)
         return 0;
+    if (dport == PAN_DNS_PORT)
+        dns_query(sk, msg, len, family, daddr, dport);
 
     key.tgid = bpf_get_current_pid_tgid() >> 32;
     key.dport = dport;
@@ -443,13 +566,13 @@ static __always_inline int udp_flow(struct sock *sk, struct msghdr *msg)
 SEC("fentry/udp_sendmsg")
 int BPF_PROG(on_udp_send, struct sock *sk, struct msghdr *msg, size_t len)
 {
-    return udp_flow(sk, msg);
+    return udp_flow(sk, msg, len);
 }
 
 SEC("fentry/udpv6_sendmsg")
 int BPF_PROG(on_udp6_send, struct sock *sk, struct msghdr *msg, size_t len)
 {
-    return udp_flow(sk, msg);
+    return udp_flow(sk, msg, len);
 }
 
 

@@ -130,6 +130,21 @@ struct raw_network_event {
     std::vector<unavailable_field> unavailable;
 };
 
+// A DNS query a process sent over UDP, read from the datagram as it left the process (ADR 022).
+struct raw_dns_query {
+    std::uint32_t pid{};
+    std::string family;  // inet, inet6
+    std::string local_address;
+    std::uint16_t local_port{};
+    std::string server_address;
+    std::uint16_t server_port{};
+    std::uint16_t transaction_id{};
+    bool recursion_desired{};
+    std::string name;   // presentation form, as sent
+    std::string type;   // A, AAAA, TXT, ... or TYPE<n>
+    std::string klass;  // IN, CH, ... or CLASS<n>
+};
+
 enum class auth_kind : std::uint8_t {
     login_success,
     login_failure,
@@ -225,7 +240,7 @@ struct raw_security_event {
 
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
                                  raw_session_change, raw_file_event, raw_network_event, raw_auth_event, raw_kernel_event,
-                                 raw_security_event, raw_namespace_change>;
+                                 raw_security_event, raw_namespace_change, raw_dns_query>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

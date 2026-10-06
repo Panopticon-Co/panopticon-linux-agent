@@ -3,6 +3,7 @@
 
 #include "panopticon/linux_agent/sensor/clock.hpp"
 #include "panopticon/linux_agent/sensor/container_identity.hpp"
+#include "panopticon/linux_agent/sensor/dns_message.hpp"
 #include "panopticon/linux_agent/sensor/entity_graph.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
 #include "panopticon/linux_agent/sensor/netlink_proc.hpp"
@@ -1308,6 +1309,127 @@ void run(const char* name, void (*test)()) {
 
 }  // namespace
 
+std::vector<std::uint8_t> dns_bytes(const std::vector<std::string>& labels, const std::uint16_t type = 1U, const std::uint16_t flags = 0x0100U,
+                                    const std::uint16_t questions = 1U) {
+    std::vector<std::uint8_t> out{0x12, 0x34, static_cast<std::uint8_t>(flags >> 8U), static_cast<std::uint8_t>(flags & 0xffU),
+                                  static_cast<std::uint8_t>(questions >> 8U), static_cast<std::uint8_t>(questions & 0xffU), 0, 0, 0, 0, 0, 0};
+    for (const auto& label : labels) {
+        out.push_back(static_cast<std::uint8_t>(label.size()));
+        out.insert(out.end(), label.begin(), label.end());
+    }
+    out.push_back(0);
+    out.push_back(static_cast<std::uint8_t>(type >> 8U));
+    out.push_back(static_cast<std::uint8_t>(type & 0xffU));
+    out.push_back(0);
+    out.push_back(1);
+    return out;
+}
+
+void test_parse_dns_query() {
+    auto found = parse_dns_query(dns_bytes({"www", "Example", "com"}, 28U));
+    require(found.has_value() && found->name == "www.Example.com" && found->type == 28U && found->klass == 1U && found->transaction_id == 0x1234U &&
+                found->recursion_desired && found->opcode == 0U,
+            "an ordinary query, case preserved");
+    require(dns_type_name(28U) == "AAAA" && dns_type_name(16U) == "TXT" && dns_type_name(65U) == "HTTPS" && dns_type_name(9999U) == "TYPE9999" &&
+                dns_class_name(1U) == "IN" && dns_class_name(3U) == "CH" && dns_class_name(77U) == "CLASS77",
+            "type and class names");
+    found = parse_dns_query(dns_bytes({}, 2U));
+    require(found.has_value() && found->name == ".", "the root name");
+    found = parse_dns_query(dns_bytes({std::string{"a.b"}, "c"}));
+    require(found.has_value() && found->name == "a\\.b.c", "a dot inside a label is escaped, so it cannot look like a separator");
+    found = parse_dns_query(dns_bytes({std::string{"x\0y", 3U}, "\x80z"}));
+    require(found.has_value() && found->name == "x\\000y.\\128z", "bytes outside printable ASCII are written as \\DDD");
+    found = parse_dns_query(dns_bytes({"a\\b"}));
+    require(found.has_value() && found->name == "a\\\\b", "a backslash is escaped");
+    found = parse_dns_query(dns_bytes({std::string(63U, 'a')}));
+    require(found.has_value() && found->name.size() == 63U, "a 63-byte label is the longest allowed");
+    found = parse_dns_query(dns_bytes({"example", "com"}, 1U, 0x2800U));
+    require(found.has_value() && found->opcode == 5U && !found->recursion_desired, "opcode and recursion-desired are read from the flags");
+
+    require(!parse_dns_query(dns_bytes({"example", "com"}, 1U, 0x8180U)), "a response is not a query");
+    require(!parse_dns_query(dns_bytes({"example", "com"}, 1U, 0x0100U, 2U)), "two questions are not accepted");
+    require(!parse_dns_query(dns_bytes({"example", "com"}, 1U, 0x0100U, 0U)), "no question is not accepted");
+    require(!parse_dns_query(dns_bytes({std::string(64U, 'a')})), "a label over 63 bytes");
+    auto long_name = std::vector<std::string>(5U, std::string(60U, 'b'));
+    require(!parse_dns_query(dns_bytes(long_name)), "a name over 255 bytes");
+    auto pointer = dns_bytes({"example", "com"});
+    pointer[12] = 0xc0U;
+    require(!parse_dns_query(pointer), "a compression pointer is not valid in a question");
+    auto extended = dns_bytes({"example", "com"});
+    extended[12] = 0x40U;
+    require(!parse_dns_query(extended), "an extended label type");
+    auto truncated = dns_bytes({"example", "com"});
+    truncated.resize(truncated.size() - 1U);
+    require(!parse_dns_query(truncated), "a message that ends inside the type and class");
+    truncated.resize(15U);
+    require(!parse_dns_query(truncated), "a message that ends inside a label");
+    require(!parse_dns_query({}), "an empty message");
+
+    std::uint32_t state = 0x9e3779b9U;
+    const auto next = [&state]() {
+        state = state * 1664525U + 1013904223U;
+        return state;
+    };
+    for (int round = 0; round < 20000; ++round) {
+        std::vector<std::uint8_t> noise(next() % 400U);
+        for (auto& byte : noise) byte = static_cast<std::uint8_t>(next() >> 24U);
+        if (noise.size() > 6U) {
+            noise[2] &= 0x7fU;
+            noise[4] = 0;
+            noise[5] = 1;
+        }
+        if (const auto parsed = parse_dns_query(noise); parsed.has_value()) require(parsed->name.size() <= 4U * 255U, "a parsed name stays bounded");
+    }
+}
+
+void test_pipeline_emits_dns_queries() {
+    const auto root = fresh_directory("dnsproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "curl", 500U, "/usr/bin/curl", {"curl", "https://example.com"}}.write(root);
+    const auto make = [](const std::uint32_t pid) {
+        raw_dns_query query;
+        query.pid = pid;
+        query.family = "inet";
+        query.local_address = "10.0.0.5";
+        query.local_port = 40000U;
+        query.server_address = "10.0.2.3";
+        query.server_port = 53U;
+        query.transaction_id = 4660U;
+        query.recursion_desired = true;
+        query.name = "evil.example";
+        query.type = "TXT";
+        query.klass = "IN";
+        return record_of(query);
+    };
+    std::vector<raw_record> script{make(100U), make(4242U)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script, 0U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::vector<std::string> queries;
+    for (const auto& line : lines) {
+        if (contains(line, "\"type\":\"dns.query\"")) queries.push_back(line);
+    }
+    require(queries.size() == 2U, "both queries were emitted");
+    require(contains(queries[0], "\"name\":\"curl\"") && contains(queries[0], "\"entity_id\":\""), "asker resolved from the entity graph");
+    require(contains(queries[0], "\"dns\":{\"name\":\"evil.example\",\"type\":\"TXT\",\"class\":\"IN\",\"transaction_id\":4660,\"recursion_desired\":true,"
+                                 "\"transport\":\"udp\",\"family\":\"ipv4\",\"server\":{\"ip\":\"10.0.2.3\",\"port\":53},\"local\":{\"ip\":\"10.0.0.5\",\"port\":40000}}"),
+            "the dns body");
+    require(contains(queries[1], "{\"field\":\"process\",\"reason\":\"process_exited\"}") && contains(queries[1], "\"pid\":4242"), "an unknown asker is reported, not invented");
+}
+
 void test_parse_container_cgroup() {
     const std::string id = "a350fac50ee37dc176158ed8c5be13204c6fb12b56a3cf6d20b9fcb51cce40e2";
     const std::string pod_dashes = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
@@ -1348,6 +1470,8 @@ void test_parse_container_cgroup() {
 int main() {
     std::cout << std::unitbuf;
     run("parse_container_cgroup", test_parse_container_cgroup);
+    run("parse_dns_query", test_parse_dns_query);
+    run("pipeline_emits_dns_queries", test_pipeline_emits_dns_queries);
     run("json_escapes_and_replaces_invalid_utf8", test_json_escapes_and_replaces_invalid_utf8);
     run("clock_formats_rfc3339_and_converts_ticks", test_clock_formats_rfc3339_and_converts_ticks);
     run("parse_stat_handles_hostile_comm", test_parse_stat_handles_hostile_comm);

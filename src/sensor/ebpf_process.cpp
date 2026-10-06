@@ -1,5 +1,6 @@
 #include "panopticon/linux_agent/sensor/ebpf_process.hpp"
 
+#include "panopticon/linux_agent/sensor/dns_message.hpp"
 #include "panopticon_events.h"
 
 #include <arpa/inet.h>
@@ -247,6 +248,31 @@ std::vector<raw_record> decode_ebpf_process_sample(const void* data, const std::
         records.push_back({time, observed("security_bpf"), std::move(load)});
         break;
     }
+    case wire::PAN_EVENT_DNS_QUERY: {
+        const bool known_family = event.net_family == 2U || event.net_family == 10U;
+        if (!known_family || event.net_proto != 17U || event.dns_len < 17U || event.dns_len > wire::PAN_DNS_CAPTURE ||
+            size < header_bytes + event.dns_len) {
+            if (malformed != nullptr) *malformed = true;
+            return {};
+        }
+        const auto question = parse_dns_query(std::span<const std::uint8_t>{reinterpret_cast<const std::uint8_t*>(event.filename), event.dns_len});
+        // Traffic to port 53 that is not a DNS question is not an error: the udp flow record still names it.
+        if (!question.has_value()) return {};
+        raw_dns_query dns;
+        dns.pid = event.pid;
+        dns.family = event.net_family == 2U ? "inet" : "inet6";
+        dns.local_address = address_text(event.net_family, event.net_saddr);
+        dns.local_port = static_cast<std::uint16_t>(event.net_sport);
+        dns.server_address = address_text(event.net_family, event.net_daddr);
+        dns.server_port = static_cast<std::uint16_t>(event.net_dport);
+        dns.transaction_id = question->transaction_id;
+        dns.recursion_desired = question->recursion_desired;
+        dns.name = question->name;
+        dns.type = dns_type_name(question->type);
+        dns.klass = dns_class_name(question->klass);
+        records.push_back({time, observed("udp_sendmsg"), std::move(dns)});
+        break;
+    }
     case wire::PAN_EVENT_NS_CHANGE: {
         raw_namespace_change change;
         change.tgid = event.pid;
@@ -458,6 +484,7 @@ int ebpf_process_provider::on_sample(const void* data, const std::size_t size) {
         if (const auto* net = std::get_if<raw_network_event>(&record.payload); net != nullptr && options_.skip_own_network_events && net->pid == own_pid_) continue;
         // The sensor loads its own BPF programs; reporting that would be noise about itself.
         if (const auto* load = std::get_if<raw_security_event>(&record.payload); load != nullptr && options_.skip_own_network_events && load->pid == own_pid_) continue;
+        if (const auto* query = std::get_if<raw_dns_query>(&record.payload); query != nullptr && options_.skip_own_network_events && query->pid == own_pid_) continue;
         (void)queue_->push(std::move(record));
         ++events_;
     }

@@ -322,6 +322,10 @@ void sensor_pipeline::process_record(const raw_record& record, const std::uint64
         (void)emit_security_event(record, *security, observed_ns);
         return;
     }
+    if (const auto* dns = std::get_if<raw_dns_query>(&record.payload)) {
+        (void)emit_dns_event(record, *dns, observed_ns);
+        return;
+    }
     (void)emit_events(graph_.apply(record), observed_ns);
 }
 
@@ -353,6 +357,17 @@ result<bool> sensor_pipeline::emit_security_event(const raw_record& record, cons
     out.actor = security.pid != 0U ? graph_.find(security.pid) : nullptr;
     out.security = security;
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.security_event(out, seq, observed_ns); });
+    if (succeeded(emitted)) ++metrics_.events;
+    return emitted;
+}
+
+result<bool> sensor_pipeline::emit_dns_event(const raw_record& record, const raw_dns_query& dns, const std::uint64_t observed_ns) {
+    dns_record out;
+    out.time_unix_ns = record.time_unix_ns;
+    out.source = record.source;
+    out.actor = dns.pid != 0U ? graph_.find(dns.pid) : nullptr;
+    out.dns = dns;
+    auto emitted = emit([&](const std::uint64_t seq) { return serializer_.dns_event(out, seq, observed_ns); });
     if (succeeded(emitted)) ++metrics_.events;
     return emitted;
 }

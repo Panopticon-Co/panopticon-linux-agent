@@ -222,6 +222,19 @@ A call that changes nothing is not reported. `nsenter` with several flags is one
 namespace type. Container runtimes and daemons that bind a thread to a container network namespace
 produce these records routinely; a rule needs the process identity, not the event alone.
 
+### 4.8 `dns.query` events as emitted today (ADR 022)
+
+Provenance `{ebpf, udp_sendmsg, observed}`. The asking `process` (full entity, or a `{pid}` stub with
+`process` unavailable when it had exited) and a `dns` body: `name` (as sent, case preserved, escaped),
+`type`, `class`, `transaction_id`, `recursion_desired`, `transport` (always `udp`), `family`, and the
+`server` and `local` endpoints.
+
+This is the question as it left the process: no answer, no response code. A stub resolver produces a
+record from the application to the stub and further records from the stub to its upstream, each
+attributed to its own process; a validating stub adds `DNSKEY` and `DS` lookups. One record per
+process and question per five seconds (the transaction id is ignored). Not reported: a question
+split across `sendmsg` buffers, DNS over TCP, DoH and DoT, mDNS, responses.
+
 ## 5. State records
 
 `state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,

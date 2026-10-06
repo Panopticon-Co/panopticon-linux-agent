@@ -158,6 +158,7 @@ private:
     result<bool> emit_auth_event(const raw_record& record, const raw_auth_event& auth, std::uint64_t observed_ns);
     result<bool> emit_kernel_event(const raw_record& record, const raw_kernel_event& kernel, std::uint64_t observed_ns);
     result<bool> emit_security_event(const raw_record& record, const raw_security_event& security, std::uint64_t observed_ns);
+    result<bool> emit_dns_event(const raw_record& record, const raw_dns_query& dns, std::uint64_t observed_ns);
     result<bool> emit_loss(loss_report report);
     result<bool> emit_health(std::uint64_t now_ns);
     result<bool> emit_process_state(std::uint64_t now_ns);
