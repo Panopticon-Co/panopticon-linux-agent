@@ -1,6 +1,7 @@
 #include "panopticon/linux_agent/command.hpp"
 #include "panopticon/linux_agent/audit.hpp"
 #include "panopticon/linux_agent/config.hpp"
+#include "panopticon/linux_agent/durable_file.hpp"
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/health.hpp"
@@ -14,6 +15,7 @@
 #include "panopticon/linux_agent/spool.hpp"
 #include "panopticon/linux_agent/transport.hpp"
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -71,6 +73,19 @@ void test_enrolled_identity_is_persisted_atomically() {
     const auto loaded = load_enrolled_identity(path);
     require(succeeded(loaded), "identity should reload");
     require(std::get<enrolled_identity>(loaded).bearer_token == expected.bearer_token, "identity token must round-trip");
+}
+
+void test_secret_files_are_written_durably_and_privately() {
+    const auto path = temporary_directory() / "secret" / "token";
+    std::filesystem::create_directories(path.parent_path());
+    require(succeeded(write_file_durably(path, "first", 0600U)), "first write succeeds");
+    require(succeeded(write_file_durably(path, "second value", 0600U)), "replacement succeeds");
+    std::ifstream input{path}; std::string text; std::getline(input, text);
+    require(text == "second value", "replacement is complete");
+    struct stat details {};
+    require(::stat(path.c_str(), &details) == 0 && (details.st_mode & 0777) == 0600, "the file is private from creation");
+    require(!std::filesystem::exists(path.string() + ".tmp"), "no temporary file is left behind");
+    require(!succeeded(write_file_durably(temporary_directory() / "missing-directory" / "token", "x", 0600U)), "a missing directory is an error");
 }
 
 void test_audit_and_health_are_bounded_and_secret_free() {
@@ -514,6 +529,7 @@ int main() {
     try {
         test_process_identity_accounts_for_pid_reuse();
         test_enrolled_identity_is_persisted_atomically();
+        test_secret_files_are_written_durably_and_privately();
         test_audit_and_health_are_bounded_and_secret_free();
         test_quarantine_moves_regular_file_and_rejects_symlink();
         test_collect_regular_file_enforces_bounds_and_root_jail();

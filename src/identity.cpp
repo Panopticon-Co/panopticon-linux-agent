@@ -1,5 +1,7 @@
 #include "panopticon/linux_agent/identity.hpp"
 
+#include "panopticon/linux_agent/durable_file.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -47,16 +49,8 @@ result<bool> store_enrolled_identity(const std::filesystem::path& path, const en
     std::error_code filesystem_error;
     std::filesystem::create_directories(path.parent_path(), filesystem_error);
     if (filesystem_error) return error{error_code::io_failure, "cannot create identity directory"};
-    const auto temporary = path.string() + ".tmp";
-    { std::ofstream output{temporary, std::ios::trunc};
-      if (!output) return error{error_code::io_failure, "cannot write enrolled identity"};
-      output << identity.agent_id << '\n' << identity.host_id << '\n' << identity.bearer_token << '\n';
-      output.flush(); if (!output) return error{error_code::io_failure, "cannot persist enrolled identity"}; }
-#ifdef __linux__
-    if (chmod(temporary.c_str(), S_IRUSR | S_IWUSR) != 0) return error{error_code::io_failure, "cannot protect enrolled identity"};
-#endif
-    std::filesystem::rename(temporary, path, filesystem_error);
-    if (filesystem_error) { std::filesystem::remove(temporary, filesystem_error); return error{error_code::io_failure, "cannot publish enrolled identity"}; }
+    const auto written = write_file_durably(path, identity.agent_id + '\n' + identity.host_id + '\n' + identity.bearer_token + '\n', 0600U);
+    if (!succeeded(written)) return std::get<error>(written);
     return true;
 }
 

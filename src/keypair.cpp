@@ -1,5 +1,7 @@
 #include "panopticon/linux_agent/keypair.hpp"
 
+#include "panopticon/linux_agent/durable_file.hpp"
+
 #include <openssl/bn.h>
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
@@ -118,27 +120,11 @@ result<ec_raw_signature> sign_raw(const ec_keypair& keypair, const std::vector<s
 result<bool> store_ec_keypair(const std::filesystem::path& path, const ec_keypair& keypair) {
     std::error_code filesystem_error;
     std::filesystem::create_directories(path.parent_path(), filesystem_error);
-    const auto temporary = path.string() + ".tmp";
-    {
-        std::ofstream output{temporary, std::ios::trunc | std::ios::binary};
-        if (!output) return error{error_code::io_failure, "cannot write key file"};
-        const auto size = static_cast<std::uint32_t>(keypair.private_der.size());
-        output.write(reinterpret_cast<const char*>(&size), sizeof(size));
-        output.write(reinterpret_cast<const char*>(keypair.private_der.data()), keypair.private_der.size());
-        output.flush();
-        if (!output) return error{error_code::io_failure, "cannot persist key file"};
-    }
-#ifdef __linux__
-    if (chmod(temporary.c_str(), S_IRUSR | S_IWUSR) != 0) {
-        std::filesystem::remove(temporary, filesystem_error);
-        return error{error_code::io_failure, "cannot protect key file"};
-    }
-#endif
-    std::filesystem::rename(temporary, path, filesystem_error);
-    if (filesystem_error) {
-        std::filesystem::remove(temporary, filesystem_error);
-        return error{error_code::io_failure, "cannot publish key file"};
-    }
+    const auto size = static_cast<std::uint32_t>(keypair.private_der.size());
+    std::string content(reinterpret_cast<const char*>(&size), sizeof(size));
+    content.append(reinterpret_cast<const char*>(keypair.private_der.data()), keypair.private_der.size());
+    const auto written = write_file_durably(path, content, 0600U);
+    if (!succeeded(written)) return std::get<error>(written);
     return true;
 }
 

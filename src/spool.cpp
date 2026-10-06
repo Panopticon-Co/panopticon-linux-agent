@@ -1,5 +1,7 @@
 #include "panopticon/linux_agent/spool.hpp"
 
+#include "panopticon/linux_agent/durable_file.hpp"
+
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
@@ -49,23 +51,10 @@ result<std::filesystem::path> durable_spool::append(std::string payload) {
 
     const auto sequence = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto final_path = directory_ / ("segment-" + std::to_string(sequence) + ".record");
-    const auto temporary_path = final_path.string() + ".tmp";
-    std::ofstream output{temporary_path, std::ios::binary | std::ios::trunc};
-    if (!output) {
-        return io_error("cannot create spool segment");
-    }
-    output << format_marker << '\n' << payload.size() << '\n' << std::hex << checksum(payload) << '\n' << payload;
-    output.flush();
-    if (!output) {
-        return io_error("cannot write spool segment");
-    }
-    output.close();
-    std::error_code error;
-    std::filesystem::rename(temporary_path, final_path, error);
-    if (error) {
-        std::filesystem::remove(temporary_path, error);
-        return io_error("cannot atomically publish spool segment");
-    }
+    std::ostringstream content;
+    content << format_marker << '\n' << payload.size() << '\n' << std::hex << checksum(payload) << '\n' << payload;
+    const auto written = write_file_durably(final_path, content.str(), 0600U);
+    if (!succeeded(written)) return io_error("cannot durably publish spool segment");
     return final_path;
 }
 
