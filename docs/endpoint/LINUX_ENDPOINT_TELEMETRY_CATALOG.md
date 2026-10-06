@@ -184,6 +184,16 @@ Provenance `{sockdiag_network, SOCKDIAG, reconstructed}`: sockets are found by p
 
 SSH has no separate type: it is `auth.login` or `auth.failure` with `service` `sshd`. Fields that were made printable or cut carry `sanitized` and `truncated`. Two mechanisms serve the family, in preference order (ADR 013, ADR 012). Primary `{audit_netlink, AUDIT, observed}`: kernel audit records (`USER_LOGIN`, `USER_AUTH` failure, `USER_CMD`, `su` `USER_START`); `process` is the live sender with its ancestry, the actor is the audit uid, and `method` is the program for sudo and su. Fallback `{auth_log, AUTHLOG, user_space_reported}`: what a program chose to log, read from `/var/log/auth.log` or `/var/log/secure` with syslog delay; it is on standby while the audit provider runs. sudo logs no pid, so its `process` is empty with `unavailable: not_supported_by_provider`. `auth.logout`, session ids and audit-sourced events are not provided.
 
+### 4.5 `kernel.*` and `mount.*` events as emitted today (S7.3, ADR 014)
+
+| Type | Meaning | Body |
+| --- | --- | --- |
+| `kernel.module_load` | a module appeared in `/proc/modules` (or was replaced under the same name) | `module {name, size, state}` |
+| `kernel.module_unload` | a module left `/proc/modules` | as above |
+| `mount.changed` | a mount appeared, disappeared or changed options | `mount {operation mounted/unmounted/remounted, source, target, fstype, mount_id, device, options[], super_options[]}` |
+
+There is no acting process: `process` is omitted and `unavailable` carries `{process, not_supported_by_provider}`. Provenance `{kernel_change, PROCFS, reconstructed}`: found by comparing snapshots taken every second, so a change that came and went between two polls is not seen, and the event time is the observation time. The first snapshot is the starting state. `kernel.bpf_load`, `device.*` and hidden-module cross-view are not provided.
+
 ## 5. State records
 
 `state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,
