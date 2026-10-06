@@ -85,6 +85,19 @@ struct module_entry {
 };
 [[nodiscard]] std::vector<module_entry> parse_proc_modules(std::string_view contents, std::size_t maximum_entries);
 
+struct package_entry {
+    std::string name;
+    std::string version;
+    std::string architecture;
+    std::string source;  // source package when it differs from the binary name
+};
+// Installed packages from a dpkg `status` file (stanzas of `Field: value` separated by blank lines).
+[[nodiscard]] std::vector<package_entry> parse_dpkg_status(std::string_view contents, std::size_t maximum_entries);
+
+// Changes whenever the package database is modified; empty when there is no readable database.
+// Cheap (one stat), so the pipeline can skip the full parse while nothing was installed or removed.
+[[nodiscard]] std::string package_database_signature(const host_state_options& options);
+
 // Names of the set bits of /proc/sys/kernel/tainted (kernel's TAINT_* flags).
 [[nodiscard]] std::vector<std::string> decode_taint(std::uint64_t value);
 

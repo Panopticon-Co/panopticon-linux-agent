@@ -1,4 +1,5 @@
 #include "panopticon/linux_agent/sensor/host_state.hpp"
+#include "panopticon/linux_agent/sensor/state_diff.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -275,6 +276,66 @@ void run(const char* name, void (*test)()) {
 
 }  // namespace
 
+state_snapshot snapshot_of(const std::string& object, std::vector<std::string> items, const bool truncated = false) {
+    state_snapshot snapshot;
+    snapshot.object = object;
+    snapshot.items = std::move(items);
+    snapshot.truncated = truncated;
+    return snapshot;
+}
+
+void test_dpkg_status_parsing() {
+    const std::string status =
+        "Package: bash\nStatus: install ok installed\nArchitecture: amd64\nVersion: 5.1-6ubuntu1\nDescription: GNU shell\n continued line\n\n"
+        "Package: gone\nStatus: deinstall ok config-files\nArchitecture: all\nVersion: 1\n\n"
+        "Package: never\nStatus: install ok not-installed\nVersion: 2\n\n"
+        "Package: libssl3\nSource: openssl (3.0.2-0ubuntu1)\nStatus: install ok installed\nArchitecture: amd64\nVersion: 3.0.2\n";
+    const auto packages = parse_dpkg_status(status, 100U);
+    require(packages.size() == 2U, "only installed packages are listed, including a final stanza without a blank line");
+    require(packages[0].name == "bash" && packages[0].version == "5.1-6ubuntu1" && packages[0].architecture == "amd64", "fields");
+    require(packages[1].name == "libssl3" && packages[1].source.find("openssl") == 0U, "source package kept");
+    require(parse_dpkg_status(status, 1U).size() == 1U, "bounded");
+    require(parse_dpkg_status("garbage without colon\n\n\x01\x02", 10U).empty(), "garbage yields nothing");
+}
+
+void test_state_diff_reports_only_real_changes() {
+    state_differ differ;
+    auto item = [](const std::string& name, const std::string& version) { return "{\"name\":\"" + name + "\",\"version\":\"" + version + "\",\"architecture\":\"amd64\"}"; };
+    require(!differ.observe(snapshot_of("packages", {item("a", "1"), item("b", "1")})), "the first snapshot is a baseline, not a change");
+    require(!differ.observe(snapshot_of("packages", {item("a", "1"), item("b", "1")})), "an identical snapshot is not a change");
+    const auto change = differ.observe(snapshot_of("packages", {item("a", "2"), item("c", "1")}));
+    require(change && change->type == "package.changed" && change->total == 3U, "one modified, one added, one removed");
+    std::string kinds;
+    for (const auto& entry : change->entries) kinds += entry.key + ":" + entry.kind + " ";
+    require(kinds == "a|amd64:modified c|amd64:added b|amd64:removed ", kinds);
+    require(change->entries[0].before && change->entries[0].after && !change->entries[1].before && !change->entries[2].after, "before and after");
+    // A snapshot cut short must not turn missing items into removals.
+    const auto cut = differ.observe(snapshot_of("packages", {item("a", "2")}, true));
+    require(!cut, "a truncated snapshot reports no removals");
+    require(!differ.observe(snapshot_of("firewall", {"{}"})) && change_type_for("firewall").empty(), "unknown objects are not diffed");
+    state_differ small{2U};
+    (void)small.observe(snapshot_of("users", {}));
+    const auto many = small.observe(snapshot_of("users", {"{\"name\":\"a\"}", "{\"name\":\"b\"}", "{\"name\":\"c\"}"}));
+    require(many && many->total == 3U && many->entries.size() == 2U && many->truncated, "entries are bounded and the total is kept");
+}
+
+void test_posture_diff_is_per_setting() {
+    state_differ differ;
+    const auto posture = [](const int ptrace, const std::string& core) {
+        return "{\"lockdown\":\"none\",\"lsm\":[\"yama\",\"apparmor\"],\"sysctl\":{\"kernel/yama/ptrace_scope\":" + std::to_string(ptrace) +
+               ",\"kernel/core_pattern\":\"" + core + "\"}}";
+    };
+    require(!differ.observe(snapshot_of("posture", {posture(1, "core")})), "baseline");
+    const auto change = differ.observe(snapshot_of("posture", {posture(0, "|/tmp/x")}));
+    require(change && change->type == "posture.changed" && change->total == 2U, "two settings changed");
+    require(change->entries[0].key == "sysctl.kernel/core_pattern" && change->entries[0].after == std::string{"\"|/tmp/x\""}, "core_pattern, with the new value");
+    require(change->entries[1].key == "sysctl.kernel/yama/ptrace_scope" && change->entries[1].before == std::string{"1"} &&
+                change->entries[1].after == std::string{"0"},
+            "ptrace_scope 1 -> 0");
+    const auto gone = differ.observe(snapshot_of("posture", {"{\"lockdown\":\"none\"}"}));
+    require(!gone, "a setting that could not be read is not reported as removed");
+}
+
 int main() {
     std::cout << std::unitbuf;
     run("os_release_quoting", test_os_release_quoting);
@@ -284,6 +345,9 @@ int main() {
     run("fake_root_collection", test_fake_root_collection);
     run("missing_files_are_reported_not_guessed", test_missing_files_are_reported_not_guessed);
     run("limits_and_hostile_files", test_limits_and_hostile_files);
+    run("dpkg_status_parsing", test_dpkg_status_parsing);
+    run("state_diff_reports_only_real_changes", test_state_diff_reports_only_real_changes);
+    run("posture_diff_is_per_setting", test_posture_diff_is_per_setting);
     run("real_kernel_smoke", test_real_kernel_smoke);
     std::error_code ignored;
     fs::remove_all(fs::temp_directory_path() / ("panopticon-state-tests-" + std::to_string(::getpid())), ignored);

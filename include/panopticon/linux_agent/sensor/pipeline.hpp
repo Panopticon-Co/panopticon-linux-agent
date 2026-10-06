@@ -4,6 +4,7 @@
 #include "panopticon/linux_agent/sensor/entity_graph.hpp"
 #include "panopticon/linux_agent/sensor/provider.hpp"
 #include "panopticon/linux_agent/sensor/serializer.hpp"
+#include "panopticon/linux_agent/sensor/state_diff.hpp"
 #include "panopticon/linux_agent/sensor/wal.hpp"
 
 #include <atomic>
@@ -158,6 +159,7 @@ private:
     result<bool> emit_health(std::uint64_t now_ns);
     result<bool> emit_process_state(std::uint64_t now_ns);
     result<bool> emit_host_state(std::uint64_t now_ns);
+    result<bool> emit_state_changes(const state_snapshot& snapshot, std::uint64_t now_ns);
     // Adds the executable hash (cached, pending or refused) to exec and discovery events.
     [[nodiscard]] process_event with_executable_hash(const process_event& event);
     result<bool> emit_hash_results(std::uint64_t observed_ns);
@@ -182,6 +184,9 @@ private:
     std::unique_ptr<fim_monitor> fim_;
     std::unique_ptr<hash_service> hashes_;
     std::uint64_t snapshots_{};
+    state_differ differ_;
+    std::string package_signature_;
+    std::uint64_t last_package_inventory_ns_{};
     mutable std::mutex status_mutex_;
     std::string status_cache_{"{}"};
     std::string coverage_cache_{"{}"};

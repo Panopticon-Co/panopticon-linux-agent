@@ -662,6 +662,39 @@ std::string record_serializer::process_state(const std::vector<entity_ptr>& item
     return out.take();
 }
 
+std::string record_serializer::state_changed(const state_change& change, const std::span<const state_change_entry> entries,
+                                             const std::uint32_t part, const std::uint32_t parts, const std::uint64_t seq,
+                                             const std::uint64_t now_unix_ns) const {
+    json_writer out;
+    // Found by comparing two inventories, so nobody is attributed and the process is not known.
+    begin(out, "event", change.type, seq, now_unix_ns, now_unix_ns, {"inventory", "SNAPSHOT_DIFF", confidence::observed});
+    out.key("change").begin_object();
+    out.field("object", change.object);
+    out.field("total", static_cast<std::uint64_t>(change.total));
+    out.field("part", part);
+    out.field("parts", parts);
+    out.field("truncated", change.truncated);
+    out.key("entries").begin_array();
+    for (const auto& entry : entries) {
+        out.begin_object();
+        out.field("key", entry.key);
+        out.field("kind", entry.kind);
+        if (entry.before) out.key("before").raw(*entry.before);
+        if (entry.after) out.key("after").raw(*entry.after);
+        out.end_object();
+    }
+    out.end_array();
+    out.end_object();
+    out.key("unavailable").begin_array();
+    out.begin_object();
+    out.field("field", "process");
+    out.field("reason", "not_supported_by_provider");
+    out.end_object();
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::host_state(const state_snapshot& snapshot, const std::span<const std::string> items,
                                           const std::string_view snapshot_id, const std::uint32_t part,
                                           const std::uint32_t parts, const std::uint64_t seq,

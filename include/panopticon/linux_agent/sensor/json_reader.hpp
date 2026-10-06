@@ -29,6 +29,9 @@ public:
     [[nodiscard]] const std::vector<json_value>& items() const noexcept { return items_; }
     // Object member lookup; nullptr when absent or when this is not an object.
     [[nodiscard]] const json_value* find(std::string_view key) const noexcept;
+    // Object member names, parallel to items(); empty for anything but an object.
+    [[nodiscard]] const std::vector<std::string>& keys() const noexcept { return keys_; }
+    [[nodiscard]] double as_double_or(double fallback) const noexcept { return kind_ == kind::real ? real_ : fallback; }
 
 private:
     friend class json_parser;

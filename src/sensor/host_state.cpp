@@ -536,6 +536,60 @@ state_snapshot collect_modules(const host_state_options& options) {
     return std::move(c.snapshot());
 }
 
+// ---- packages and devices ---------------------------------------------------------------------
+
+constexpr std::size_t maximum_package_database_bytes = 48U * 1024U * 1024U;
+
+state_snapshot collect_packages(const host_state_options& options) {
+    collector c{"packages", "PKGDB", options};
+    unavailable_reason reason{};
+    const auto contents = read_bounded(options.root / "var/lib/dpkg/status", maximum_package_database_bytes, reason);
+    if (!contents.has_value()) {
+        std::error_code ignored;
+        const bool rpm = fs::exists(options.root / "var/lib/rpm", ignored) || fs::exists(options.root / "usr/lib/sysimage/rpm", ignored);
+        // rpm needs librpm or a child process; that is not implemented, and saying so beats an empty list.
+        c.snapshot().unavailable.push_back({rpm ? "packages.rpm" : "packages.dpkg", rpm ? unavailable_reason::not_supported_by_provider : reason});
+        return std::move(c.snapshot());
+    }
+    for (const auto& entry : parse_dpkg_status(*contents, options.maximum_items + 1U)) {
+        json_writer out;
+        out.begin_object();
+        out.field("name", entry.name).field("version", entry.version).field("architecture", entry.architecture);
+        if (!entry.source.empty()) out.field("source", entry.source);
+        out.field("manager", "dpkg");
+        out.end_object();
+        c.add(std::move(out));
+    }
+    return std::move(c.snapshot());
+}
+
+state_snapshot collect_devices(const host_state_options& options) {
+    collector c{"devices", "SYSFS", options};
+    std::error_code ec;
+    std::vector<std::string> names;
+    for (fs::directory_iterator it{options.root / "sys/bus/usb/devices", ec}, end; !ec && it != end; it.increment(ec)) {
+        const auto name = it->path().filename().string();
+        if (name.find(':') == std::string::npos) names.push_back(name);  // interfaces are "1-1:1.0"
+    }
+    if (ec && ec != std::errc::no_such_file_or_directory) c.snapshot().unavailable.push_back({"devices.usb", reason_for_errno(ec.value())});
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) {
+        const auto base = "sys/bus/usb/devices/" + name + "/";
+        json_writer out;
+        out.begin_object();
+        out.field("bus", "usb").field("path", name);
+        out.field("vendor_id", first_line(c.read_optional(base + "idVendor", "devices.vendor_id")));
+        out.field("product_id", first_line(c.read_optional(base + "idProduct", "devices.product_id")));
+        out.field("class", first_line(c.read_optional(base + "bDeviceClass", "devices.class")));
+        out.field("manufacturer", first_line(c.read_optional(base + "manufacturer", "devices.manufacturer")));
+        out.field("product", first_line(c.read_optional(base + "product", "devices.product")));
+        out.field("serial", first_line(c.read_optional(base + "serial", "devices.serial")));
+        out.end_object();
+        c.add(std::move(out));
+    }
+    return std::move(c.snapshot());
+}
+
 }  // namespace
 
 // ---- public parsers -------------------------------------------------------------------------
@@ -660,6 +714,43 @@ std::vector<module_entry> parse_proc_modules(const std::string_view contents, co
     return entries;
 }
 
+std::vector<package_entry> parse_dpkg_status(const std::string_view contents, const std::size_t maximum_entries) {
+    std::vector<package_entry> entries;
+    package_entry current;
+    bool installed = false;
+    const auto finish = [&] {
+        if (installed && !current.name.empty() && entries.size() < maximum_entries) entries.push_back(std::move(current));
+        current = {};
+        installed = false;
+    };
+    for (const auto line : lines_of(contents)) {
+        if (line.empty()) {
+            finish();
+            continue;
+        }
+        if (line.front() == ' ' || line.front() == '\t') continue;  // continuation of a long field
+        const auto colon = line.find(':');
+        if (colon == std::string_view::npos) continue;
+        const auto field = line.substr(0U, colon);
+        const auto value = trim(line.substr(colon + 1U));
+        if (field == "Package") current.name = value.substr(0U, 256U);
+        else if (field == "Version") current.version = value.substr(0U, 128U);
+        else if (field == "Architecture") current.architecture = value.substr(0U, 32U);
+        else if (field == "Source") current.source = value.substr(0U, 256U);
+        else if (field == "Status") installed = value.size() >= 9U && value.substr(value.size() - 9U) == "installed" && value.find("not-installed") == std::string::npos;
+    }
+    finish();
+    return entries;
+}
+
+std::string package_database_signature(const host_state_options& options) {
+    struct stat info {};
+    const auto path = (options.root / "var/lib/dpkg/status").string();
+    if (::stat(path.c_str(), &info) != 0) return {};
+    return std::to_string(static_cast<long long>(info.st_mtim.tv_sec)) + "." + std::to_string(static_cast<long long>(info.st_mtim.tv_nsec)) + ":" +
+           std::to_string(static_cast<long long>(info.st_size));
+}
+
 std::vector<std::string> decode_taint(const std::uint64_t value) {
     static const char* const names[] = {
         "proprietary_module", "forced_module", "smp_unsafe", "forced_rmmod", "machine_check", "bad_page", "user_request",
@@ -694,7 +785,7 @@ std::string redact_kernel_cmdline(const std::string_view cmdline) {
 }
 
 const std::vector<std::string_view>& state_objects() {
-    static const std::vector<std::string_view> objects{"host", "posture", "users", "groups", "interfaces", "mounts", "modules", "persistence"};
+    static const std::vector<std::string_view> objects{"host", "posture", "users", "groups", "interfaces", "mounts", "modules", "persistence", "packages", "devices"};
     return objects;
 }
 
@@ -727,6 +818,8 @@ std::optional<state_snapshot> collect_state(const std::string_view object, const
     if (object == "mounts") return collect_mounts(options);
     if (object == "modules") return collect_modules(options);
     if (object == "persistence") return collect_persistence(options);
+    if (object == "packages") return collect_packages(options);
+    if (object == "devices") return collect_devices(options);
     return std::nullopt;
 }
 

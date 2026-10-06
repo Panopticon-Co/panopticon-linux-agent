@@ -95,6 +95,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/policy.cpp
         src/sensor/ebpf_process.cpp
         src/sensor/host_state.cpp
+        src/sensor/state_diff.cpp
         src/sensor/persistence.cpp
         src/sensor/fim.cpp
         src/sensor/hash_service.cpp

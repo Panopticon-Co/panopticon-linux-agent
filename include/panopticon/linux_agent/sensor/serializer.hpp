@@ -6,6 +6,7 @@
 #include "panopticon/linux_agent/sensor/host_state.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
 #include "panopticon/linux_agent/sensor/provider.hpp"
+#include "panopticon/linux_agent/sensor/state_diff.hpp"
 
 #include <cstdint>
 #include <map>
@@ -164,6 +165,9 @@ public:
 
     // state.<object> snapshot part for host-state inventory objects (catalog §5). `items` are
     // already-serialised JSON objects; `unavailable` is carried on part 1 only.
+    // One record for a slice of the differences between two snapshots of a host-state object.
+    [[nodiscard]] std::string state_changed(const state_change& change, std::span<const state_change_entry> entries, std::uint32_t part,
+                                            std::uint32_t parts, std::uint64_t seq, std::uint64_t now_unix_ns) const;
     [[nodiscard]] std::string host_state(const state_snapshot& snapshot, std::span<const std::string> items,
                                          std::string_view snapshot_id, std::uint32_t part, std::uint32_t parts,
                                          std::uint64_t seq, std::uint64_t now_unix_ns) const;

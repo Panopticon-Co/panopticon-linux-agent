@@ -506,9 +506,23 @@ result<bool> sensor_pipeline::emit_host_state(const std::uint64_t now_ns) {
     host_state_options options;
     options.root = config_.host_root;
     result<bool> outcome = true;
+    constexpr std::uint64_t package_inventory_interval_ns = 24ULL * 3600ULL * 1'000'000'000ULL;
     for (const auto object : state_objects()) {
+        bool inventory = true;
+        if (object == "packages") {
+            // The package list is large. Re-read it only when the database changed, and send the whole
+            // inventory once a day; changes are reported as they happen either way.
+            const auto signature = package_database_signature(options);
+            const bool due = last_package_inventory_ns_ == 0U || now_ns - last_package_inventory_ns_ >= package_inventory_interval_ns;
+            if (!due && signature == package_signature_) continue;
+            package_signature_ = signature;
+            inventory = due;
+            if (due) last_package_inventory_ns_ = now_ns;
+        }
         const auto collected = collect_state(object, options);
         if (!collected.has_value()) continue;
+        if (auto emitted = emit_state_changes(*collected, now_ns); !succeeded(emitted)) outcome = emitted;
+        if (!inventory) continue;
         const auto& items = collected->items;
         const auto parts = static_cast<std::uint32_t>(std::max<std::size_t>(1U, (items.size() + state_items_per_part - 1U) / state_items_per_part));
         const auto snapshot_id = serializer_.identity().sensor_id + "-" + std::string{object} + "-" + std::to_string(++snapshots_);
@@ -521,6 +535,23 @@ result<bool> sensor_pipeline::emit_host_state(const std::uint64_t now_ns) {
             });
             if (!succeeded(emitted)) outcome = emitted;
         }
+    }
+    return outcome;
+}
+
+result<bool> sensor_pipeline::emit_state_changes(const state_snapshot& snapshot, const std::uint64_t now_ns) {
+    constexpr std::size_t entries_per_record = 32U;
+    const auto change = differ_.observe(snapshot);
+    if (!change.has_value()) return true;
+    result<bool> outcome = true;
+    const auto parts = static_cast<std::uint32_t>((change->entries.size() + entries_per_record - 1U) / entries_per_record);
+    for (std::uint32_t part = 0U; part < parts; ++part) {
+        const auto first = part * entries_per_record;
+        const auto count = std::min(entries_per_record, change->entries.size() - first);
+        const std::span<const state_change_entry> slice{change->entries.data() + first, count};
+        auto emitted = emit([&](const std::uint64_t seq) { return serializer_.state_changed(*change, slice, part + 1U, parts, seq, now_ns); });
+        if (succeeded(emitted)) ++metrics_.events;
+        else outcome = emitted;
     }
     return outcome;
 }
