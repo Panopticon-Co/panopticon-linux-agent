@@ -13,11 +13,13 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -180,7 +182,10 @@ void test_parse_poll() {
     std::string many = "{\"commands\":[";
     for (int index = 0; index < 40; ++index) many += std::string{index == 0 ? "" : ","} + envelope("c" + std::to_string(index), "KILL_PROCESS", kill_target, "2027-01-15T08:05:00Z");
     many += "]}";
-    require(parse_command_poll(many, 32U).malformed, "more commands than the bound");
+    {
+        const auto capped = parse_command_poll(many, 32U);
+        require(!capped.malformed && capped.commands.size() == 32U && capped.omitted == 8U, "a backlog is cut at the bound, not refused");
+    }
 }
 
 void test_parse_survives_garbage() {
@@ -326,6 +331,82 @@ void test_ledger_corruption_and_tail() {
     fs::remove_all(dir);
 }
 
+void test_ledger_epoch_and_recovery() {
+    const auto dir = scratch("epoch");
+    const auto path = dir / "commands";
+    {
+        auto ledger = open_ledger(path, 64U, now_fixed);
+        require(ledger->epoch() == now_fixed && !ledger->recovered(), "a new ledger begins now");
+        require(std::get<bool>(ledger->mark_received("c1", "corr-1", now_fixed + 300)), "and records commands");
+    }
+    {
+        auto again = open_ledger(path, 64U, now_fixed + 5000);
+        require(again->epoch() == now_fixed && again->find("c1").has_value(), "a restart keeps the epoch and the entries");
+    }
+    {
+        std::ofstream out{path, std::ios::trunc};
+        out << "R\tc1\tcorr-1\t1800000300\nD\tc1\tsucceeded\tok\n";
+    }
+    require(open_ledger(path, 64U, now_fixed)->epoch() == 0, "a ledger written before epochs has none, and is not refused for it");
+
+    const auto bad_epoch = [&](const std::string& contents, const char* what) {
+        {
+            std::ofstream out{path, std::ios::trunc};
+            out << contents;
+        }
+        require(!succeeded(command_ledger::open(path, 64U, now_fixed)), what);
+    };
+    bad_epoch("E\t0\n", "an epoch of zero");
+    bad_epoch("E\tabc\n", "a non-numeric epoch");
+    bad_epoch("E\t1800000000\textra\n", "an epoch with extra fields");
+    bad_epoch("R\tc1\tcorr-1\t1800000300\nE\t1800000000\n", "an epoch that is not the first line");
+
+    {
+        std::ofstream out{path, std::ios::trunc};
+        out << "E\t1700000000\nR\tc1\tcorr-1\t1800000300\nthis is not a record\n";
+    }
+    auto recovered = command_ledger::open_or_recover(path, 64U, now_fixed + 77);
+    require(succeeded(recovered), "a corrupt ledger is set aside, not fatal");
+    const auto& fresh = std::get<std::unique_ptr<command_ledger>>(recovered);
+    require(fresh->recovered() && fresh->epoch() == now_fixed + 77 && fresh->size() == 0U, "the new ledger is empty and begins at the recovery");
+    require(fs::exists(path.string() + ".corrupt"), "the evidence is kept");
+    std::ifstream kept{path.string() + ".corrupt"};
+    std::string first;
+    std::getline(kept, first);
+    require(first == "E\t1700000000", "and is the old file");
+
+    // Not corruption, not recovered: a ledger the endpoint cannot even open must not be guessed around.
+    const auto unreadable = dir / "as-directory";
+    fs::create_directories(unreadable);
+    require(!succeeded(command_ledger::open_or_recover(unreadable, 64U, now_fixed)), "an unusable path is an error");
+    fs::remove_all(dir);
+}
+
+void test_ledger_append_failure_leaves_no_partial_record() {
+    const auto dir = scratch("partial");
+    const auto path = dir / "commands";
+    auto ledger = open_ledger(path);
+    require(std::get<bool>(ledger->mark_received("c1", "corr-1", now_fixed + 300)), "first record");
+    const auto before = fs::file_size(path);
+    // Only a few more bytes may be written: the next record goes in part, then the write fails.
+    rlimit saved{};
+    require(getrlimit(RLIMIT_FSIZE, &saved) == 0, "the file size limit is readable");
+    signal(SIGXFSZ, SIG_IGN);
+    rlimit tight = saved;
+    tight.rlim_cur = before + 7U;
+    require(setrlimit(RLIMIT_FSIZE, &tight) == 0, "the file size limit can be lowered");
+    const auto failed = ledger->mark_received("c2", "corr-2", now_fixed + 300);
+    require(setrlimit(RLIMIT_FSIZE, &saved) == 0, "and restored");
+    require(!succeeded(failed), "a record that cannot be written is refused");
+    require(fs::file_size(path) == before, "and no half a record stays behind");
+    require(!ledger->find("c2").has_value(), "nor in memory");
+    require(std::get<bool>(ledger->mark_received("c3", "corr-3", now_fixed + 300)), "later records still work");
+    ledger.reset();
+    const auto reloaded = open_ledger(path);
+    require(reloaded->size() == 2U && reloaded->find("c1") && reloaded->find("c3") && !reloaded->find("c2"), "the file loads afterwards");
+    fs::remove_all(dir);
+}
+
 void test_ledger_bounds_and_compaction() {
     const auto dir = scratch("bounds");
     const auto path = dir / "commands";
@@ -412,6 +493,19 @@ void test_processor_executes_once() {
     require(again.outcome == "rejected" && again.reason == "replay" && !again.executed, "the same id is a replay");
     require(w.executor.calls.size() == 1U, "a replay never reaches the executor");
     require(w.ledger->find("c1")->state == command_ledger::phase::done, "the outcome is durable");
+}
+
+void test_processor_refuses_commands_older_than_the_ledger() {
+    world w{"older"};  // its ledger begins at now_fixed
+    auto stale = w.make("stale");
+    stale.created_unix = w.clock - 10;
+    const auto refused = w.processor->handle(stale);
+    require(refused.outcome == "rejected" && refused.reason == "ledger_reset" && !refused.executed, "issued before the ledger began");
+    require(w.executor.calls.empty(), "so it does not run");
+    require(w.ledger->find("stale")->state == command_ledger::phase::done, "and the refusal is remembered");
+    require(w.processor->handle(w.make("edge")).executed, "a command issued at the moment the ledger began runs");
+    w.clock += 600;
+    require(w.processor->handle(w.make("later")).executed, "and so does a later one");
 }
 
 void test_processor_checks() {
@@ -914,6 +1008,41 @@ void test_channel_restart_does_not_rerun() {
     (void)restarted.step(queue);
     require(executor->calls.empty(), "a restart does not run a command that already ran");
     require(manager->results.size() == 1U, "the stored result is sent (it was never acknowledged)");
+    fs::remove_all(dir);
+}
+
+void test_channel_answers_interrupted_commands() {
+    // The previous process recorded the intent, told the Manager it accepted the command, and died mid-action.
+    // The Manager will not send it again, so the restarted channel itself must answer it, once.
+    const auto dir = scratch("interrupted");
+    {
+        auto ledger = open_ledger(dir / "commands");
+        require(std::get<bool>(ledger->mark_received("c9", "corr-c9", now_fixed + 300)), "the intent is recorded");
+        require(ledger->interrupted().size() == 1U, "and is visible as interrupted");
+    }
+    command_channel_options options;
+    options.processor.agent_id = "agent-1";
+    options.processor.host_id = "host-1";
+    options.processor.policy.mode = response_mode::enforce;
+    options.processor.now_unix = [] { return now_fixed; };
+    options.ledger_path = dir / "commands";
+    auto transport = std::make_unique<fake_manager>();
+    auto execute = std::make_unique<fake_executor>();
+    auto* manager = transport.get();
+    auto* executor = execute.get();
+    command_channel_provider restarted{std::move(options), std::move(transport), std::move(execute)};
+    record_queue queue{16U};
+    require(succeeded(restarted.prepare(queue)), "prepares");
+    manager->poll_replies.push_back(answered(listing({})));
+    (void)restarted.step(queue);
+    require(executor->calls.empty(), "the interrupted command is not run again");
+    require(manager->results.size() == 1U, "it is answered");
+    const auto document = parse_json(manager->results.at(0), json_limits{}, nullptr);
+    require(*document->find("command_id")->as_string() == "c9" && *document->find("outcome")->as_string() == "indeterminate",
+            "as indeterminate");
+    require(manager->results[0].find("interrupted") != std::string::npos, "with the reason");
+    (void)restarted.step(queue);
+    require(manager->results.size() == 1U, "and only once");
     fs::remove_all(dir);
 }
 
@@ -1457,8 +1586,11 @@ int main() {
         {"parse_survives_garbage", test_parse_survives_garbage},
         {"ledger_persists_and_refuses_replay", test_ledger_persists_and_refuses_replay},
         {"ledger_corruption_and_tail", test_ledger_corruption_and_tail},
+        {"ledger_epoch_and_recovery", test_ledger_epoch_and_recovery},
+        {"ledger_append_failure_leaves_no_partial_record", test_ledger_append_failure_leaves_no_partial_record},
         {"ledger_bounds_and_compaction", test_ledger_bounds_and_compaction},
         {"processor_executes_once", test_processor_executes_once},
+        {"processor_refuses_commands_older_than_the_ledger", test_processor_refuses_commands_older_than_the_ledger},
         {"processor_checks", test_processor_checks},
         {"processor_policy", test_processor_policy},
         {"processor_rate_limit", test_processor_rate_limit},
@@ -1475,6 +1607,7 @@ int main() {
         {"channel_retries_the_result", test_channel_retries_the_result},
         {"channel_refused_result_is_not_retried_forever", test_channel_refused_result_is_not_retried_forever},
         {"channel_restart_does_not_rerun", test_channel_restart_does_not_rerun},
+        {"channel_answers_interrupted_commands", test_channel_answers_interrupted_commands},
         {"channel_failures_and_hostile_replies", test_channel_failures_and_hostile_replies},
         {"channel_mixed_batch", test_channel_mixed_batch},
         {"boot_bound_commands", test_boot_bound_commands},

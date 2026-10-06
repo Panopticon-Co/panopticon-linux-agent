@@ -74,10 +74,10 @@ start processes no command.
 
 ## Residual risks and limits
 
-* **Loss of the ledger inside the validity window** (disk replaced, state deleted) lets a still-valid signed
-  command run once more. The window is at most 900 s and a kill still needs the exact start time and boot, so
-  the practical exposure is a repeated collection or a repeated action on the same live process. A per-key
-  monotonic serial or a per-boot counter kept outside the ledger would close it; deferred.
+* **Loss of the ledger inside the validity window** (disk replaced, state deleted, corruption) used to let a
+  still-valid signed command run once more. Since ADR 028 a new ledger has an epoch and a command whose signed
+  `created_at` is earlier is refused as `ledger_reset`; the remaining gap is a Manager clock ahead of the
+  endpoint clock by more than the time between issue and loss.
 * **Whoever holds a pinned private key is the command authority.** Keys are not bound to an action class: one
   key may sign every permitted action. Per-key action scopes are a possible refinement.
 * **Root on the endpoint** can edit the keyring or the config; that is outside this boundary (SECURITY_MODEL).

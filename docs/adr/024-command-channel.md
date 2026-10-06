@@ -33,7 +33,8 @@ never repeat the action.
 5. **Ledger.** Append-only, fsync per line, intent (`R`) before the action, result (`D`) after,
    `S` when the result was delivered. A truncated tail is tolerated; a corrupt line fails closed.
    A command found `R` with no `D` after a restart is answered `indeterminate / interrupted` and
-   is never run again. The ledger is bounded and compacts without losing a stored result. If it
+   is never run again (ADR 028: a command left begun by a previous process is answered `indeterminate / interrupted`
+   at the next step, without waiting for a redelivery that will not come). The ledger is bounded and compacts without losing a stored result. If it
    is full or unreadable, commands are refused (`ledger_unavailable`), not run.
 6. **Exact targets.** A process target is `{pid, start_time_ticks}`. The pidfd is taken first, the
    start time is read, and the signal goes through `pidfd_send_signal`. PID 0 and 1, kernel threads

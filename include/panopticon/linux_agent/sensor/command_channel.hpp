@@ -100,6 +100,7 @@ using parsed_command = std::variant<endpoint_command, command_unreadable>;
 struct command_poll {
     std::vector<parsed_command> commands;
     bool malformed{false};  // the reply as a whole was not a command list
+    std::size_t omitted{0};  // commands beyond the per-poll bound, left for the next poll (the Manager resends what is not accepted)
     std::string why;
 };
 
@@ -153,6 +154,17 @@ public:
     // ledger that half-loads would let a command run twice.
     [[nodiscard]] static result<std::unique_ptr<command_ledger>> open(const std::filesystem::path& path, std::size_t maximum_entries,
                                                                       std::int64_t now_unix);
+    // `open`, except that a ledger that cannot be trusted is moved aside (to `<path>.corrupt`, replacing an older
+    // one) and a new one is started, instead of leaving the endpoint unable to act on any command. The new
+    // ledger has an epoch of `now_unix`, so no command issued before it can run (see `epoch`). An unreadable or
+    // unwritable file is still an error: the endpoint must not guess.
+    [[nodiscard]] static result<std::unique_ptr<command_ledger>> open_or_recover(const std::filesystem::path& path, std::size_t maximum_entries,
+                                                                                 std::int64_t now_unix);
+    // When this ledger began (the first line of the file), or 0 for a ledger written before epochs existed. A
+    // command created before it may have run under a ledger that is gone, so the processor refuses it.
+    [[nodiscard]] std::int64_t epoch() const { return epoch_unix_; }
+    // True when open_or_recover had to set a corrupt ledger aside.
+    [[nodiscard]] bool recovered() const { return recovered_; }
 
     [[nodiscard]] std::optional<entry> find(const std::string& command_id) const;
     // false (and no change) when the id is already present.
@@ -162,6 +174,8 @@ public:
     [[nodiscard]] result<bool> mark_reported(const std::string& command_id);
     // Commands whose outcome is recorded but was never acknowledged by the Manager, oldest first.
     [[nodiscard]] std::vector<std::pair<std::string, entry>> unreported() const;
+    // Commands recorded as begun and never finished: the process that began them stopped mid-action.
+    [[nodiscard]] std::vector<std::pair<std::string, entry>> interrupted() const;
     [[nodiscard]] std::size_t size() const;
     ~command_ledger();
     command_ledger(const command_ledger&) = delete;
@@ -175,6 +189,8 @@ private:
     std::filesystem::path path_;
     std::size_t maximum_entries_{};
     int fd_{-1};
+    std::int64_t epoch_unix_{0};
+    bool recovered_{false};
     std::map<std::string, entry> entries_;
 };
 

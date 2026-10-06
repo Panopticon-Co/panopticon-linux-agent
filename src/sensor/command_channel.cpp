@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -350,12 +351,18 @@ command_poll parse_command_poll(const std::string_view body, const std::size_t m
         return poll;
     }
     const auto* list = document->find("commands");
-    if (list == nullptr || !list->is_array() || list->items().size() > maximum_commands) {
+    if (list == nullptr || !list->is_array()) {
         poll.malformed = true;
-        poll.why = "the command list is missing or longer than the bound";
+        poll.why = "the command list is missing";
         return poll;
     }
-    for (const auto& item : list->items()) poll.commands.push_back(parse_endpoint_command(item));
+    // A backlog is not an error: reading only the first `maximum_commands` bounds the work of one poll, and
+    // everything not accepted is delivered again. Rejecting the whole reply would stall the channel for as long
+    // as the backlog stayed above the bound.
+    const auto& items = list->items();
+    const auto taken = std::min(items.size(), maximum_commands);
+    poll.omitted = items.size() - taken;
+    for (std::size_t index = 0U; index < taken; ++index) poll.commands.push_back(parse_endpoint_command(items[index]));
     return poll;
 }
 
@@ -420,8 +427,15 @@ result<std::unique_ptr<command_ledger>> command_ledger::open(const std::filesyst
         dropped_tail = true;
     }
     std::istringstream lines{contents};
-    for (std::string line; std::getline(lines, line);) {
+    bool first_line = true;
+    for (std::string line; std::getline(lines, line); first_line = false) {
         const auto parts = split_tabs(line);
+        if (first_line && parts.size() == 2U && parts[0] == "E") {
+            const auto epoch = parse_signed(parts[1]);
+            if (!epoch || *epoch == 0) return error{error_code::corrupt_data, "the command ledger has a malformed line"};
+            ledger->epoch_unix_ = *epoch;
+            continue;
+        }
         if (parts.size() < 2U || parts[0].size() != 1U || !command_id_ok(parts[1])) {
             return error{error_code::corrupt_data, "the command ledger has a malformed line"};
         }
@@ -460,6 +474,9 @@ result<std::unique_ptr<command_ledger>> command_ledger::open(const std::filesyst
             default: return error{error_code::corrupt_data, "the command ledger has a malformed line"};
         }
     }
+    // A ledger with nothing in it is a new one (first start, or its predecessor was lost): everything issued
+    // before this moment may have run already, so the epoch is now. A ledger from before epochs keeps 0.
+    if (contents.empty()) ledger->epoch_unix_ = now_unix > 0 ? now_unix : 1;
     constexpr std::int64_t keep_after_expiry = 86400;
     const std::size_t before = ledger->entries_.size();
     for (auto it = ledger->entries_.begin(); it != ledger->entries_.end();) {
@@ -467,12 +484,13 @@ result<std::unique_ptr<command_ledger>> command_ledger::open(const std::filesyst
         else ++it;
     }
     if (ledger->entries_.size() > maximum_entries) return error{error_code::resource_limit, "the command ledger holds more commands than its bound"};
-    if (ledger->entries_.size() != before || dropped_tail) {
+    if (ledger->entries_.size() != before || dropped_tail || (contents.empty() && ledger->epoch_unix_ > 0)) {
         // Rewrite compactly through a temporary file, so a crash keeps either the old or the new ledger.
         const auto temporary = path.string() + ".tmp";
         const int out = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
         if (out < 0) return error{error_code::io_failure, "cannot rewrite the command ledger"};
         std::string text;
+        if (ledger->epoch_unix_ > 0) text += "E\t" + std::to_string(ledger->epoch_unix_) + "\n";
         for (const auto& [id, item] : ledger->entries_) {
             text += "R\t" + id + "\t" + item.correlation_id + "\t" + std::to_string(item.expires_unix) + "\n";
             if (item.state != phase::received) {
@@ -489,16 +507,43 @@ result<std::unique_ptr<command_ledger>> command_ledger::open(const std::filesyst
     return ledger;
 }
 
+result<std::unique_ptr<command_ledger>> command_ledger::open_or_recover(const std::filesystem::path& path, const std::size_t maximum_entries,
+                                                                        const std::int64_t now_unix) {
+    auto opened = open(path, maximum_entries, now_unix);
+    if (succeeded(opened)) return opened;
+    if (std::get<error>(opened).code != error_code::corrupt_data) return opened;
+    // Keep the evidence, start again. Replacing an older `.corrupt` is deliberate: one is enough to diagnose
+    // from, and a flood of corrupt ledgers must not fill the state directory.
+    std::error_code code;
+    std::filesystem::rename(path, path.string() + ".corrupt", code);
+    if (code) return error{error_code::io_failure, "cannot set the corrupt command ledger aside"};
+    auto fresh = open(path, maximum_entries, now_unix);
+    if (succeeded(fresh)) std::get<std::unique_ptr<command_ledger>>(fresh)->recovered_ = true;
+    return fresh;
+}
+
 command_ledger::~command_ledger() {
     if (fd_ >= 0) ::close(fd_);
 }
 
 result<bool> command_ledger::append(const std::string_view line) {
+    // A write that fails half way (no space, a file size limit) must not leave half a record: the next append
+    // would glue onto it and the file would no longer load. Cut back to where the record began; if that is not
+    // possible, nothing more is written.
+    if (fd_ < 0) return error{error_code::io_failure, "the command ledger is closed"};
+    const auto start = ::lseek(fd_, 0, SEEK_END);
     const auto* data = line.data();
     std::size_t left = line.size();
     while (left > 0U) {
         const auto written = ::write(fd_, data, left);
-        if (written < 0) return error{error_code::io_failure, "cannot append to the command ledger"};
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            if (start >= 0 && ::ftruncate(fd_, start) != 0) {
+                ::close(fd_);
+                fd_ = -1;
+            }
+            return error{error_code::io_failure, "cannot append to the command ledger"};
+        }
         data += written;
         left -= static_cast<std::size_t>(written);
     }
@@ -566,6 +611,16 @@ std::vector<std::pair<std::string, command_ledger::entry>> command_ledger::unrep
     std::vector<std::pair<std::string, entry>> out;
     for (const auto& [id, item] : entries_) {
         if (item.state == phase::done) out.emplace_back(id, item);
+    }
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second.expires_unix < b.second.expires_unix; });
+    return out;
+}
+
+std::vector<std::pair<std::string, command_ledger::entry>> command_ledger::interrupted() const {
+    std::lock_guard lock{mutex_};
+    std::vector<std::pair<std::string, entry>> out;
+    for (const auto& [id, item] : entries_) {
+        if (item.state == phase::received) out.emplace_back(id, item);
     }
     std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second.expires_unix < b.second.expires_unix; });
     return out;
@@ -813,6 +868,12 @@ command_outcome command_processor::handle(const endpoint_command& command) {
         issued_lifetime > policy.maximum_lifetime_seconds + policy.clock_skew_seconds) {
         return refuse(command, "lifetime_exceeded", "the command is valid for longer than this endpoint allows", true);
     }
+    // A command issued before this ledger began may have run under a ledger that was lost or corrupted; the
+    // record that would say so is gone, so it is not run. (Signed commands always carry created_at; an unsigned
+    // one without it cannot be placed in time and is not covered.)
+    if (command.created_unix > 0 && ledger_.epoch() > 0 && command.created_unix < ledger_.epoch()) {
+        return refuse(command, "ledger_reset", "the command was issued before this endpoint began its replay ledger; issue it again", true);
+    }
     if (policy.mode == response_mode::off) return refuse(command, "response_disabled", "this endpoint does not act on commands", true);
     if (!command_action_implemented(command.action)) {
         return refuse(command, "unsupported_action", "this sensor does not carry out that action", true);
@@ -950,10 +1011,14 @@ std::string command_channel_provider::probe() {
 
 result<bool> command_channel_provider::prepare(record_queue& queue) {
     if (auto reason = probe(); !reason.empty()) return error{error_code::unsupported_action, reason};
-    auto opened = command_ledger::open(options_.ledger_path, options_.maximum_ledger_entries,
-                                       options_.processor.now_unix ? options_.processor.now_unix() : system_now_unix());
+    auto opened = command_ledger::open_or_recover(options_.ledger_path, options_.maximum_ledger_entries,
+                                                  options_.processor.now_unix ? options_.processor.now_unix() : system_now_unix());
     if (!succeeded(opened)) return std::get<error>(opened);
     ledger_ = std::move(std::get<std::unique_ptr<command_ledger>>(opened));
+    if (ledger_->recovered()) {
+        std::lock_guard lock{mutex_};
+        metrics_.last_error = "the command ledger was corrupt and was set aside; commands issued before now are refused";
+    }
     auto processor_options = options_.processor;
     auto* transport = transport_.get();
     // Tell the Manager the command is accepted once it is durably recorded and about to run. A failed
@@ -1042,6 +1107,13 @@ std::uint64_t command_channel_provider::step(record_queue& queue) {
         ++metrics_.polls;
     }
     if (options_.processor.keyring) options_.processor.keyring->refresh();  // a revoked key stops working at the next poll
+    // A command still marked as begun when a step starts was cut short by the previous process: commands run
+    // inside a step, so none is in flight here. The Manager was told it was accepted and will never send it
+    // again, so unless it is answered now (`indeterminate`, because whether it took effect is not known) the
+    // Manager waits for a result forever.
+    for (const auto& [id, entry] : ledger_->interrupted()) {
+        if (auto closed = processor_->resume(id, entry.correlation_id, nullptr)) report(*closed, queue, true);
+    }
     // Results the Manager never acknowledged go first: once a command is accepted the Manager does
     // not send it again, so nothing else would repeat the answer.
     for (const auto& [id, entry] : ledger_->unreported()) {
@@ -1076,6 +1148,7 @@ std::uint64_t command_channel_provider::step(record_queue& queue) {
         metrics_.last_error = "command poll reply rejected: " + poll.why;
         return options_.poll_interval_ms;
     }
+    bool progressed = false;
     for (const auto& item : poll.commands) {
         {
             std::lock_guard lock{mutex_};
@@ -1089,12 +1162,14 @@ std::uint64_t command_channel_provider::step(record_queue& queue) {
             }
             if (ledger_->find(unreadable->command_id)) continue;  // already closed; the Manager has the answer or will
             report(processor_->unreadable(*unreadable), queue, true);
+            progressed = true;
             continue;
         }
         const auto& command = std::get<endpoint_command>(item);
         const auto known = ledger_->find(command.command_id);
         if (!known) {
             report(processor_->handle(command), queue, true);
+            progressed = true;
         } else if (known->state == command_ledger::phase::received) {
             if (auto resumed = processor_->resume(command.command_id, command.correlation_id, &command)) report(*resumed, queue, true);
         } else if (known->state == command_ledger::phase::reported) {
@@ -1102,6 +1177,9 @@ std::uint64_t command_channel_provider::step(record_queue& queue) {
         }
         // phase::done and not reported: handled by the retry loop above on this and the next step.
     }
+    // A backlog that is draining is polled again soon; one that is not (nothing in it could be closed) waits
+    // the normal interval, so a Manager that keeps resending unaddressable entries cannot make this spin.
+    if (poll.omitted > 0U && progressed) return std::min<std::uint64_t>(options_.poll_interval_ms, 200U);
     return options_.poll_interval_ms;
 }
 
