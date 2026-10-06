@@ -15,6 +15,7 @@ mode, the optional second word its argument:
   slow S              store the batch, wait S seconds, then answer
   bad_ack             store the batch, answer 200 with counts that do not add up
   reject N            reject the first line of the batch (not stored) N times
+--wire-log PATH appends one line per request (rx, batch, body_bytes, header_bytes, encoding) for tests/perf.
 Counters reset whenever the content of the mode file changes.
 """
 import argparse
@@ -29,12 +30,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class State:
-    def __init__(self, store_path, mode_path, token):
+    def __init__(self, store_path, mode_path, token, wire_path=None):
+        self.wire = open(wire_path, "a", encoding="utf-8", buffering=1) if wire_path else None
         self.lock = threading.Lock()
         self.mode_path = mode_path
         self.token = token
         self.seen = {}  # seq -> set of digests
         self.requests = 0
+        self.connections = 0
         self.mode_text = None
         self.used = 0
         if os.path.exists(store_path):
@@ -67,6 +70,12 @@ def make_handler(state):
         def log_message(self, *args):
             pass
 
+        def setup(self):
+            super().setup()
+            with state.lock:
+                state.connections += 1
+                self.connection_number = state.connections
+
         def reply(self, code, body):
             data = body if isinstance(body, bytes) else json.dumps(body).encode()
             self.send_response(code)
@@ -83,6 +92,10 @@ def make_handler(state):
             if self.headers.get("Authorization") != "Bearer " + state.token:
                 return self.reply(401, {"error": "unauthorized"})
             batch = self.headers.get("X-Panopticon-Batch-Id", "")
+            if state.wire:
+                head = len(self.requestline) + 2 + sum(len(k) + len(v) + 4 for k, v in self.headers.items()) + 2
+                state.wire.write(json.dumps({"rx": time.time(), "batch": batch, "body_bytes": len(body), "header_bytes": head,
+                                             "encoding": self.headers.get("Content-Encoding", ""), "conn": self.connection_number}) + "\n")
             with state.lock:
                 state.requests += 1
                 mode, argument = state.mode()
@@ -135,8 +148,9 @@ def main():
     parser.add_argument("--store", required=True)
     parser.add_argument("--mode-file", required=True)
     parser.add_argument("--token", required=True)
+    parser.add_argument("--wire-log")
     args = parser.parse_args()
-    state = State(args.store, args.mode_file, args.token)
+    state = State(args.store, args.mode_file, args.token, args.wire_log)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
     server.daemon_threads = True
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
