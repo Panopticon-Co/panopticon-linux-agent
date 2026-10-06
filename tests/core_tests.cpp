@@ -14,6 +14,8 @@
 #include "panopticon/linux_agent/spool.hpp"
 #include "panopticon/linux_agent/transport.hpp"
 
+#include <unistd.h>
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -32,7 +34,8 @@ void require(const bool condition, const std::string_view message) {
 }
 
 std::filesystem::path temporary_directory() {
-    const auto directory = std::filesystem::temp_directory_path() / "panopticon-linux-agent-core-tests";
+    // Per user: a directory left by a run as root is not writable by the next run as anyone else.
+    const auto directory = std::filesystem::temp_directory_path() / ("panopticon-linux-agent-core-tests-" + std::to_string(::geteuid()));
     std::error_code error;
     std::filesystem::remove_all(directory, error);
     std::filesystem::create_directories(directory, error);
@@ -311,6 +314,9 @@ void test_configuration_rejects_unknown_and_insecure_values() {
     require(succeeded(parse_config(complete_transport)), "complete persistent transport configuration must parse");
     const auto path = temporary_directory() / "agent.conf";
     { std::ofstream output{path}; output << valid; }
+    // The loader refuses group- or world-writable files; set the mode rather than inherit the umask.
+    std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+                                           std::filesystem::perms::group_read | std::filesystem::perms::others_read);
     require(succeeded(load_config_file(path)), "regular configuration file must load");
 }
 
