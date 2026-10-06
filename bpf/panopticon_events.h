@@ -44,6 +44,17 @@ enum pan_event_kind {
     PAN_EVENT_DNS_QUERY = 15,   /* UDP datagram to port 53; its first bytes ride in `filename` */
 };
 
+/* What a standard descriptor referred to when the program began (exec-time stdio, matrix G5). */
+enum pan_fd_kind {
+    PAN_FD_CLOSED = 0, /* no descriptor, or it could not be read */
+    PAN_FD_SOCKET = 1,
+    PAN_FD_PIPE = 2,   /* FIFO or pipe */
+    PAN_FD_TTY = 3,    /* terminal or pseudo-terminal */
+    PAN_FD_FILE = 4,   /* regular file */
+    PAN_FD_NULL = 5,   /* /dev/null */
+    PAN_FD_OTHER = 6,  /* directory, block device, other character device */
+};
+
 enum pan_mem_backing {
     PAN_MEM_ANON = 1,
     PAN_MEM_MEMFD = 2,
@@ -54,6 +65,7 @@ enum pan_mem_backing {
 enum {
     PAN_COMM_LEN = 16,
     PAN_FILENAME_LEN = 448,
+    PAN_INTERP_LEN = 192,
     PAN_ARGS_LEN = 3072,
     PAN_ARGS_MAX = 128,
     PAN_DNS_CAPTURE = 320, /* enough for the header and a 255-byte name and its type and class */
@@ -111,7 +123,8 @@ struct pan_event {
     u32 bpf_type;   /* bpf: program type (PROG_LOAD) or attach type (PROG_ATTACH, LINK_CREATE) */
     u8 mem_backing; /* memory: pan_mem_backing */
     u8 mem_write;   /* memory: the mapping is writable as well as executable */
-    u8 sec_pad[6];
+    u8 stdio[3];    /* exec: pan_fd_kind of descriptors 0, 1 and 2 after the image was replaced */
+    u8 sec_pad[3];
     char obj_name[PAN_COMM_LEN]; /* bpf: program name (PROG_LOAD) or tracepoint name (RAW_TRACEPOINT_OPEN) */
     u32 ns_old[6]; /* ns change: inode numbers before: mnt, pid_for_children, net, uts, ipc, cgroup */
     u32 ns_new[6]; /* ns change: inode numbers after, same order */
@@ -120,6 +133,7 @@ struct pan_event {
 
     char comm[PAN_COMM_LEN];      /* task->comm (rename: the new name) */
     char filename[PAN_FILENAME_LEN]; /* exec: bprm->filename */
+    char interp[PAN_INTERP_LEN];     /* exec: bprm->interp; differs from filename for a #! script */
     char args[PAN_ARGS_LEN];      /* exec: argv, NUL-separated */
 };
 

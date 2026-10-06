@@ -160,6 +160,19 @@ const char* to_string(const executable_kind kind) noexcept {
     return "unknown";
 }
 
+const char* to_string(stdio_kind kind) noexcept {
+    switch (kind) {
+    case stdio_kind::closed: return "closed";
+    case stdio_kind::socket: return "socket";
+    case stdio_kind::pipe: return "pipe";
+    case stdio_kind::tty: return "tty";
+    case stdio_kind::file: return "file";
+    case stdio_kind::null: return "null";
+    case stdio_kind::other: return "other";
+    }
+    return "other";
+}
+
 const char* to_string(const unavailable_reason reason) noexcept {
     switch (reason) {
     case unavailable_reason::not_supported_by_provider: return "not_supported_by_provider";

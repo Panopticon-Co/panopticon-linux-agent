@@ -141,6 +141,24 @@ std::vector<raw_record> decode_ebpf_process_sample(const void* data, const std::
         bool truncated = (event.flags & wire::PAN_FLAG_ARGS_TRUNC) != 0U;
         exec.args = split_cmdline(std::string_view{event.args, event.args_len}, limits.maximum_args, limits.maximum_args_bytes, truncated);
         exec.args_truncated = truncated;
+        constexpr auto interp_offset = __builtin_offsetof(wire::pan_event, interp);
+        if (const auto interp = bounded_string(event.interp, wire::PAN_INTERP_LEN, size - interp_offset);
+            !interp.empty() && interp != std::string_view{event.filename, interp.size()}) {
+            exec.interpreter = std::string{interp};
+        }
+        std::array<stdio_kind, 3U> stdio{};
+        for (std::size_t index = 0U; index < stdio.size(); ++index) {
+            switch (event.stdio[index]) {
+            case wire::PAN_FD_SOCKET: stdio[index] = stdio_kind::socket; break;
+            case wire::PAN_FD_PIPE: stdio[index] = stdio_kind::pipe; break;
+            case wire::PAN_FD_TTY: stdio[index] = stdio_kind::tty; break;
+            case wire::PAN_FD_FILE: stdio[index] = stdio_kind::file; break;
+            case wire::PAN_FD_NULL: stdio[index] = stdio_kind::null; break;
+            case wire::PAN_FD_OTHER: stdio[index] = stdio_kind::other; break;
+            default: stdio[index] = stdio_kind::closed; break;
+            }
+        }
+        exec.stdio = stdio;
         records.push_back({time, observed("sched_process_exec"), std::move(exec)});
         break;
     }

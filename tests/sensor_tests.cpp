@@ -698,6 +698,46 @@ void test_pipeline_end_to_end_with_scripted_provider() {
     require(contains(*exec, "\"id\":\"" + compute_record_id("sensor-test", "boot-test", static_cast<std::uint64_t>(exec - lines.begin()) + 1U) + "\""),
             "record id derived from seq");
     require(!contains(*exec, "hunter2"), "secret environment never serialised");
+    // This provider did not capture stdio at exec; the record says so rather than staying silent.
+    require(!contains(*exec, "\"stdio\":") && contains(*exec, "{\"field\":\"process.stdio\",\"reason\":\"not_supported_by_provider\"}"),
+            "an exec without kernel-captured stdio says it is unavailable: " + *exec);
+}
+
+void test_pipeline_exec_stdio_and_interpreter() {
+    const auto root = fresh_directory("stdioproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "bash", 500U, "/usr/bin/bash", {"-bash"}}.write(root);
+    fake_process{200U, 100U, "sh", 900U, "/usr/bin/dash", {"/bin/sh", "./run.sh"}}.write(root);
+    raw_exec script_exec;
+    script_exec.tgid = 200U;
+    script_exec.pid = 200U;
+    script_exec.filename = "./run.sh";
+    script_exec.interpreter = "/bin/sh";
+    script_exec.stdio = std::array<stdio_kind, 3>{stdio_kind::socket, stdio_kind::socket, stdio_kind::pipe};
+    std::vector<raw_record> script{record_of(raw_fork{100U, 100U, 200U, 200U, std::nullopt}), record_of(script_exec)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    const auto exec = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"type\":\"process.exec\""); });
+    require(exec != lines.end(), "exec record present");
+    require(contains(*exec, "\"stdio\":{\"stdin\":\"socket\",\"stdout\":\"socket\",\"stderr\":\"pipe\"}"),
+            "stdio is serialised with the process: " + *exec);
+    require(contains(*exec, "\"interpreter\":\"/bin/sh\",\"script\":\"./run.sh\""), "a script is reported with its interpreter: " + *exec);
+    require(!contains(*exec, "{\"field\":\"process.stdio\""), "and nothing is marked unavailable for it");
 }
 
 void test_pipeline_enriches_file_events() {
@@ -1714,6 +1754,7 @@ int main() {
     run("wal_append_read_ack_and_recover", test_wal_append_read_ack_and_recover);
     run("wal_detects_corruption_and_enforces_quota", test_wal_detects_corruption_and_enforces_quota);
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
+    run("pipeline_exec_stdio_and_interpreter", test_pipeline_exec_stdio_and_interpreter);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
     run("pipeline_rebases_event_times_after_a_clock_step", test_pipeline_rebases_event_times_after_a_clock_step);

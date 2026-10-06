@@ -149,6 +149,52 @@ void put_address(std::uint8_t (&field)[16], const char* text, const int family) 
     if (::inet_pton(family, text, field) != 1) throw std::runtime_error{"bad test address"};
 }
 
+void test_decode_exec_stdio_and_interpreter() {
+    clock_domain clock;
+    auto exec = base_event(wire::PAN_EVENT_EXEC);
+    const std::string script = "./deploy.sh";
+    std::memcpy(exec.filename, script.c_str(), script.size() + 1U);
+    const std::string interp = "/bin/bash";
+    std::memcpy(exec.interp, interp.c_str(), interp.size() + 1U);
+    exec.stdio[0] = wire::PAN_FD_SOCKET;
+    exec.stdio[1] = wire::PAN_FD_PIPE;
+    exec.stdio[2] = wire::PAN_FD_TTY;
+    exec.args_len = 0U;
+    bool malformed = true;
+    auto records = decode_ebpf_process_sample(&exec, args_offset, clock, {}, &malformed);
+    require(!malformed && records.size() == 1U, "exec decodes");
+    const auto& decoded = std::get<raw_exec>(records[0].payload);
+    require(decoded.interpreter == interp && decoded.filename == script, "a script reports its interpreter next to the script path");
+    require(decoded.stdio.has_value() && (*decoded.stdio)[0] == stdio_kind::socket && (*decoded.stdio)[1] == stdio_kind::pipe &&
+                (*decoded.stdio)[2] == stdio_kind::tty,
+            "stdio kinds pass through");
+
+    // A binary: the kernel repeats the filename as the interpreter; that is not a script.
+    std::memset(exec.interp, 0, sizeof(exec.interp));
+    std::memcpy(exec.interp, script.c_str(), script.size() + 1U);
+    exec.stdio[0] = wire::PAN_FD_NULL;
+    exec.stdio[1] = wire::PAN_FD_FILE;
+    exec.stdio[2] = wire::PAN_FD_OTHER;
+    records = decode_ebpf_process_sample(&exec, args_offset, clock, {}, &malformed);
+    const auto& binary = std::get<raw_exec>(records[0].payload);
+    require(!binary.interpreter.has_value(), "an interpreter equal to the filename is not a script");
+    require((*binary.stdio)[0] == stdio_kind::null && (*binary.stdio)[1] == stdio_kind::file && (*binary.stdio)[2] == stdio_kind::other,
+            "null, file and other");
+
+    exec.interp[0] = '\0';
+    exec.stdio[0] = 0U;
+    exec.stdio[1] = 200U;  // a code this build does not know is reported closed, not guessed
+    records = decode_ebpf_process_sample(&exec, args_offset, clock, {}, &malformed);
+    const auto& unknown = std::get<raw_exec>(records[0].payload);
+    require(!unknown.interpreter.has_value() && (*unknown.stdio)[0] == stdio_kind::closed && (*unknown.stdio)[1] == stdio_kind::closed,
+            "an empty interpreter and unknown codes");
+
+    // An interpreter field that is not NUL-terminated is read only as far as its own buffer.
+    std::memset(exec.interp, 'i', sizeof(exec.interp));
+    records = decode_ebpf_process_sample(&exec, args_offset, clock, {}, &malformed);
+    require(std::get<raw_exec>(records[0].payload).interpreter->size() == wire::PAN_INTERP_LEN, "the interpreter is bounded by its field");
+}
+
 void test_decode_network() {
     clock_domain clock;
     auto connect = base_event(wire::PAN_EVENT_NET_CONNECT);
@@ -850,6 +896,91 @@ void test_live_lifecycle_and_arguments() {
     require(live.provider().take_losses() == 0U, "no ring buffer losses");
 }
 
+// Spawns the test binary as a child with `actions` applied before exec, so its standard descriptors
+// are exactly what the test wants the kernel to classify.
+pid_t spawn_with_actions(const std::string& mode, posix_spawn_file_actions_t* actions) {
+    const auto self = self_path();
+    std::vector<std::string> arguments{"pan-child", "--child", mode};
+    std::vector<char*> argv;
+    for (auto& argument : arguments) argv.push_back(argument.data());
+    argv.push_back(nullptr);
+    pid_t pid = 0;
+    if (::posix_spawn(&pid, self.c_str(), actions, nullptr, argv.data(), environ) != 0) throw std::runtime_error{"posix_spawn failed"};
+    return pid;
+}
+
+void test_live_exec_stdio_and_interpreter() {
+    live_provider live;
+    if (!live.begin("live exec stdio")) return;
+
+    // 0 = a socket, 1 = a pipe, 2 = a regular file.
+    int pair[2];
+    int pipe_fds[2];
+    require(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) == 0 && ::pipe2(pipe_fds, O_CLOEXEC) == 0, "descriptors for the test");
+    const auto file_path = (fs::temp_directory_path() / ("pan-stdio-" + std::to_string(::getpid()))).string();
+    const int file_fd = ::open(file_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    require(file_fd >= 0, "a regular file to point stderr at");
+    posix_spawn_file_actions_t actions;
+    ::posix_spawn_file_actions_init(&actions);
+    ::posix_spawn_file_actions_adddup2(&actions, pair[0], 0);
+    ::posix_spawn_file_actions_adddup2(&actions, pipe_fds[1], 1);
+    ::posix_spawn_file_actions_adddup2(&actions, file_fd, 2);
+    const auto first = spawn_with_actions("plain", &actions);
+    ::posix_spawn_file_actions_destroy(&actions);
+
+    // 0 and 1 = /dev/null, 2 closed.
+    ::posix_spawn_file_actions_init(&actions);
+    ::posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDWR, 0);
+    ::posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_RDWR, 0);
+    ::posix_spawn_file_actions_addclose(&actions, 2);
+    const auto second = spawn_with_actions("plain", &actions);
+    ::posix_spawn_file_actions_destroy(&actions);
+
+    // A #! script run directly.
+    const auto script_path = (fs::temp_directory_path() / ("pan-script-" + std::to_string(::getpid()) + ".sh")).string();
+    {
+        const int script_fd = ::open(script_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0700);
+        require(script_fd >= 0, "a script to run");
+        static constexpr char body[] = "#!/bin/sh\nexit 0\n";
+        require(::write(script_fd, body, sizeof(body) - 1U) == static_cast<ssize_t>(sizeof(body) - 1U), "script written");
+        ::close(script_fd);
+    }
+    pid_t third = 0;
+    {
+        char* argv[] = {const_cast<char*>("pan-script"), nullptr};
+        require(::posix_spawn(&third, script_path.c_str(), nullptr, nullptr, argv, environ) == 0, "the script starts");
+    }
+    reap(first);
+    reap(second);
+    reap(third);
+    ::close(pair[0]);
+    ::close(pair[1]);
+    ::close(pipe_fds[0]);
+    ::close(pipe_fds[1]);
+    ::close(file_fd);
+    fs::remove(file_path);
+
+    records_t all;
+    require(collect(live.queue(), all,
+                    [&](const records_t& r) {
+                        return !execs_of(r, first).empty() && !execs_of(r, second).empty() && !execs_of(r, third).empty();
+                    }),
+            "all three execs are observed");
+    const auto& one = std::get<raw_exec>(execs_of(all, first)[0]->payload);
+    require(one.stdio.has_value() && (*one.stdio)[0] == stdio_kind::socket && (*one.stdio)[1] == stdio_kind::pipe &&
+                (*one.stdio)[2] == stdio_kind::file,
+            "socket, pipe and file on stdin, stdout and stderr");
+    require(!one.interpreter.has_value(), "a binary has no interpreter");
+    const auto& two = std::get<raw_exec>(execs_of(all, second)[0]->payload);
+    require(two.stdio.has_value() && (*two.stdio)[0] == stdio_kind::null && (*two.stdio)[1] == stdio_kind::null &&
+                (*two.stdio)[2] == stdio_kind::closed,
+            "/dev/null twice and a closed descriptor");
+    const auto& three = std::get<raw_exec>(execs_of(all, third)[0]->payload);
+    require(three.interpreter == "/bin/sh" && three.filename == script_path, "a script reports its interpreter and the script path");
+    fs::remove(script_path);
+    require(live.provider().take_losses() == 0U, "no ring buffer losses");
+}
+
 void test_live_start_ticks_match_procfs() {
     live_provider live;
     if (!live.begin("live start ticks")) return;
@@ -957,6 +1088,7 @@ int main(int argc, char** argv) {
     };
     run("decode_fork_exit_rename", test_decode_fork_exit_rename);
     run("decode_exec_arguments", test_decode_exec_arguments);
+    run("decode_exec_stdio_and_interpreter", test_decode_exec_stdio_and_interpreter);
     run("decode_network", test_decode_network);
     run("decode_security", test_decode_security);
     run("decode_namespace_change", test_decode_namespace_change);
@@ -965,6 +1097,7 @@ int main(int argc, char** argv) {
     run("decode_rejects_malformed_samples", test_decode_rejects_malformed_samples);
     run("process_providers_share_a_family", test_process_providers_share_a_family);
     run("live_lifecycle_and_arguments", test_live_lifecycle_and_arguments);
+    run("live_exec_stdio_and_interpreter", test_live_exec_stdio_and_interpreter);
     run("live_start_ticks_match_procfs", test_live_start_ticks_match_procfs);
     run("live_signal_exit", test_live_signal_exit);
     run("live_rename_ignores_exec_rename", test_live_rename_ignores_exec_rename);

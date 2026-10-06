@@ -61,7 +61,9 @@ Implementation state per type is tracked in [IMPLEMENTATION_STATUS.md](IMPLEMENT
 | `args` | string[] | `mm->arg_start..arg_end` / cmdline | bounded (64 args, 4 KiB) |
 | `args_truncated` | bool | | |
 | `cwd` | string | `/proc/pid/cwd` | |
-| `interpreter` | string | `bprm->interp` when it differs from `bprm->filename` | scripts, `ld.so` invocations |
+| `interpreter` | string | `bprm->interp` when it differs from `bprm->filename`: the `#!` interpreter of a script | present only on the exec of a script, and only with the eBPF provider (otherwise `process.interpreter` is `unavailable`). An ELF binary, including one started through `ld.so`, has no interpreter here; the program headers are not read |
+| `script` | string | `bprm->filename` of that exec, as `execve` was given it | present with `interpreter`; may be relative |
+| `stdio` | object | `stdin`, `stdout`, `stderr`: the file type behind descriptors 0, 1, 2 after the image was replaced (`socket`, `pipe`, `tty`, `file`, `null`, `closed`, `other`) | eBPF only, read from the inode when the exec completes, so close-on-exec descriptors are already gone. It describes the program as it started and is not updated later; a child that has not exec'd yet (fork) does not have it. `tty` is a terminal or pty (majors 4, 5, 136 to 143); another character device is `other`; a socket or pipe says nothing about the peer. Without the eBPF provider `process.stdio` is `unavailable` |
 | `creds` | object | `uid euid suid fsuid gid egid sgid fsgid groups[] loginuid sessionid` | |
 | `caps` | object | `effective permitted inheritable bounding ambient` as 16-hex masks | |
 | `ns` | object | `mnt pid net user uts ipc cgroup` inode numbers | |

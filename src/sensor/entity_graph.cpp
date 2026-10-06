@@ -297,6 +297,18 @@ std::vector<process_event> entity_graph::on_exec(const raw_record& record, const
         entity->attributes = confidence::observed;
         std::erase_if(entity->info.unavailable, [](const unavailable_field& field) { return field.field == "process.args"; });
     }
+    // stdio and the interpreter exist only where the kernel reported them at exec; a provider that
+    // cannot says so instead of leaving the question open.
+    if (exec.stdio.has_value()) {
+        entity->info.stdio = exec.stdio;
+        if (exec.interpreter.has_value() && exec.filename.has_value()) {
+            entity->info.interpreter = *exec.interpreter;
+            entity->info.script = *exec.filename;
+        }
+    } else {
+        entity->info.mark_unavailable("process.stdio", unavailable_reason::not_supported_by_provider);
+        entity->info.mark_unavailable("process.interpreter", unavailable_reason::not_supported_by_provider);
+    }
 
     entity->exec_gen = prior ? prior->exec_gen + 1U : 1U;
     entity->entity_id = compute_entity_id(options_.host_id, options_.boot_id, exec.tgid, entity->info.start_ticks);

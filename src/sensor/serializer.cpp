@@ -132,6 +132,17 @@ void record_serializer::write_process(json_writer& out, const process_entity& en
     for (const auto& arg : info.args) out.value(arg);
     out.end_array();
     out.field("args_truncated", info.args_truncated);
+    if (info.stdio.has_value()) {
+        out.key("stdio").begin_object();
+        out.field("stdin", to_string((*info.stdio)[0]));
+        out.field("stdout", to_string((*info.stdio)[1]));
+        out.field("stderr", to_string((*info.stdio)[2]));
+        out.end_object();
+    }
+    if (!info.interpreter.empty()) {
+        out.field("interpreter", info.interpreter);
+        out.field("script", info.script);
+    }
     if (!info.cwd.empty()) out.field("cwd", info.cwd);
 
     const auto& creds = info.creds;

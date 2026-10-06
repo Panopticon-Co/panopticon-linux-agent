@@ -88,6 +88,33 @@ static __always_inline void submit_exec(struct pan_event *e)
         count_drop();
 }
 
+// Kind of the file behind one of the standard descriptors, from the inode alone (no path walk).
+static __always_inline u8 classify_fd(struct file **table, int index)
+{
+    struct file *file = 0;
+    if (bpf_probe_read_kernel(&file, sizeof(file), table + index) || !file)
+        return PAN_FD_CLOSED;
+    struct inode *inode = BPF_CORE_READ(file, f_inode);
+    if (!inode)
+        return PAN_FD_OTHER;
+    u32 format = BPF_CORE_READ(inode, i_mode) & 0170000;
+    if (format == 0140000)
+        return PAN_FD_SOCKET;
+    if (format == 0010000)
+        return PAN_FD_PIPE;
+    if (format == 0100000)
+        return PAN_FD_FILE;
+    if (format == 0020000) {
+        u32 rdev = BPF_CORE_READ(inode, i_rdev);
+        u32 major = rdev >> 20;
+        if (rdev == ((1u << 20) | 3u))
+            return PAN_FD_NULL;
+        if (major == 4 || major == 5 || (major >= 136 && major <= 143))
+            return PAN_FD_TTY;
+    }
+    return PAN_FD_OTHER;
+}
+
 SEC("tp_btf/sched_process_fork")
 int BPF_PROG(on_fork, struct task_struct *parent, struct task_struct *child)
 {
@@ -123,6 +150,22 @@ int BPF_PROG(on_exec, struct task_struct *p, pid_t old_pid, struct linux_binprm 
 
     const char *filename = BPF_CORE_READ(bprm, filename);
     bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), filename);
+    // For a #! script bprm->interp is the interpreter; otherwise it is the filename again.
+    const char *interp = BPF_CORE_READ(bprm, interp);
+    e->interp[0] = '\0';
+    if (interp)
+        bpf_probe_read_kernel_str(&e->interp, sizeof(e->interp), interp);
+
+    // Close-on-exec descriptors are already gone, so this is what the new image inherited.
+    struct fdtable *fdt = BPF_CORE_READ(p, files, fdt);
+    if (fdt) {
+        struct file **table = BPF_CORE_READ(fdt, fd);
+        if (table) {
+            e->stdio[0] = classify_fd(table, 0);
+            e->stdio[1] = classify_fd(table, 1);
+            e->stdio[2] = classify_fd(table, 2);
+        }
+    }
 
     // argv lives in [mm->arg_start, mm->arg_end) in user memory, NUL-separated.
     struct mm_struct *mm = BPF_CORE_READ(p, mm);

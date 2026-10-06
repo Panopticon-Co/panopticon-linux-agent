@@ -46,6 +46,8 @@ struct raw_exec {
     std::optional<std::vector<std::string>> args;
     std::optional<std::uint64_t> start_ticks;
     bool args_truncated{false};  // `args` was cut at a limit
+    std::optional<std::array<stdio_kind, 3>> stdio{};  // descriptors 0..2 at exec
+    std::optional<std::string> interpreter{};        // bprm->interp when it differs from the filename (a script)
 };
 
 struct raw_exit {

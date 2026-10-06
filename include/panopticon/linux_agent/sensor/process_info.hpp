@@ -16,6 +16,10 @@ namespace panopticon::linux_agent::sensor {
 enum class executable_kind : std::uint8_t { file, deleted, memfd, anonymous, unknown };
 [[nodiscard]] const char* to_string(executable_kind kind) noexcept;
 
+// What a standard descriptor referred to when a program began (catalog `process.stdio`).
+enum class stdio_kind : std::uint8_t { closed, socket, pipe, tty, file, null, other };
+[[nodiscard]] const char* to_string(stdio_kind kind) noexcept;
+
 // Reason codes for the canonical `unavailable` array (telemetry catalog §2).
 enum class unavailable_reason : std::uint8_t {
     not_supported_by_provider,
@@ -81,6 +85,10 @@ struct process_info {
     executable_info executable;
     std::vector<std::string> args;
     bool args_truncated{false};
+    // Captured in-kernel at exec by the eBPF provider only; absent otherwise (and then marked unavailable).
+    std::optional<std::array<stdio_kind, 3>> stdio;  // descriptors 0, 1, 2 as the new image inherited them
+    std::string interpreter;                         // #! interpreter; empty for a binary
+    std::string script;                              // the script as execve() was given it; empty for a binary
     std::string cwd;
     std::array<std::uint64_t, 7> namespaces{};  // 0 = unknown
     std::string cgroup;
