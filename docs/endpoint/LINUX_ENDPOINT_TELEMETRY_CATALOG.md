@@ -152,6 +152,17 @@ Process images: when procfs can no longer be read at exec time (short-lived proc
 
 Event body: `process` (actor, resolved through the entity graph; `{pid}` plus `unavailable: process` when it already exited), `file {path, name, directory, old_path?, stat?}` with `stat {mode, uid, gid, size, inode, device, mtime}` from an `lstat` taken after the event (`unavailable: file.stat / object_gone` when the path is gone). Provenance `{fanotify_file, FANOTIFY, observed}`. Events skipped by the rate governor are not individually reported; they appear as one `loss` record with `stage: governor` and an exact `count`.
 
+### 4.2 `fim.*` events as emitted today (S5.2, ADR 010)
+
+| Type | Meaning | Body |
+| --- | --- | --- |
+| `fim.baseline` | the monitor started | `fim {state created/loaded/reset, reason?, items, changes}` where `changes` counts what differed while the sensor was down (each is also reported as `fim.changed`) |
+| `fim.changed` | a persistence item was added, removed or modified | `fim {path, category, change added/removed/modified, fields[] (kind, content, mode, uid, gid, target), before?, after?}` with `process` when a file event named the path |
+
+`before` and `after` are `state.persistence` items (below). Provenance `{fim, FSSCAN, observed}`, or `FSSCAN+FANOTIFY` when a file event attributed the change. Without an actor, `unavailable` lists `process / not_supported_by_provider`; an actor that already exited is `process / process_exited`.
+
+**`state.persistence` item:** `category` (systemd_unit, cron, shell_profile, ssh, ld_preload, init_script, privilege, pam, account, system_config, udev_rule, autostart, kernel_module, login_hook, package_hook), `path`, `kind` (file, symlink, other), `uid`, `gid`, `mode` (07777), `size`, `mtime`, `hash_status` (computed, too_large, unreadable, not_applicable), and when known `sha256`, `target`, `exec` (systemd: program of the first `ExecStart`), `entries` (cron, `ld.so.preload`: active lines), `key_count`, `forced_commands`, `key_digests[]` (`authorized_keys`), `nopasswd` (sudoers lines granting NOPASSWD). File content, key material and key comments are never emitted.
+
 ## 5. State records
 
 `state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,
@@ -163,7 +174,7 @@ start, on a schedule, and on `QUERY_STATE` commands.
 
 **Implemented (S4):** `state.processes` (procfs reconciler) and the inventory objects `state.host`,
 `state.posture`, `state.users`, `state.groups`, `state.interfaces`, `state.mounts` and
-`state.modules`, emitted at start and every `state_interval_seconds` (default 3600, 100 items per
+`state.modules` and `state.persistence`, emitted at start and every `state_interval_seconds` (default 3600, 100 items per
 part). Inventory records carry provenance `{provider "inventory", mechanism, confidence observed}`
 and list every field that could not be collected in `unavailable[]` (`{field, reason}`, on part 1
 of a snapshot); an unreadable value is `null` or absent, never guessed. Collectors read a
