@@ -472,6 +472,49 @@ std::string record_serializer::auth_event(const auth_record& record, const std::
     return out.take();
 }
 
+std::string record_serializer::kernel_event(const kernel_record& record, const std::uint64_t seq,
+                                            const std::uint64_t observed_unix_ns) const {
+    const auto& item = record.kernel;
+    const bool is_module = item.kind == kernel_event_kind::module_load || item.kind == kernel_event_kind::module_unload;
+    const char* type = item.kind == kernel_event_kind::module_load     ? "kernel.module_load"
+                       : item.kind == kernel_event_kind::module_unload ? "kernel.module_unload"
+                                                                      : "mount.changed";
+    json_writer out;
+    begin(out, "event", type, seq, record.time_unix_ns, observed_unix_ns, record.source);
+    if (is_module) {
+        out.key("module").begin_object();
+        out.field("name", item.module_name);
+        out.field("size", item.module_size);
+        if (!item.module_state.empty()) out.field("state", item.module_state);
+        out.end_object();
+    } else {
+        out.key("mount").begin_object();
+        out.field("operation", item.kind == kernel_event_kind::mount_added     ? "mounted"
+                               : item.kind == kernel_event_kind::mount_removed ? "unmounted"
+                                                                              : "remounted");
+        out.field("source", item.source);
+        out.field("target", item.target);
+        out.field("fstype", item.fs_type);
+        out.field("mount_id", item.mount_id);
+        out.field("device", item.device);
+        out.key("options").begin_array();
+        for (const auto& option : item.options) out.value(option);
+        out.end_array();
+        out.key("super_options").begin_array();
+        for (const auto& option : item.super_options) out.value(option);
+        out.end_array();
+        out.end_object();
+    }
+    out.key("unavailable").begin_array();
+    out.begin_object();
+    out.field("field", "process");
+    out.field("reason", "not_supported_by_provider");
+    out.end_object();
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::hash_computed(const hash_result& result, const std::uint64_t seq, const std::uint64_t now_unix_ns) const {
     json_writer out;
     begin(out, "event", "hash.computed", seq, now_unix_ns, now_unix_ns, {"hash", "FSSCAN", confidence::observed});

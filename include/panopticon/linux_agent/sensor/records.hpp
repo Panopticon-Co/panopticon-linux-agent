@@ -157,8 +157,35 @@ struct raw_auth_event {
     bool truncated{false};     // a field was cut at its limit
 };
 
+enum class kernel_event_kind : std::uint8_t {
+    module_load,
+    module_unload,
+    mount_added,
+    mount_removed,
+    mount_remounted,  // same mount, different options
+};
+[[nodiscard]] const char* to_string(kernel_event_kind value) noexcept;
+
+// A change in kernel state seen by comparing two snapshots of /proc/modules or mountinfo. There
+// is no acting process: the diff cannot say who loaded the module or ran mount.
+struct raw_kernel_event {
+    kernel_event_kind kind{kernel_event_kind::module_load};
+    // modules
+    std::string module_name;
+    std::uint64_t module_size{};
+    std::string module_state;
+    // mounts
+    std::uint32_t mount_id{};
+    std::string device;  // major:minor
+    std::string source;
+    std::string target;
+    std::string fs_type;
+    std::vector<std::string> options;
+    std::vector<std::string> super_options;
+};
+
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
-                                 raw_session_change, raw_file_event, raw_network_event, raw_auth_event>;
+                                 raw_session_change, raw_file_event, raw_network_event, raw_auth_event, raw_kernel_event>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

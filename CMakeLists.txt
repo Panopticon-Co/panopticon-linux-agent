@@ -87,6 +87,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/sockdiag_network.cpp
         src/sensor/auth_log.cpp
         src/sensor/audit_netlink.cpp
+        src/sensor/kernel_change.cpp
         src/sensor/ebpf_process.cpp
         src/sensor/host_state.cpp
         src/sensor/persistence.cpp
@@ -166,6 +167,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_options(panopticon-audit-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-audit-tests PRIVATE panopticon-sensor-core)
         add_test(NAME panopticon-audit-tests COMMAND panopticon-audit-tests)
+        add_executable(panopticon-kernel-tests tests/kernel_tests.cpp)
+        target_compile_options(panopticon-kernel-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(panopticon-kernel-tests PRIVATE panopticon-sensor-core)
+        add_test(NAME panopticon-kernel-tests COMMAND panopticon-kernel-tests)
         add_executable(panopticon-hash-tests tests/hash_tests.cpp)
         target_compile_options(panopticon-hash-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-hash-tests PRIVATE panopticon-sensor-core)

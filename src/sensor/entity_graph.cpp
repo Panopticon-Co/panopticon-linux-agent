@@ -47,6 +47,17 @@ const char* to_string(const auth_kind value) noexcept {
     return "login_failure";
 }
 
+const char* to_string(const kernel_event_kind value) noexcept {
+    switch (value) {
+    case kernel_event_kind::module_load: return "module_load";
+    case kernel_event_kind::module_unload: return "module_unload";
+    case kernel_event_kind::mount_added: return "mount_added";
+    case kernel_event_kind::mount_removed: return "mount_removed";
+    case kernel_event_kind::mount_remounted: return "mount_remounted";
+    }
+    return "module_load";
+}
+
 exit_details decode_exit_status(const std::uint32_t status) noexcept {
     exit_details details;
     const auto low = status & 0x7FU;
@@ -166,7 +177,7 @@ std::vector<process_event> entity_graph::apply(const raw_record& record) {
             else if constexpr (std::is_same_v<payload_type, raw_ptrace>) return on_ptrace(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_comm_change>) return on_comm(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_file_event> || std::is_same_v<payload_type, raw_network_event> ||
-                               std::is_same_v<payload_type, raw_auth_event>) {
+                               std::is_same_v<payload_type, raw_auth_event> || std::is_same_v<payload_type, raw_kernel_event>) {
                 return {};  // not a process change
             } else return on_session(record, payload);
         },

@@ -892,6 +892,76 @@ void test_pipeline_serializes_auth_events() {
     }
 }
 
+void test_pipeline_serializes_kernel_events() {
+    const auto root = fresh_directory("kernproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    raw_kernel_event load;
+    load.kind = kernel_event_kind::module_load;
+    load.module_name = "evil_mod";
+    load.module_size = 16384U;
+    load.module_state = "Live";
+    raw_kernel_event unload = load;
+    unload.kind = kernel_event_kind::module_unload;
+    raw_kernel_event mounted;
+    mounted.kind = kernel_event_kind::mount_added;
+    mounted.mount_id = 40U;
+    mounted.device = "8:1";
+    mounted.source = "/dev/sdb1";
+    mounted.target = "/mnt/\"usb\"\n";
+    mounted.fs_type = "vfat";
+    mounted.options = {"rw", "nosuid"};
+    raw_kernel_event remounted = mounted;
+    remounted.kind = kernel_event_kind::mount_remounted;
+    raw_kernel_event gone = mounted;
+    gone.kind = kernel_event_kind::mount_removed;
+    std::vector<raw_record> script{record_of(load), record_of(unload), record_of(mounted), record_of(remounted), record_of(gone)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script, 0U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    const auto find = [&](const std::string_view type) {
+        const auto found = std::find_if(lines.begin(), lines.end(), [&](const std::string& line) {
+            return contains(line, std::string{"\"type\":\""} + std::string{type} + "\"");
+        });
+        require(found != lines.end(), std::string{"record present: "} + std::string{type});
+        return *found;
+    };
+    const auto module_load = find("kernel.module_load");
+    require(contains(module_load, "\"module\":{\"name\":\"evil_mod\",\"size\":16384,\"state\":\"Live\"}") &&
+                contains(module_load, "{\"field\":\"process\",\"reason\":\"not_supported_by_provider\"}") && !contains(module_load, "\"process\":{"),
+            "a module load names the module and says there is no process");
+    require(contains(find("kernel.module_unload"), "\"name\":\"evil_mod\""), "unload");
+    std::size_t changes = 0U;
+    for (const auto& line : lines) {
+        if (!contains(line, "\"type\":\"mount.changed\"")) continue;
+        ++changes;
+        require(contains(line, "\\\"usb\\\"\\n") && !contains(line, "\n\""), "a hostile mount path stays escaped inside the record");
+    }
+    require(changes == 3U, "three mount records");
+    const auto mount_line = find("mount.changed");
+    require(contains(mount_line, "\"operation\":\"mounted\"") && contains(mount_line, "\"source\":\"/dev/sdb1\"") && contains(mount_line, "\"fstype\":\"vfat\"") &&
+                contains(mount_line, "\"options\":[\"rw\",\"nosuid\"]") && contains(mount_line, "\"mount_id\":40"),
+            "mount fields");
+    require(std::any_of(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"operation\":\"unmounted\""); }), "unmount");
+    require(std::any_of(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"operation\":\"remounted\""); }), "remount");
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "seq stays contiguous with kernel records");
+    }
+}
+
 void test_pipeline_reports_integrity_changes() {
     const auto proc = fresh_directory("fimproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
@@ -1145,6 +1215,10 @@ void test_sensor_config_is_strict() {
     require(!value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_auth_events=false\n"), "auth off").enable_auth_events,
             "authentication telemetry can be disabled");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_auth_events=maybe\n")), "non-boolean enable_auth_events rejected");
+    require(value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "defaults").enable_kernel_events, "kernel change telemetry is on by default");
+    require(!value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_kernel_events=false\n"), "kernel off").enable_kernel_events,
+            "kernel change telemetry can be disabled");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_kernel_events=maybe\n")), "non-boolean enable_kernel_events rejected");
     const auto& integrity = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nwal_path=/data/wal\n"), "fim defaults");
     require(integrity.enable_fim && integrity.fim_path == "/data/fim.baseline" && integrity.fim_interval_seconds == 300U, "FIM is on by default, next to the WAL");
     const auto& tuned = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_fim=false\nfim_path=/x/b\nfim_interval_seconds=60\n"), "fim keys");
@@ -1211,6 +1285,7 @@ int main() {
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);
     run("pipeline_enriches_network_events", test_pipeline_enriches_network_events);
     run("pipeline_serializes_auth_events", test_pipeline_serializes_auth_events);
+    run("pipeline_serializes_kernel_events", test_pipeline_serializes_kernel_events);
     run("pipeline_reports_integrity_changes", test_pipeline_reports_integrity_changes);
     run("pipeline_hashes_executed_images", test_pipeline_hashes_executed_images);
     run("provider_family_prefers_first_and_falls_back", test_provider_family_prefers_first_and_falls_back);

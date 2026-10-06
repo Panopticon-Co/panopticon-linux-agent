@@ -65,12 +65,12 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 26U> allowed{
+    constexpr std::array<std::string_view, 27U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
         "file_include", "file_exclude", "enable_fim", "fim_path", "fim_interval_seconds", "enable_hashing", "hash_max_file_bytes",
-        "hash_bytes_per_second", "enable_network_events", "enable_auth_events"};
+        "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -122,6 +122,10 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     if (const auto value = text("enable_auth_events"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.enable_auth_events = *value == "true";
+    }
+    if (const auto value = text("enable_kernel_events"); value.has_value()) {
+        if (*value != "true" && *value != "false") valid = false;
+        config.enable_kernel_events = *value == "true";
     }
     config.enable_fim = true;
     config.fim_path = config.wal_path.parent_path() / "fim.baseline";
@@ -294,6 +298,10 @@ void sensor_pipeline::process_record(const raw_record& record, const std::uint64
         (void)emit_auth_event(record, *auth, observed_ns);
         return;
     }
+    if (const auto* kernel = std::get_if<raw_kernel_event>(&record.payload)) {
+        (void)emit_kernel_event(record, *kernel, observed_ns);
+        return;
+    }
     (void)emit_events(graph_.apply(record), observed_ns);
 }
 
@@ -304,6 +312,16 @@ result<bool> sensor_pipeline::emit_auth_event(const raw_record& record, const ra
     out.actor = auth.pid != 0U ? graph_.find(auth.pid) : nullptr;
     out.auth = auth;
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.auth_event(out, seq, observed_ns); });
+    if (succeeded(emitted)) ++metrics_.events;
+    return emitted;
+}
+
+result<bool> sensor_pipeline::emit_kernel_event(const raw_record& record, const raw_kernel_event& kernel, const std::uint64_t observed_ns) {
+    kernel_record out;
+    out.time_unix_ns = record.time_unix_ns;
+    out.source = record.source;
+    out.kernel = kernel;
+    auto emitted = emit([&](const std::uint64_t seq) { return serializer_.kernel_event(out, seq, observed_ns); });
     if (succeeded(emitted)) ++metrics_.events;
     return emitted;
 }

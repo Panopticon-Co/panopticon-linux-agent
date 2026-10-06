@@ -92,6 +92,13 @@ struct auth_record {
     raw_auth_event auth;
 };
 
+// A kernel.* or mount.* event. There is no acting process.
+struct kernel_record {
+    std::uint64_t time_unix_ns{};
+    provenance source;
+    raw_kernel_event kernel;
+};
+
 class record_serializer {
 public:
     record_serializer(sensor_identity identity, const clock_domain& clock);
@@ -115,6 +122,9 @@ public:
 
     // auth.login / auth.failure / auth.privilege (catalog 4.4).
     [[nodiscard]] std::string auth_event(const auth_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+
+    // kernel.module_load / kernel.module_unload / mount.changed (catalog 4.5).
+    [[nodiscard]] std::string kernel_event(const kernel_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
 
     // fim.changed (catalog §4.2). `actor` is the acting process when a file event named the path
     // and the process was still known; otherwise the process is reported as unavailable.
