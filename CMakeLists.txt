@@ -83,6 +83,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/entity_graph.cpp
         src/sensor/serializer.cpp
         src/sensor/wal.cpp
+        src/sensor/json_reader.cpp
+        src/sensor/uplink.cpp
+        src/sensor/uplink_https.cpp
         src/sensor/netlink_proc.cpp
         src/sensor/fanotify_file.cpp
         src/sensor/sockdiag_network.cpp
@@ -107,6 +110,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set_source_files_properties(${PANOPTICON_EBPF_OBJECT_CPP} PROPERTIES COMPILE_OPTIONS "-w")
         target_compile_definitions(panopticon-sensor-core PRIVATE PANOPTICON_HAVE_EBPF)
         target_link_libraries(panopticon-sensor-core PRIVATE panopticon-libbpf)
+    endif()
+    if(CURL_FOUND)
+        target_compile_definitions(panopticon-sensor-core PRIVATE PANOPTICON_HAVE_CURL=1)
     endif()
     target_compile_features(panopticon-sensor-core PUBLIC cxx_std_20)
     target_link_libraries(panopticon-sensor-core PUBLIC panopticon-linux-core Threads::Threads)
@@ -181,6 +187,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_options(panopticon-response-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-response-tests PRIVATE panopticon-sensor-core)
         add_test(NAME panopticon-response-tests COMMAND panopticon-response-tests)
+        add_executable(panopticon-json-tests tests/json_reader_tests.cpp)
+        target_compile_options(panopticon-json-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(panopticon-json-tests PRIVATE panopticon-sensor-core)
+        add_test(NAME panopticon-json-tests COMMAND panopticon-json-tests)
+        add_executable(panopticon-uplink-tests tests/uplink_tests.cpp)
+        target_compile_options(panopticon-uplink-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(panopticon-uplink-tests PRIVATE panopticon-sensor-core)
+        add_test(NAME panopticon-uplink-tests COMMAND panopticon-uplink-tests)
         add_executable(panopticon-hash-tests tests/hash_tests.cpp)
         target_compile_options(panopticon-hash-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-hash-tests PRIVATE panopticon-sensor-core)

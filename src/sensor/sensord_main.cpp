@@ -7,6 +7,7 @@
 //   panopticon-sensord ... --control-socket PATH         serve status/coverage/state on a 0600 unix socket
 
 #include "panopticon/linux_agent/host.hpp"
+#include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/sensor/audit_netlink.hpp"
 #include "panopticon/linux_agent/sensor/auth_log.hpp"
 #include "panopticon/linux_agent/sensor/kernel_change.hpp"
@@ -16,6 +17,7 @@
 #include "panopticon/linux_agent/sensor/netlink_proc.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 #include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
+#include "panopticon/linux_agent/sensor/uplink.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -169,6 +171,36 @@ int main(int argc, char** argv) {
         sink = std::make_unique<sensor::wal_sink>(std::move(std::get<std::unique_ptr<sensor::write_ahead_log>>(log)));
     }
 
+    // Delivery to the Manager. Collection never depends on it: a missing identity or an unreachable
+    // Manager leaves records in the WAL, and the reason is printed and visible in uplink metrics.
+    std::unique_ptr<sensor::record_poster> poster;
+    std::unique_ptr<sensor::uplink> delivery;
+    std::unique_ptr<sensor::uplink_runner> delivery_runner;
+    if (!to_stdout && !config.manager_url.empty()) {
+        auto enrolled = panopticon::linux_agent::load_enrolled_identity(config.identity_path);
+        if (!succeeded(enrolled)) {
+            std::fprintf(stderr, "panopticon-sensord: delivery disabled: %s
+", std::get<error>(enrolled).message.c_str());
+        } else if (std::get<panopticon::linux_agent::enrolled_identity>(enrolled).host_id != config.host_id) {
+            std::fprintf(stderr, "panopticon-sensord: delivery disabled: the enrolled host id differs from host_id
+");
+        } else if (!sensor::https_poster_built()) {
+            std::fprintf(stderr, "panopticon-sensord: delivery disabled: this build has no libcurl
+");
+        } else {
+            sensor::https_poster_options poster_options;
+            poster_options.manager_url = config.manager_url;
+            poster_options.identity = std::get<panopticon::linux_agent::enrolled_identity>(enrolled);
+            poster_options.ca_bundle = config.ca_bundle;
+            poster = sensor::make_https_poster(std::move(poster_options));
+            delivery = std::make_unique<sensor::uplink>(static_cast<sensor::wal_sink&>(*sink).log(), *poster, sensor::uplink_options{});
+            delivery_runner = std::make_unique<sensor::uplink_runner>(*delivery);
+            delivery_runner->start();
+            std::fprintf(stderr, "panopticon-sensord: delivering to %s
+", config.manager_url.c_str());
+        }
+    }
+
     install_signal_handlers();
     std::vector<std::unique_ptr<sensor::provider>> providers;
     // Preference order within the `process` family: eBPF first (in-kernel exec path, argv and exit
@@ -221,6 +253,17 @@ int main(int argc, char** argv) {
     const auto finished = pipeline.run(stop_requested, deadline);
     if (control) control->stop();
     pipeline.shutdown();
+    if (delivery_runner) {
+        delivery_runner->stop();
+        const auto uplink_metrics = delivery->metrics();
+        std::fprintf(stderr, "panopticon-sensord: uplink %s; batches=%llu acknowledged=%llu through seq %llu retries=%llu refusals=%llu%s%s
+",
+                     sensor::to_string(uplink_metrics.state), static_cast<unsigned long long>(uplink_metrics.batches_sent),
+                     static_cast<unsigned long long>(uplink_metrics.records_acknowledged),
+                     static_cast<unsigned long long>(uplink_metrics.acknowledged_seq), static_cast<unsigned long long>(uplink_metrics.retries),
+                     static_cast<unsigned long long>(uplink_metrics.refusals), uplink_metrics.last_error.empty() ? "" : "; last error: ",
+                     uplink_metrics.last_error.c_str());
+    }
     const auto& metrics = pipeline.metrics();
     std::fprintf(stderr, "panopticon-sensord: stopped; records=%llu events=%llu losses=%llu sink_errors=%llu\n",
                  static_cast<unsigned long long>(metrics.records), static_cast<unsigned long long>(metrics.events),

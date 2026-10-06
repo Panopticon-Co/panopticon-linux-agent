@@ -250,6 +250,7 @@ result<bool> write_ahead_log::open_active(const std::uint64_t first_seq) {
 }
 
 result<std::uint64_t> write_ahead_log::append(const std::uint64_t seq, const std::string_view payload) {
+    const std::lock_guard<std::mutex> lock{mutex_};
     if (seq != next_seq_) return error{error_code::invalid_input, "write-ahead log seq is not contiguous"};
     if (payload.size() > options_.maximum_record_bytes) return error{error_code::resource_limit, "record exceeds maximum size"};
     const auto frame = encode_wal_frame(seq, payload);
@@ -277,6 +278,7 @@ result<std::uint64_t> write_ahead_log::append(const std::uint64_t seq, const std
 }
 
 result<bool> write_ahead_log::sync(const std::uint64_t now_ns, const bool force) {
+    const std::lock_guard<std::mutex> lock{mutex_};
     if (pending_bytes_ == 0U || active_fd_ < 0) {
         last_sync_ns_ = now_ns;
         return false;
@@ -314,6 +316,7 @@ void write_ahead_log::delete_segment(const std::size_t index) {
 
 result<std::vector<wal_record>> write_ahead_log::read(const std::uint64_t from_seq, const std::size_t maximum_records,
                                                       const std::size_t maximum_bytes) {
+    const std::lock_guard<std::mutex> lock{mutex_};
     std::vector<wal_record> records;
     if (from_seq > durable_seq_ || maximum_records == 0U || segments_.empty()) return records;
 
@@ -385,6 +388,7 @@ result<bool> write_ahead_log::persist_cursor(const std::uint64_t seq) {
 }
 
 result<bool> write_ahead_log::acknowledge(std::uint64_t seq) {
+    const std::lock_guard<std::mutex> lock{mutex_};
     if (seq <= acknowledged_seq_) return false;
     if (seq > durable_seq_) return error{error_code::invalid_input, "acknowledgement beyond durable records"};
     if (auto persisted = persist_cursor(seq); !succeeded(persisted)) return persisted;
@@ -394,12 +398,14 @@ result<bool> write_ahead_log::acknowledge(std::uint64_t seq) {
 }
 
 std::vector<wal_loss> write_ahead_log::take_losses() {
+    const std::lock_guard<std::mutex> lock{mutex_};
     auto taken = std::move(losses_);
     losses_.clear();
     return taken;
 }
 
 wal_metrics write_ahead_log::metrics() const {
+    const std::lock_guard<std::mutex> lock{mutex_};
     wal_metrics values;
     for (const auto& current : segments_) values.bytes += current.bytes;
     values.segments = segments_.size();

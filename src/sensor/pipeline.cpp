@@ -65,12 +65,12 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 27U> allowed{
+    constexpr std::array<std::string_view, 30U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
         "file_include", "file_exclude", "enable_fim", "fim_path", "fim_interval_seconds", "enable_hashing", "hash_max_file_bytes",
-        "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events"};
+        "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events", "manager_url", "identity_path", "ca_bundle"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -94,6 +94,9 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     config.host_id = text("host_id").value_or("");
     if (const auto value = text("wal_path"); value.has_value()) config.wal_path = *value;
     if (const auto value = text("proc_root"); value.has_value()) config.proc_root = *value;
+    config.manager_url = text("manager_url").value_or("");
+    if (const auto value = text("identity_path"); value.has_value()) config.identity_path = *value;
+    if (const auto value = text("ca_bundle"); value.has_value()) config.ca_bundle = *value;
     number("wal_quota_bytes", config.wal_quota_bytes, 1ULL << 20U, 1ULL << 40U);
     number("wal_segment_bytes", config.wal_segment_bytes, 1ULL << 16U, 1ULL << 30U);
     number("queue_capacity", config.queue_capacity, 1024U, 1U << 24U);
@@ -159,6 +162,11 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     };
     prefixes("file_include", config.file_include);
     prefixes("file_exclude", config.file_exclude);
+    // Delivery needs an https URL and an identity file together; a private CA must be absolute.
+    if (config.manager_url.empty() != config.identity_path.empty()) valid = false;
+    if (!config.manager_url.empty() && config.manager_url.rfind("https://", 0U) != 0U) valid = false;
+    if (!config.identity_path.empty() && !config.identity_path.is_absolute()) valid = false;
+    if (!config.ca_bundle.empty() && !config.ca_bundle.is_absolute()) valid = false;
     if (!valid) return error{error_code::invalid_input, "configuration value is out of range"};
     if (!is_valid_identifier(config.sensor_id) || !is_valid_identifier(config.host_id)) {
         return error{error_code::invalid_input, "sensor_id and host_id are required identifiers"};

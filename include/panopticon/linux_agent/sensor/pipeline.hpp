@@ -24,6 +24,10 @@ struct sensor_config {
     std::string sensor_id;
     std::string host_id;
     std::filesystem::path wal_path{"/var/lib/panopticon/wal"};
+    // Delivery to the Manager. Empty manager_url: records stay in the WAL (collection only).
+    std::string manager_url;                // https:// only
+    std::filesystem::path identity_path;    // enrolled identity file (agent id, host id, bearer token)
+    std::filesystem::path ca_bundle;        // optional private CA for the Manager certificate
     std::uint64_t wal_quota_bytes{256ULL * 1024U * 1024U};
     std::uint64_t wal_segment_bytes{8ULL * 1024U * 1024U};
     std::size_t queue_capacity{65536U};

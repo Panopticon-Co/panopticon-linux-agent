@@ -2,10 +2,12 @@
 
 #include "panopticon/linux_agent/error.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -63,7 +65,9 @@ public:
 
     // The seq the next append must carry. Records embed their seq, so callers serialise with
     // next_seq() and then append.
-    [[nodiscard]] std::uint64_t next_seq() const noexcept { return next_seq_; }
+    // Safe to call from any thread. Every other method takes the log's mutex, so the uplink thread
+    // may read() and acknowledge() while the pipeline thread appends.
+    [[nodiscard]] std::uint64_t next_seq() const noexcept { return next_seq_.load(); }
 
     // Appends one record; `seq` must equal next_seq(). Enforces the quota by dropping the oldest
     // segment (reported via take_losses()); never fails because the log is full.
@@ -98,9 +102,10 @@ private:
     void delete_segment(std::size_t index);
 
     wal_options options_;
+    mutable std::mutex mutex_;
     std::vector<segment> segments_;
     int active_fd_{-1};
-    std::uint64_t next_seq_{1};
+    std::atomic<std::uint64_t> next_seq_{1};
     std::uint64_t durable_seq_{0};
     std::uint64_t acknowledged_seq_{0};
     std::uint64_t pending_bytes_{0};
