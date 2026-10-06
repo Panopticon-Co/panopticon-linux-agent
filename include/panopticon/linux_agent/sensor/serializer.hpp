@@ -76,6 +76,14 @@ struct file_record {
     std::vector<unavailable_field> unavailable;
 };
 
+// A network.* event after the pipeline attached the owning process (if it still exists).
+struct network_record {
+    std::uint64_t time_unix_ns{};
+    provenance source;
+    entity_ptr actor;  // null when no process held the socket when it was looked up
+    raw_network_event network;
+};
+
 class record_serializer {
 public:
     record_serializer(sensor_identity identity, const clock_domain& clock);
@@ -93,6 +101,9 @@ public:
                                             std::uint64_t now_unix_ns) const;
 
     [[nodiscard]] std::string file_event(const file_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+
+    // network.connect / network.accept / network.listen (catalog §4.3).
+    [[nodiscard]] std::string network_event(const network_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
 
     // fim.changed (catalog §4.2). `actor` is the acting process when a file event named the path
     // and the process was still known; otherwise the process is reported as unavailable.

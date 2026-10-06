@@ -361,6 +361,60 @@ std::string record_serializer::file_event(const file_record& record, const std::
     return out.take();
 }
 
+std::string record_serializer::network_event(const network_record& record, const std::uint64_t seq,
+                                             const std::uint64_t observed_unix_ns) const {
+    const auto& net = record.network;
+    json_writer out;
+    begin(out, "event", std::string{"network."} + to_string(net.operation), seq, record.time_unix_ns, observed_unix_ns, record.source);
+    std::vector<unavailable_field> unavailable = net.unavailable;
+    if (record.actor) {
+        out.key("process");
+        write_process(out, *record.actor);
+        out.end_object();
+    } else {
+        out.key("process").begin_object();
+        if (net.pid != 0U) out.field("pid", net.pid);
+        out.end_object();
+        if (net.pid != 0U) unavailable.push_back({"process", unavailable_reason::process_exited});
+    }
+    out.key("network").begin_object();
+    out.field("transport", net.protocol);
+    out.field("family", net.family == "inet" ? "ipv4" : "ipv6");
+    out.field("direction", net.operation == network_operation::connect  ? "outbound"
+                           : net.operation == network_operation::accept ? "inbound"
+                                                                        : "listen");
+    out.key("local").begin_object();
+    out.field("ip", net.local_address);
+    out.field("port", static_cast<std::uint32_t>(net.local_port));
+    out.end_object();
+    if (net.operation != network_operation::listen) {
+        out.key("remote").begin_object();
+        out.field("ip", net.remote_address);
+        out.field("port", static_cast<std::uint32_t>(net.remote_port));
+        out.end_object();
+    }
+    const auto& far_end = net.operation == network_operation::listen ? net.local_address : net.remote_address;
+    const bool loopback = far_end.rfind("127.", 0U) == 0U || far_end == "::1";
+    out.key("tags").begin_array();
+    if (loopback) out.value("loopback");
+    out.end_array();
+    out.field("state", net.state);
+    out.field("socket_inode", net.inode);
+    out.field("uid", net.uid);
+    if (net.holders > 1U) out.field("holders", net.holders);
+    out.end_object();
+    out.key("unavailable").begin_array();
+    for (const auto& field : unavailable) {
+        out.begin_object();
+        out.field("field", field.field);
+        out.field("reason", to_string(field.reason));
+        out.end_object();
+    }
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::hash_computed(const hash_result& result, const std::uint64_t seq, const std::uint64_t now_unix_ns) const {
     json_writer out;
     begin(out, "event", "hash.computed", seq, now_unix_ns, now_unix_ns, {"hash", "FSSCAN", confidence::observed});

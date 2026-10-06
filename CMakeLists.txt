@@ -84,6 +84,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/wal.cpp
         src/sensor/netlink_proc.cpp
         src/sensor/fanotify_file.cpp
+        src/sensor/sockdiag_network.cpp
         src/sensor/ebpf_process.cpp
         src/sensor/host_state.cpp
         src/sensor/persistence.cpp
@@ -151,6 +152,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_options(panopticon-fim-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-fim-tests PRIVATE panopticon-sensor-core)
         add_test(NAME panopticon-fim-tests COMMAND panopticon-fim-tests)
+        add_executable(panopticon-network-tests tests/network_tests.cpp)
+        target_compile_options(panopticon-network-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(panopticon-network-tests PRIVATE panopticon-sensor-core)
+        add_test(NAME panopticon-network-tests COMMAND panopticon-network-tests)
         add_executable(panopticon-hash-tests tests/hash_tests.cpp)
         target_compile_options(panopticon-hash-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-hash-tests PRIVATE panopticon-sensor-core)

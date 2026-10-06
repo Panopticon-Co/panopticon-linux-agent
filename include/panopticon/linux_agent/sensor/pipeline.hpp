@@ -33,6 +33,7 @@ struct sensor_config {
     bool collect_environment{true};
     bool enable_ebpf{true};  // false: skip the eBPF provider; netlink_proc and procfs only
     bool enable_file_events{true};  // false: no fanotify file telemetry
+    bool enable_network_events{true};  // false: no socket telemetry (sock_diag)
     std::vector<std::string> file_include;  // empty: the built-in persistence/credential/binary/staging set
     std::vector<std::string> file_exclude;  // added to the built-in exclusions
     // File-integrity monitoring of the persistence catalog. Off in the struct so embedders and
@@ -139,6 +140,7 @@ private:
     // entity graph.
     void process_record(const raw_record& record, std::uint64_t observed_ns);
     result<bool> emit_file_event(const raw_record& record, const raw_file_event& file, std::uint64_t observed_ns);
+    result<bool> emit_network_event(const raw_record& record, const raw_network_event& network, std::uint64_t observed_ns);
     result<bool> emit_loss(loss_report report);
     result<bool> emit_health(std::uint64_t now_ns);
     result<bool> emit_process_state(std::uint64_t now_ns);

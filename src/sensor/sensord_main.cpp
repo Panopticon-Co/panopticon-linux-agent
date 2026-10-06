@@ -12,6 +12,7 @@
 #include "panopticon/linux_agent/sensor/fanotify_file.hpp"
 #include "panopticon/linux_agent/sensor/netlink_proc.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
+#include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -184,6 +185,7 @@ int main(int argc, char** argv) {
         if (!control_socket.empty()) file_options.filter.exclude.push_back(std::filesystem::path{control_socket}.parent_path().string());
         providers.push_back(std::make_unique<sensor::fanotify_file_provider>(std::move(file_options)));
     }
+    if (config.enable_network_events) providers.push_back(std::make_unique<sensor::sockdiag_network_provider>());
     sensor::sensor_pipeline pipeline{config, identity, clock, *sink, std::move(providers)};
     if (auto started = pipeline.start(); !succeeded(started)) {
         std::fprintf(stderr, "panopticon-sensord: start: %s\n", std::get<error>(started).message.c_str());

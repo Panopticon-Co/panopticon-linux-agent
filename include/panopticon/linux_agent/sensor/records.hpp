@@ -102,8 +102,33 @@ struct raw_file_event {
     std::vector<unavailable_field> unavailable;
 };
 
+enum class network_operation : std::uint8_t {
+    connect,  // an outbound connection was seen (TCP connect, connected UDP socket)
+    accept,   // an inbound connection was seen on a local listening port
+    listen,   // a socket started listening (TCP) or was bound (UDP)
+};
+[[nodiscard]] const char* to_string(network_operation value) noexcept;
+
+// A socket observed by a network provider. The owner is only a pid here; the pipeline resolves
+// it against the entity graph. `pid` is 0 when no process held the socket when it was looked up.
+struct raw_network_event {
+    network_operation operation{network_operation::connect};
+    std::string protocol;  // tcp, udp
+    std::string family;    // inet, inet6
+    std::string local_address;
+    std::uint16_t local_port{};
+    std::string remote_address;  // empty for listeners
+    std::uint16_t remote_port{};
+    std::string state;  // kernel TCP state name, e.g. established
+    std::uint64_t inode{};
+    std::uint32_t uid{};
+    std::uint32_t pid{};
+    std::uint32_t holders{};  // processes holding the socket (a forked server shares it)
+    std::vector<unavailable_field> unavailable;
+};
+
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
-                                 raw_session_change, raw_file_event>;
+                                 raw_session_change, raw_file_event, raw_network_event>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

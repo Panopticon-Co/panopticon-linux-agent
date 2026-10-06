@@ -754,6 +754,76 @@ void test_pipeline_enriches_file_events() {
     }
 }
 
+void test_pipeline_enriches_network_events() {
+    const auto root = fresh_directory("netproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "curl", 500U, "/usr/bin/curl", {"curl", "https://example.com"}}.write(root);
+    const auto make = [](const network_operation operation, const std::uint32_t pid) {
+        raw_network_event event;
+        event.operation = operation;
+        event.protocol = "tcp";
+        event.family = "inet";
+        event.local_address = "10.0.0.5";
+        event.local_port = operation == network_operation::connect ? 51000U : 8080U;
+        if (operation != network_operation::listen) {
+            event.remote_address = "93.184.216.34";
+            event.remote_port = 443U;
+        }
+        event.state = operation == network_operation::listen ? "listen" : "established";
+        event.inode = 12345U;
+        event.uid = 1000U;
+        event.pid = pid;
+        event.holders = pid == 100U ? 2U : 0U;
+        if (pid == 0U) event.unavailable.push_back({"process", unavailable_reason::process_exited});
+        return record_of(event);
+    };
+    std::vector<raw_record> script{make(network_operation::connect, 100U), make(network_operation::listen, 0U),
+                                   make(network_operation::accept, 4242U)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script, 0U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    const auto find = [&](const std::string_view type) {
+        const auto found = std::find_if(lines.begin(), lines.end(), [&](const std::string& line) {
+            return contains(line, std::string{"\"type\":\""} + std::string{type} + "\"");
+        });
+        require(found != lines.end(), std::string{"record present: "} + std::string{type});
+        return *found;
+    };
+    const auto connect = find("network.connect");
+    require(contains(connect, "\"name\":\"curl\"") && contains(connect, "\"entity_id\":\""), "owner resolved from the entity graph");
+    require(contains(connect, "\"transport\":\"tcp\"") && contains(connect, "\"family\":\"ipv4\"") &&
+                contains(connect, "\"direction\":\"outbound\"") && contains(connect, "\"local\":{\"ip\":\"10.0.0.5\",\"port\":51000}") &&
+                contains(connect, "\"remote\":{\"ip\":\"93.184.216.34\",\"port\":443}") && contains(connect, "\"tags\":[]") && contains(connect, "\"socket_inode\":12345") &&
+                contains(connect, "\"holders\":2"),
+            "endpoints, direction, socket and shared holders");
+    require(contains(connect, "\"mechanism\":\"CNPROC\""), "the record carries the provider provenance it was given");
+    const auto listen = find("network.listen");
+    require(contains(listen, "\"direction\":\"listen\"") && !contains(listen, "\"remote\":") &&
+                contains(listen, "{\"field\":\"process\",\"reason\":\"process_exited\"}"),
+            "a listener has no remote end and an unattributed owner is reported");
+    const auto accept = find("network.accept");
+    require(contains(accept, "\"direction\":\"inbound\"") && contains(accept, "{\"field\":\"process\",\"reason\":\"process_exited\"}") &&
+                contains(accept, "\"pid\":4242"),
+            "an owner that left the graph is named by pid and flagged");
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "seq stays contiguous with network records");
+    }
+}
+
 void test_pipeline_reports_integrity_changes() {
     const auto proc = fresh_directory("fimproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
@@ -999,6 +1069,10 @@ void test_sensor_config_is_strict() {
     const auto& files = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_file_events=false\nfile_include=/etc, /opt/app\nfile_exclude=/etc/ssl\n"), "file keys");
     require(!files.enable_file_events && files.file_include == std::vector<std::string>{"/etc", "/opt/app"} && files.file_exclude == std::vector<std::string>{"/etc/ssl"}, "file telemetry keys parse");
     require(value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "defaults").enable_file_events, "file telemetry is on by default");
+    require(value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "defaults").enable_network_events, "network telemetry is on by default");
+    require(!value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_network_events=false\n"), "network off").enable_network_events,
+            "network telemetry can be disabled");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_network_events=maybe\n")), "non-boolean enable_network_events rejected");
     const auto& integrity = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nwal_path=/data/wal\n"), "fim defaults");
     require(integrity.enable_fim && integrity.fim_path == "/data/fim.baseline" && integrity.fim_interval_seconds == 300U, "FIM is on by default, next to the WAL");
     const auto& tuned = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_fim=false\nfim_path=/x/b\nfim_interval_seconds=60\n"), "fim keys");
@@ -1063,6 +1137,7 @@ int main() {
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);
+    run("pipeline_enriches_network_events", test_pipeline_enriches_network_events);
     run("pipeline_reports_integrity_changes", test_pipeline_reports_integrity_changes);
     run("pipeline_hashes_executed_images", test_pipeline_hashes_executed_images);
     run("provider_family_prefers_first_and_falls_back", test_provider_family_prefers_first_and_falls_back);
