@@ -33,6 +33,11 @@ public:
         while (options_.manager_url.size() > 8U && options_.manager_url.back() == '/') options_.manager_url.pop_back();
         endpoint_ = options_.manager_url + "/api/v2/linux-endpoint/records";
     }
+    ~https_poster() override {
+        if (handle_ != nullptr) curl_easy_cleanup(handle_);
+    }
+    https_poster(const https_poster&) = delete;
+    https_poster& operator=(const https_poster&) = delete;
 
     post_response post(const std::string& batch_id, const std::string_view ndjson) override {
         post_response result;
@@ -46,7 +51,13 @@ public:
             result.detail = "cannot initialise libcurl";
             return result;
         }
-        CURL* handle = curl_easy_init();
+        // One handle for the life of the poster, so that libcurl keeps the TLS connection alive between
+        // batches. A handle per request cost a TCP and TLS handshake for every batch, one to a few records
+        // each while the machine is quiet (measured: 728 connections in 4 minutes, libcrypto 13% of the
+        // sensor CPU). Options are set on every request; the connection cache survives that.
+        const std::lock_guard<std::mutex> lock{mutex_};
+        if (handle_ == nullptr) handle_ = curl_easy_init();
+        CURL* handle = handle_;
         if (handle == nullptr) {
             result.detail = "cannot allocate an HTTPS handle";
             return result;
@@ -72,16 +83,21 @@ public:
         curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, options_.timeout_seconds);
         curl_easy_setopt(handle, CURLOPT_TIMEOUT, options_.timeout_seconds);
         curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(handle, CURLOPT_TCP_KEEPALIVE, 1L);
+        curl_easy_setopt(handle, CURLOPT_TCP_KEEPIDLE, 30L);
+        curl_easy_setopt(handle, CURLOPT_TCP_KEEPINTVL, 15L);
         curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, capture);
         curl_easy_setopt(handle, CURLOPT_WRITEDATA, &buffer);
         const auto code = curl_easy_perform(handle);
         long status = 0;
         curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
         curl_slist_free_all(headers);
-        curl_easy_cleanup(handle);
 
         result.http_status = status;
         if (code != CURLE_OK) {
+            // Start the next attempt from a clean handle and a new connection.
+            curl_easy_cleanup(handle_);
+            handle_ = nullptr;
             result.status = post_status::retry;
             result.detail = std::string{"transport: "} + curl_easy_strerror(code);
             return result;
@@ -102,6 +118,8 @@ public:
 private:
     https_poster_options options_;
     std::string endpoint_;
+    std::mutex mutex_;
+    CURL* handle_{nullptr};
 };
 
 #else
