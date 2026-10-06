@@ -86,8 +86,9 @@ never repeat the action.
   to schema "1" and must be fixed before schema 2 is used with it.
 * A strict clock check is a real operational dependency: a VM clock 27 s behind the Manager
   host produced `not_yet_valid` for every command in the first live run. The gate is kept.
-* **Known gaps.** Commands are authenticated by TLS plus the enrolled identity; there is no
-  per-command signature, so a compromised Manager channel can still request any permitted action.
+* **Known gaps.** Per-command authorization is ADR 025 (signed commands, pinned revocable keys); a
+  sensor configured with `response_allow_unsigned=true` still relies on TLS plus the enrolled identity
+  alone, and the Manager does not yet sign (proposal in ADR 025).
   Schema "1" has no `boot_id`; schema 2 closes that for process actions, but binding is required
   only when `response_require_boot_binding=true` (off by default until Manager issues schema 2 to
   Linux everywhere). There is no

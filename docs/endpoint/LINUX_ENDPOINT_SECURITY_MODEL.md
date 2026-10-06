@@ -25,7 +25,7 @@ maps; systemd units; the rollback copy.
 
 | # | Threat | Control | Residual risk |
 | --- | --- | --- | --- |
-| T1 | Forged or replayed commands | Agent/host binding, boot binding for process targets (schema 2), expiry, skew, single-use durable ledger **[built and live-verified, ADR 024 / platform ADR 0008]**; per-command signature **[not built; platform ADR 0013]** | Manager signing-key compromise |
+| T1 | Forged or replayed commands | Agent/host binding, boot binding for process targets (schema 2), expiry, skew, single-use durable ledger **[built and live-verified, ADR 024 / platform ADR 0008]**; per-command ES256 signature with pinned, revocable keys **[built endpoint-side and live-verified, ADR 025; the Manager does not sign yet, platform ADR 0013]** | Manager signing-key compromise |
 | T2 | Manager impersonation | CA pinning; no verification bypass in release builds | CA compromise |
 | T3 | Unprivileged local process reaches helper sockets | Root-only socket directory + `SO_PEERCRED` + fixed opcodes | – |
 | T4 | Path manipulation in file actions (symlink swap, `..`, magic links) | `openat2` with `RESOLVE_NO_SYMLINKS \| RESOLVE_NO_MAGICLINKS`; `(dev, ino)` re-verified before acting | Pre-5.6 kernels use an `O_NOFOLLOW` component walk |
