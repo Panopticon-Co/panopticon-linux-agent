@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# Real-kernel chaos scenarios for the sensor's WAL, uplink and recovery paths (test plan section 5).
+#
+# usage: sudo tests/chaos/run_chaos.sh [scenario ...]        (default: every scenario)
+#   scenarios: baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt
+#
+# Needs root (eBPF process provider), python3, openssl and a built build/panopticon-sensord.
+# Everything lives under $CHAOS_DIR (default /tmp/chaos). A fake Manager (tests/chaos/fake_manager.py)
+# stands in for the real one so that faults can be injected; analyze.py checks what it stored.
+# Providers other than the process provider are off so the only load is the load we generate.
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+HERE=$ROOT/tests/chaos
+SENSORD=${SENSORD:-$ROOT/build/panopticon-sensord}
+CTL=${CTL:-$ROOT/build/panopticon-ctl}
+W=${CHAOS_DIR:-/tmp/chaos}
+PORT=${CHAOS_PORT:-18553}
+TOKEN=chaos-token-0123456789abcdef
+FAILED=0
+RESULTS=()
+
+say() { printf '[chaos] %s\n' "$*"; }
+verdict() { # name status detail
+  RESULTS+=("$2  $1  $3")
+  [ "$2" = FAIL ] && FAILED=1
+  say "$2 $1 $3"
+}
+
+setup() {
+  pkill -INT -f panopticon-sensord 2>/dev/null; sleep 1; pkill -9 -f panopticon-sensord 2>/dev/null
+  umount "$W/small" 2>/dev/null
+  rm -rf "$W"; mkdir -p "$W"; chmod 755 "$W"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
+    -keyout "$W/key.pem" -out "$W/cert.pem" >/dev/null 2>&1 || { say "openssl failed"; exit 2; }
+  HOSTID=$(tr -d '\n-' </etc/machine-id)
+  printf 'chaos-agent\n%s\n%s\n' "$HOSTID" "$TOKEN" >"$W/identity.json"; chmod 600 "$W/identity.json"
+}
+
+write_conf() { # extra lines on stdin
+  {
+    echo "sensor_id=chaos-sensor"
+    echo "host_id=$HOSTID"
+    echo "wal_path=${WAL:-$W/wal}"
+    echo "manager_url=https://127.0.0.1:$PORT"
+    echo "identity_path=$W/identity.json"
+    echo "ca_bundle=$W/cert.pem"
+    echo "health_interval_seconds=${HEALTH:-5}"
+    echo "state_interval_seconds=3600"
+    echo "enable_file_events=false"
+    echo "enable_network_events=false"
+    echo "enable_auth_events=false"
+    echo "enable_kernel_events=false"
+    echo "enable_security_events=false"
+    echo "enable_sensitive_file_events=false"
+    echo "enable_fim=false"
+    echo "enable_hashing=false"
+    cat
+  } >"$W/sensor.conf"
+}
+
+reset_run() { # fresh store, WAL and mode
+  stop_sensor; stop_manager
+  rm -rf "$W/wal" "$W/store.ndjson" "$W/mode" "$W/sensord.log"
+  echo ok >"$W/mode"
+}
+
+start_manager() {
+  python3 "$HERE/fake_manager.py" --port "$PORT" --cert "$W/cert.pem" --key "$W/key.pem" --store "$W/store.ndjson" \
+    --mode-file "$W/mode" --token "$TOKEN" >>"$W/manager.log" 2>&1 &
+  MGR=$!
+  for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && return 0; sleep 0.1; done
+  say "manager did not start"; return 1
+}
+stop_manager() {
+  if [ -n "${MGR:-}" ]; then kill -9 "$MGR" 2>/dev/null; wait "$MGR" 2>/dev/null; fi
+  MGR=
+}
+
+start_sensor() {
+  "$SENSORD" --config "$W/sensor.conf" --control-socket "$W/ctl.sock" >>"$W/sensord.log" 2>&1 &
+  SENSOR=$!
+  for _ in $(seq 1 100); do [ -S "$W/ctl.sock" ] && return 0; sleep 0.1; done
+  say "sensor did not come up"; tail -5 "$W/sensord.log"; return 1
+}
+stop_sensor() { # graceful (never signal pid 0: that is the whole process group)
+  if [ -n "${SENSOR:-}" ]; then
+    kill -INT "$SENSOR" 2>/dev/null
+    for _ in $(seq 1 100); do kill -0 "$SENSOR" 2>/dev/null || break; sleep 0.1; done
+    kill -9 "$SENSOR" 2>/dev/null; wait "$SENSOR" 2>/dev/null
+  fi
+  SENSOR=; rm -f "$W/ctl.sock"
+}
+kill_sensor() {
+  if [ -n "${SENSOR:-}" ]; then kill -9 "$SENSOR" 2>/dev/null; wait "$SENSOR" 2>/dev/null; fi
+  SENSOR=; rm -f "$W/ctl.sock"
+}
+alive() { [ -n "${SENSOR:-}" ] && kill -0 "$SENSOR" 2>/dev/null; }
+
+status() { "$CTL" --socket "$W/ctl.sock" status 2>/dev/null; }
+# field of the status reply, e.g. status_field wal.durable_seq
+status_field() {
+  status | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+d = d.get("result", d) if isinstance(d, dict) else d
+for part in sys.argv[1].split("."):
+    d = d.get(part) if isinstance(d, dict) else None
+print("" if d is None else d)' "$1"
+}
+
+# Waits until everything durable has been acknowledged (health records keep arriving, so allow a few).
+wait_drained() { # timeout seconds
+  local limit=${1:-60} d a
+  for _ in $(seq 1 "$limit"); do
+    d=$(status_field wal.durable_seq); a=$(status_field wal.acknowledged_seq)
+    if [ -n "$d" ] && [ -n "$a" ] && [ $((d - a)) -le 8 ]; then return 0; fi
+    sleep 1
+  done
+  say "not drained: durable=${d:-?} acknowledged=${a:-?}"; return 1
+}
+
+# Spawns short-lived processes for N seconds (each is a fork, exec and exit for the process provider).
+load() {
+  local seconds=$1 pause=${2:-0}
+  (
+    end=$((SECONDS + seconds))
+    while [ $SECONDS -lt $end ]; do /bin/true; /bin/true; /bin/true; [ "$pause" != 0 ] && sleep "$pause"; done
+  ) &
+  LOADPID=$!
+}
+wait_load() { [ -n "${LOADPID:-}" ] && wait "$LOADPID" 2>/dev/null; }
+
+analyze() { python3 "$HERE/analyze.py" "$W/store.ndjson" --json "$@"; }
+jfield() { python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[sys.argv[1]])' "$1"; }
+
+# ---------------------------------------------------------------- scenarios
+
+scenario_baseline() {
+  reset_run; write_conf </dev/null; start_manager && start_sensor || return
+  load 15 0.01; wait_load; wait_drained 30
+  local out; out=$(analyze); local rc=$?
+  stop_sensor
+  verdict baseline "$([ $rc = 0 ] && [ "$(echo "$out" | jfield stored)" -gt 100 ] && echo PASS || echo FAIL)" \
+    "stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing)"
+}
+
+scenario_kill9() {
+  reset_run; write_conf </dev/null; start_manager && start_sensor || return
+  load 70 0.005
+  local kills=0
+  for _ in $(seq 1 14); do
+    sleep $((2 + RANDOM % 4)); kill_sensor; kills=$((kills + 1)); sleep 0.3; start_sensor || break
+  done
+  wait_load; wait_drained 60
+  local out; out=$(analyze); local rc=$?
+  stop_sensor
+  say "kill9 detail: $(echo "$out" | jfield loss_records)"
+  verdict kill9 "$([ $rc = 0 ] && echo PASS || echo FAIL)" \
+    "kills=$kills stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported) conflicts=$(echo "$out" | jfield conflicts)"
+}
+
+scenario_outage() {
+  # Short outage under the quota: nothing may be lost. Long outage over a small quota: the gap
+  # must equal what the loss records report.
+  reset_run; write_conf <<EOF
+wal_quota_bytes=16777216
+wal_segment_bytes=262144
+EOF
+  start_manager && start_sensor || return
+  load 10 0.02; wait_load; wait_drained 30
+  local before; before=$(analyze | jfield stored)
+  stop_manager
+  load 6 0.05; wait_load; sleep 2
+  start_manager; wait_drained 60
+  local out; out=$(analyze); local rc=$?
+  verdict outage-short "$([ $rc = 0 ] && [ "$(echo "$out" | jfield missing)" = 0 ] && [ "$(echo "$out" | jfield stored)" -gt "$before" ] && echo PASS || echo FAIL)" \
+    "before=$before stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing)"
+  stop_manager
+  sed -i 's/^wal_quota_bytes=.*/wal_quota_bytes=2097152/' "$W/sensor.conf"
+  stop_sensor; start_sensor || return           # a smaller quota takes a restart
+  load 25 0; wait_load; sleep 2
+  start_manager; wait_drained 90
+  out=$(analyze); rc=$?
+  say "outage-long losses: $(echo "$out" | jfield loss_records) ranges=$(echo "$out" | jfield missing_ranges)"
+  stop_sensor
+  verdict outage-long "$([ $rc = 0 ] && [ "$(echo "$out" | jfield wal_loss_reported)" -gt 0 ] && echo PASS || echo FAIL)" \
+    "stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported)"
+}
+
+ackloss_case() { # name mode [gap_ok]: a gap is acceptable only when it is accounted (the analyzer fails a silent one)
+  reset_run; write_conf </dev/null; start_manager && start_sensor || return
+  load 6 0.02; wait_load; wait_drained 30
+  echo "$2" >"$W/mode"
+  load 10 0.02; wait_load; sleep 12
+  echo ok >"$W/mode"
+  wait_drained 60
+  local out; out=$(analyze); local rc=$?
+  local retries; retries=$(status_field delivery.retries); local refusals; refusals=$(status_field delivery.refusals)
+  local quarantined; quarantined=$(status_field delivery.records_quarantined)
+  stop_sensor
+  local gap_ok=${3:-no} verdict_now=FAIL
+  if [ $rc = 0 ] && { [ "$gap_ok" = yes ] || [ "$(echo "$out" | jfield missing)" = 0 ]; }; then verdict_now=PASS; fi
+  verdict "$1" "$verdict_now" \
+    "stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) accounted=$(echo "$out" | jfield accounted) conflicts=$(echo "$out" | jfield conflicts) retries=$retries refusals=$refusals quarantined=$quarantined"
+}
+scenario_ackloss() { ackloss_case ackloss "drop_ack 6"; }
+scenario_badack() { ackloss_case badack "bad_ack"; }
+scenario_http503() { ackloss_case http503 "http503"; }
+scenario_rejected() { ackloss_case rejected "reject 3" yes; }
+scenario_slowack() { ackloss_case slowack "slow 3"; }
+
+scenario_diskfull() {
+  reset_run
+  mkdir -p "$W/small"; mount -t tmpfs -o size=2m tmpfs "$W/small"
+  WAL=$W/small/wal write_conf <<EOF
+wal_quota_bytes=67108864
+wal_segment_bytes=262144
+EOF
+  start_manager && start_sensor || { umount "$W/small"; return; }
+  echo http503 >"$W/mode"            # nothing is acknowledged, so nothing is freed
+  load 20 0; wait_load; sleep 3
+  local alive=no; alive && alive=yes
+  local errors; errors=$(status_field totals.sink_errors); local health; health=$(status_field status)
+  say "diskfull while full: alive=$alive sink_errors=$errors status=$health free=$(df -k "$W/small" | tail -1 | awk '{print $4}')k"
+  mount -o remount,size=64m "$W/small"; echo ok >"$W/mode"
+  load 6 0.02; wait_load; wait_drained 60
+  local out; out=$(analyze); local rc=$?
+  local errors_after; errors_after=$(status_field totals.sink_errors)
+  local accounted; accounted=$(echo "$out" | jfield other_loss_reported)
+  stop_sensor; umount "$W/small"
+  local ok=FAIL
+  [ "$alive" = yes ] && [ "${errors:-0}" -gt 0 ] && [ $rc = 0 ] && [ "$(echo "$out" | jfield write_failed_reported)" -gt 0 ] && ok=PASS
+  verdict diskfull "$ok" "alive=$alive sink_errors=$errors->$errors_after stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) write_failed_reported=$(echo "$out" | jfield write_failed_reported)"
+}
+
+scenario_clock() {
+  reset_run; write_conf </dev/null; start_manager && start_sensor || return
+  command -v timedatectl >/dev/null && timedatectl set-ntp false 2>/dev/null
+  local base; base=$(date +%s)
+  load 30 0.02
+  sleep 5; date -s "@$((base + 172800))" >/dev/null     # two days forward
+  sleep 8; date -s "@$((base - 86400 + 14))" >/dev/null  # then a day behind the start
+  sleep 8; date -s "@$((base + 28))" >/dev/null          # then back to the right time
+  wait_load; wait_drained 60
+  local alive=no; alive && alive=yes
+  command -v timedatectl >/dev/null && timedatectl set-ntp true 2>/dev/null
+  local out; out=$(analyze); local rc=$?
+  stop_sensor
+  # Events already queued when the clock steps are converted with the new offset (a few dozen at this load); many more than that with event time far from
+  # observed time means the sensor did not re-base its clock (579 before step detection existed).
+  verdict clock "$([ $alive = yes ] && [ $rc = 0 ] && [ "$(echo "$out" | jfield skewed_events)" -le 50 ] && echo PASS || echo FAIL)"     "alive=$alive stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) skewed_events=$(echo "$out" | jfield skewed_events) clock_steps_logged=$(grep -c 'wall clock stepped' "$W/sensord.log")"
+}
+
+scenario_walcorrupt() {
+  reset_run; write_conf </dev/null; start_manager && start_sensor || return
+  echo http503 >"$W/mode"
+  load 12 0.01; wait_load; sleep 1
+  kill_sensor
+  local file; file=$(ls -S "$W"/wal/wal-*.log | head -1)
+  local size; size=$(stat -c %s "$file")
+  say "walcorrupt: overwriting 64 bytes in the middle of $(basename "$file") ($size bytes)"
+  dd if=/dev/urandom of="$file" bs=1 count=64 seek=$((size / 2)) conv=notrunc 2>/dev/null
+  echo ok >"$W/mode"
+  start_sensor || return
+  wait_drained 60
+  local alive=no; alive && alive=yes
+  local out; out=$(analyze); local rc=$?
+  stop_sensor
+  say "walcorrupt losses: $(echo "$out" | jfield loss_records)"
+  verdict walcorrupt "$([ $alive = yes ] && [ $rc = 0 ] && echo PASS || echo FAIL)" \
+    "stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported) conflicts=$(echo "$out" | jfield conflicts)"
+}
+
+# ---------------------------------------------------------------- main
+
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
+[ -x "$SENSORD" ] || { echo "build first: $SENSORD" >&2; exit 2; }
+setup
+SCENARIOS=("$@")
+[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt)
+for name in "${SCENARIOS[@]}"; do
+  say "=== $name"
+  "scenario_$name"
+done
+stop_sensor; stop_manager
+echo; echo "chaos summary"; printf '  %s\n' "${RESULTS[@]}"
+exit $FAILED
