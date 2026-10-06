@@ -85,7 +85,12 @@ std::size_t count_expected_acks(const mnl_nlmsg_batch* batch) {
 // specifically (as opposed to any other socket error) is treated as
 // "processed synchronously, kernel chose not to reply" rather than a
 // failure, only where the caller explicitly opts in.
-bool commit_batch(mnl_nlmsg_batch* batch, bool tolerate_receive_timeout = false) {
+//
+// `receive_timeout_ms`: how long to wait for a reply that has not arrived. A reply, when the kernel makes one, is
+// queued while sendto() is still running, so a delete-only batch (which tolerates a timeout) does not need to wait
+// the full default: the release path uses a short one, and the helper answers the sensor in a fraction of a
+// second instead of after the whole 5 s.
+bool commit_batch(mnl_nlmsg_batch* batch, bool tolerate_receive_timeout = false, long receive_timeout_ms = 5000) {
     mnl_socket* nl = mnl_socket_open(NETLINK_NETFILTER);
     if (nl == nullptr) { std::perror("isolation-ruleset: mnl_socket_open"); return false; }
     if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
@@ -98,7 +103,7 @@ bool commit_batch(mnl_nlmsg_batch* batch, bool tolerate_receive_timeout = false)
     // NLM_F_ACK is now always requested) -- a privileged daemon must never
     // block indefinitely on a netlink call regardless of how the batch was
     // built, so a bounded receive timeout is enforced independently.
-    timeval receive_timeout{.tv_sec = 5, .tv_usec = 0};
+    timeval receive_timeout{.tv_sec = receive_timeout_ms / 1000, .tv_usec = (receive_timeout_ms % 1000) * 1000};
     if (setsockopt(mnl_socket_get_fd(nl), SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout)) < 0) {
         std::perror("isolation-ruleset: setsockopt(SO_RCVTIMEO)");
         mnl_socket_close(nl);
@@ -484,7 +489,7 @@ result<bool> release_isolation_ruleset() {
     nftnl_batch_end(static_cast<char*>(mnl_nlmsg_batch_current(batch)), seq++);
     mnl_nlmsg_batch_next(batch);
 
-    const bool ok = commit_batch(batch, /*tolerate_receive_timeout=*/true);
+    const bool ok = commit_batch(batch, /*tolerate_receive_timeout=*/true, /*receive_timeout_ms=*/500);
     mnl_nlmsg_batch_stop(batch);
     if (!ok) return error{error_code::io_failure, "isolation ruleset could not be released via netlink"};
     return true;
