@@ -80,6 +80,7 @@ foreign BPF detach attempts; binary replacement; downgrade attempt.
 | `panopticon-auth-tests` | unit + hostile input + file behaviour | auth log parser (sshd accepted/failed, key fingerprints, IPv6, sudo/su/pkexec/login, user-name injection and forged success, endpoint and fingerprint validation, both time formats and year inference, cut at every byte, random lines), tailer (starts at the end, partial lines, rotation, truncation, oversize lines, missing file, symlink refused), provider (new lines only, governor count) |
 | `panopticon-audit-tests` | unit + hostile input + real kernel | audit record mapping (login, failed authentication, sudo and su, hex and quoted commands), records that are not events (successful authentication, failed login, other PAM operations, other types), first-key-wins and kernel header over sender text, quote injection, invalid and odd hex, control bytes, bad addresses, datagram decoder (cut at every byte, lying and tiny lengths, oversize, random buffers), uid resolution, and as root a user message sent to the kernel read back through the multicast group |
 | `panopticon-kernel-tests` | unit + hostile input + file behaviour | module and mount tracker (starting state, load, unload, reload under a changed size, new, removed, remounted, re-mounted under a new id, mount over an existing path, super-block options), provider over a fake /proc (probe, one file enough, escaped mount paths, long paths, garbage lines, event budget count, snapshot at the limit is degraded and not diffed) |
+| `panopticon-response-tests` | ground truth (real processes) | pidfd response: dry run, identity mismatch, exited target, SIGTERM and SIGKILL escalation, protected set, PID fallback, tree stop-then-kill with bound, command wrapper error codes |
 | `panopticon-sensor-tests` (S5.2 addition) | integration | `pipeline_reports_integrity_changes`: `fim.baseline` then `fim.changed` with path, field, before/after, actor from the entity graph and `FSSCAN+FANOTIFY`, baseline persisted, `seq` contiguous; FIM config keys strict |
 | `panopticon-linux-agent-core-tests` | unit | pre-existing command/config/isolation tests. Known environmental failure: "regular configuration file must load" fails when the umask is 0002 (the test file is group-writable and correctly rejected); passes with umask 022 |
 
@@ -104,5 +105,6 @@ build/panopticon-network-tests                  # sock_diag network telemetry
 build/panopticon-auth-tests                     # auth log telemetry
 build/panopticon-audit-tests                    # audit multicast telemetry (run as root for the live test)
 build/panopticon-kernel-tests                   # kernel module and mount change telemetry
+build/panopticon-response-tests                 # pidfd process and tree response
 sudo tests/ground_truth/run.sh build            # process model (root, VM)
 ```
