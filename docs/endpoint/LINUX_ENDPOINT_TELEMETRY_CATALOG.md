@@ -265,8 +265,14 @@ carries `command_id`, `correlation_id`, `action`, `outcome` (`succeeded`, `faile
 only when `executed && !dry_run && outcome == succeeded`. The record is audit evidence; the command
 result on the command channel is what moves the Manager's lifecycle.
 
-Not reported: command contents beyond the target, output of `COLLECT_*` actions (not implemented),
-and any command that failed authentication at the TLS layer.
+A collection whose output does not fit the bounded detail sends it first as a `state.<object>`
+snapshot with `snapshot_id` `response-<command_id>` and provenance `{command_channel,
+SOCKDIAG+PROCFS, observed}`; the `response.action` record follows and its detail ends with
+`snapshot=response-<command_id>`. Today that is `COLLECT_NETWORK_CONNECTIONS` → `state.connections`
+(§5). `COLLECT_PROCESS_INFO` fits the detail.
+
+Not reported: command contents beyond the target, output of `COLLECT_FILE` (not implemented), and
+any command that failed authentication at the TLS layer.
 
 ## 5. State records
 
@@ -295,6 +301,7 @@ filesystem root, bound every file (4 MiB) and every list (8192 items, excess fla
 | `interfaces` | `name, mac, operstate, mtu, arphrd_type, addresses[{family, address, prefix}]` (addresses only from the live host) |
 | `mounts` | `mount_id, parent_id, device, root, mount_point, fs_type, source, options[], super_options[], nosuid, noexec, nodev, read_only` |
 | `modules` | `name, size, refcount, state, used_by[]` |
+| `connections` (on `COLLECT_NETWORK_CONNECTIONS` only) | `protocol` (`tcp`, `udp`), `family` (`inet`, `inet6`), `state` (TCP state name; UDP `bound` or `connected`), `local_address, local_port, remote_address, remote_port, uid, inode`, `pid` (lowest holder, or null when the owner scan did not reach it), `holders`. Sorted by protocol, family, local port, addresses, inode; at most 4,096 |
 
 Privacy: the machine-id leaves the host only as a salted SHA-256 prefix; password hashes are
 reduced to `password_state`; DMI serial numbers and the product uuid are not collected; kernel

@@ -46,10 +46,21 @@ never repeat the action.
    `/proc/sys/kernel/random/boot_id`, no newline). The sensor computes its own scope at start; a
    sensor that cannot read a UUID refuses every boot-bound command (`boot_unavailable`). Schema 2
    carries process actions only; file and targetless actions are `invalid_target`.
-7. **Actions today.** `KILL_PROCESS` and `COLLECT_PROCESS_INFO` (bounded name, exe, ppid, uid,
-   threads). `COLLECT_NETWORK_CONNECTIONS`, `COLLECT_FILE`, `QUARANTINE_FILE`, `ISOLATE_HOST` and
-   `RELEASE_HOST_ISOLATION` answer `unsupported_action`. The set of seven is closed; there is no
-   shell action.
+7. **Actions today.** `KILL_PROCESS`, `COLLECT_PROCESS_INFO` (bounded name, exe, ppid, uid,
+   threads) and `COLLECT_NETWORK_CONNECTIONS` (target `{}`). `COLLECT_FILE`, `QUARANTINE_FILE`,
+   `ISOLATE_HOST` and `RELEASE_HOST_ISOLATION` answer `unsupported_action`. The set of seven is
+   closed; there is no shell action. Collection actions change nothing, so they run in `dry_run`
+   too and are not rate limited.
+   **Collection output.** A result `detail` is bounded (400 bytes here, 512 in the contract), so a
+   collection that gathers more sends it as evidence: a `state.<object>` snapshot whose
+   `snapshot_id` is `response-<command_id>`, written to the WAL *before* the `response.action`
+   record, whose `detail` ends with `snapshot=response-<command_id>`. `COLLECT_NETWORK_CONNECTIONS`
+   reads the TCP and UDP tables (IPv4 and IPv6) over NETLINK_SOCK_DIAG and attributes each socket
+   to the lowest pid holding its inode, found by a `/proc/<pid>/fd` scan in a 500 ms budget. It
+   emits `state.connections` (at most 4,096 items, 100 per part); the detail is the count line
+   `tcp_listen=N tcp_established=N tcp_other=N udp=N attributed=A/T`. A socket the scan did not
+   reach has `pid: null`; an exhausted scan adds `connections.pid / budget_exceeded`, a table over
+   the bound adds `connections / truncated`. Nothing is guessed.
 8. **Results are repeatable.** The result id is `res-<command_id>` and the detail is stored in the
    ledger, so a retry after a lost acknowledgement sends the same bytes and the Manager's digest
    idempotency applies. A Manager reply that is not strict JSON is not an acknowledgement.
@@ -67,7 +78,11 @@ never repeat the action.
   trial merge of the Linux and Windows Manager branches): a scope from another boot was
   `REJECTED / boot_mismatch`, a bound collect and a bound kill `SUCCEEDED` (process gone), and an
   unbound schema-1 kill with binding required was `REJECTED / boot_binding_required`; all four
-  `response.action` records were accepted. The Linux Manager branch alone rewrites every command
+  `response.action` records were accepted.
+* `COLLECT_NETWORK_CONNECTIONS` verified live the same day, sensor in `dry_run`: the Manager
+  lifecycle reached `SUCCEEDED`; the Manager stored the `state.connections` snapshot (9 sockets,
+  9 attributed, a test listener on 127.0.0.1:47123 attributed to its real pid) at the sequence
+  number before the `response.action` record that names it. The Linux Manager branch alone rewrites every command
   to schema "1" and must be fixed before schema 2 is used with it.
 * A strict clock check is a real operational dependency: a VM clock 27 s behind the Manager
   host produced `not_yet_valid` for every command in the first live run. The gate is kept.
@@ -76,5 +91,7 @@ never repeat the action.
   Schema "1" has no `boot_id`; schema 2 closes that for process actions, but binding is required
   only when `response_require_boot_binding=true` (off by default until Manager issues schema 2 to
   Linux everywhere). There is no
-  nonce beyond the command id and the ledger. Five actions are not implemented. Behaviour under a
+  nonce beyond the command id and the ledger. Four actions are not implemented. A socket that
+  opens and closes inside the collection is not in the snapshot, and the owner is matched after
+  the table read (a socket handed to another process in between is attributed to the new holder). Behaviour under a
   long Manager outage and ledger loss (disk replaced) are untested.
