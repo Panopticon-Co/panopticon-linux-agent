@@ -89,7 +89,7 @@ before this exec), `previous_name` (`process.rename`), `creds_before` (`process.
 | `size`, `mode`, `uid`, `gid` | | `fstat` on the opened handle |
 | `mtime`, `ctime` | RFC 3339 | |
 | `setuid`, `setgid` | bool | |
-| `hash` | object | `sha256`, `sha1`, `md5`, `status` (`computed`, `pending`, `too_large`, `unreadable`) |
+| `hash` | object | `sha256`, `sha1`, `md5`, `status` (`computed`, `pending`, `too_large`, `unreadable`, `skipped`) |
 | `elf` | object | `class`, `machine`, `type`, `interp` |
 | `package` | object | owning package `name`, `version` |
 
@@ -158,6 +158,7 @@ Event body: `process` (actor, resolved through the entity graph; `{pid}` plus `u
 | --- | --- | --- |
 | `fim.baseline` | the monitor started | `fim {state created/loaded/reset, reason?, items, changes}` where `changes` counts what differed while the sensor was down (each is also reported as `fim.changed`) |
 | `fim.changed` | a persistence item was added, removed or modified | `fim {path, category, change added/removed/modified, fields[] (kind, content, mode, uid, gid, target), before?, after?}` with `process` when a file event named the path |
+| `hash.computed` | an executed image whose exec record carried `hash.status=pending` finished hashing | `process {entity_id, exec_gen, pid}`, `executable {path, dev, inode, size, hash {status, sha256, sha1, md5}}`; join to the exec record on `entity_id` + `exec_gen`. `hash.status` on the exec record: `computed` (cache hit, inline), `pending`, `too_large` (above `hash_max_file_bytes`), `unreadable` (image not identified before the process exited, or not a regular file), `skipped` (queue or waiter limit reached) |
 
 `before` and `after` are `state.persistence` items (below). Provenance `{fim, FSSCAN, observed}`, or `FSSCAN+FANOTIFY` when a file event attributed the change. Without an actor, `unavailable` lists `process / not_supported_by_provider`; an actor that already exited is `process / process_exited`.
 
