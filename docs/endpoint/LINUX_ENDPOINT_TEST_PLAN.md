@@ -52,8 +52,28 @@ DNS packet parser, policy parser.
 
 ## 5. Chaos
 
-`kill -9` mid-write (torn WAL tail), disk full, Manager outage and recovery, memory pressure,
-ring-buffer overflow, forced provider failure (eBPF unavailable → fallback active and reported).
+`tests/chaos/run_chaos.sh` runs the real sensor on a real kernel (root) against
+`tests/chaos/fake_manager.py`, an HTTPS stand-in for the Linux ingest route of the Manager that
+stores what it accepts and injects faults, and `tests/chaos/analyze.py`, which fails on a
+conflicting payload under one seq or on a gap that the sensor did not report as lost. Only the
+process provider runs, so the load is the load the script generates (fork, exec, exit of
+`/bin/true`, about 4 KB a record). Scenarios:
+
+| Scenario | Fault | Pass condition |
+| --- | --- | --- |
+| `baseline` | none | stream contiguous |
+| `kill9` | `kill -9` of the sensor 14 times in 70 s under load | contiguous, no conflicting payloads |
+| `outage` | Manager killed, short (under the WAL quota) then long (over a 2 MiB quota) | short: nothing lost; long: the gap is reported (loss records plus the cumulative `wal.dropped_records` of the newest health record) |
+| `ackloss` | Manager stores a batch then drops the connection, 6 times | duplicates absorbed, contiguous |
+| `badack` / `http503` / `slowack` | acknowledgement that does not add up / 503 / 3 s delay | cursor does not move on a bad answer, delivery resumes, contiguous |
+| `rejected` | Manager rejects one line of a batch, 3 times | records quarantined, gap equals the `manager_rejected` loss |
+| `diskfull` | WAL on a 2 MiB tmpfs that fills, then is grown | sensor alive and degraded, no crash, refused records reported as one `wal` loss with reason `write_failed` |
+| `clock` | wall clock stepped +2 days, then -1 day, then back, NTP off | sensor alive, contiguous, event `time` re-based (few records far from `observed_time`) |
+| `walcorrupt` | 64 random bytes written into the middle of an unacknowledged WAL segment | recovery reports the lost range, no sequence number reused, no conflict |
+
+Not covered yet: power loss with a real page-cache drop (`sysrq-b`), memory pressure, ring-buffer
+overflow, forced provider failure, a long real outage with the real Manager, a full disk under the
+state directory rather than the WAL.
 
 ## 6. Security tests
 

@@ -320,7 +320,12 @@ PATH] <command>` is the client (default `/run/panopticon/sensord.sock`).
   coverage {capability: provider|null}, resources {rss_bytes, cpu_milliseconds, wal_bytes,
   wal_records}, kernel {release, btf, bpf_lsm, ringbuf}}`.
 * `loss`: `loss {stage (kernel, queue, wal, governor, transport), count, by_type{}, detail}`.
-  WAL losses carry the reason in `detail`: `torn_tail`, `corrupt_segment`, `gap`, `quota`.
+  WAL losses carry the reason in `detail`: `torn_tail`, `corrupt_segment`, `gap`, `quota`, and
+  `write_failed` (the WAL refused records, for example a full disk; `by_type.write_failed` is how many;
+  their sequence numbers were never used, so there is no gap in the stream). A loss record that could
+  not be written is kept and written once the WAL accepts records again. After a long quota loss the
+  earlier loss records may themselves have been dropped; the cumulative `health.wal.dropped_records`
+  of the newest health record is the total.
 * The `procfs` provider always appears in `providers[]`: it is the reconciler that backs every
   process capability when no kernel provider is active.
 * `policy`: `policy {version, applied, errors[]}`.

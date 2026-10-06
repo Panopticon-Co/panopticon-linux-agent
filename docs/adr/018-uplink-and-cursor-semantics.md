@@ -62,6 +62,15 @@ blocks collection, and cannot be wedged by one bad record or one bad response.
   commands over this channel, a freshness nonce on the route, retention of Linux records at the
   Manager.
 
+## Addendum: records the sink refuses (S11.1)
+
+Delivery guarantees begin at the WAL, so a record the WAL refuses (disk full, I/O error) never
+reaches the uplink. Chaos testing showed such records were counted only in `sink_errors` and left no
+trace in the stream. They are now counted (`records_unwritten`) and reported as one `loss` record,
+stage `wal`, `by_type.write_failed`, as soon as a write works again; a loss report whose own record
+is refused is kept (bounded, 64) and retried, once a second while the sink keeps failing. Chaos
+evidence: 6,460 refused records reported in a full-disk run.
+
 ## Addendum: delivery states and rejection (S3.3)
 
 A record is OBSERVED, ACCEPTED BY SENSOR, DURABLY COMMITTED (WAL sync), SENT, then ACCEPTED BY
