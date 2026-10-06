@@ -254,6 +254,20 @@ AppArmor `AUDIT` rules, none for SELinux decisions that were granted. All string
 printable. Not reported: the ruleset itself, nftables changes made on a host where the audit
 records are suppressed by an audit rule.
 
+### 4.10 `response.action` events as emitted today (ADR 024)
+
+Provenance `{command_channel, MANAGER_COMMAND, observed}`. One record for every command the sensor
+handled, accepted or refused, linked to the target process entity when one was verified. `response`
+carries `command_id`, `correlation_id`, `action`, `outcome` (`succeeded`, `failed`, `rejected`,
+`indeterminate`), `reason`, `dry_run`, `executed`, and for signal actions `target`
+(`pid`, `start_time_ticks`) and `mode` (`pidfd` or `pid_fallback`), plus `affected` and a bounded
+`detail` equal to the command result's. `executed` means the executor was invoked; the host changed
+only when `executed && !dry_run && outcome == succeeded`. The record is audit evidence; the command
+result on the command channel is what moves the Manager's lifecycle.
+
+Not reported: command contents beyond the target, output of `COLLECT_*` actions (not implemented),
+and any command that failed authentication at the TLS layer.
+
 ## 5. State records
 
 `state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,
