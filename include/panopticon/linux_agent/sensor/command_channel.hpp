@@ -71,7 +71,16 @@ struct endpoint_command {
     std::uint32_t pid{};          // process actions
     std::uint64_t start_ticks{};  // process actions: /proc/<pid>/stat field 22, the identity beside the pid
     std::string path;             // file actions
+    // Schema 2 only: the boot the target was observed in, "boot_" + 64 hex (see linux_boot_digest).
+    // Empty for schema 1, whose process target is bound to a boot only by its start ticks.
+    std::string boot_id;
 };
+
+// The boot scope a schema-2 command names for this host: "boot_" followed by the lowercase hex SHA-256
+// of the kernel's boot id exactly as /proc/sys/kernel/random/boot_id prints it (36 characters, no
+// newline). The Manager derives the same value from `host.boot_id` in this host's records; it is
+// never reconstructed from wall time or uptime. Empty when the kernel boot id is not a UUID.
+[[nodiscard]] std::string linux_boot_digest(std::string_view kernel_boot_id);
 
 // A command that could not be read. `command_id` is set when the id itself was readable, so the
 // Manager can be told this one command was refused instead of retrying it forever.
@@ -107,6 +116,9 @@ struct command_policy {
     // refusing it bounds how long a captured command stays usable.
     std::int64_t maximum_lifetime_seconds{900};
     std::int64_t clock_skew_seconds{30};
+    // Refuse process actions that are not boot-bound (schema 1). Off until the Manager issues schema 2
+    // to Linux endpoints; then a target from a previous boot cannot be acted on by start ticks alone.
+    bool require_boot_binding{false};
     // Changing actions performed in any rolling minute; the next one is refused. A runaway
     // automation cannot take the host apart faster than a person can notice.
     std::size_t maximum_changes_per_minute{6U};
@@ -204,6 +216,7 @@ struct command_outcome {
 struct command_processor_options {
     std::string agent_id;
     std::string host_id;
+    std::string boot_digest;  // linux_boot_digest of the running kernel; empty: schema-2 commands are refused
     command_policy policy;
     std::function<std::int64_t()> now_unix;  // empty: the system clock
     // Called once a command has passed every check and its intent is durably recorded, just before it

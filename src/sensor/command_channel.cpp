@@ -1,5 +1,6 @@
 #include "panopticon/linux_agent/sensor/command_channel.hpp"
 
+#include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/response.hpp"
 #include "panopticon/linux_agent/sensor/clock.hpp"
@@ -167,6 +168,24 @@ std::optional<std::string> string_member(const json_value& object, const char* k
     return std::string{*text};
 }
 
+// "1".."18446744073709551615": no sign, no leading zero, no exponent, no spaces.
+std::optional<std::uint64_t> parse_canonical_uint64(const std::string_view text) noexcept {
+    if (text.empty() || text.size() > 20U || text.front() == '0') return std::nullopt;
+    std::uint64_t value = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9') return std::nullopt;
+        const auto digit = static_cast<std::uint64_t>(c - '0');
+        if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10U) return std::nullopt;
+        value = value * 10U + digit;
+    }
+    return value;
+}
+
+bool boot_digest_ok(const std::string_view text) noexcept {
+    if (text.size() != 69U || text.substr(0U, 5U) != "boot_") return false;
+    return std::all_of(text.begin() + 5, text.end(), [](const char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+}
+
 }  // namespace
 
 parsed_command parse_endpoint_command(const json_value& value) {
@@ -205,7 +224,8 @@ parsed_command parse_endpoint_command(const json_value& value) {
         !command_id_ok(*correlation)) {
         return fail("invalid_envelope");
     }
-    if (!version || *version != "1") return fail("unsupported_schema_version");
+    if (!version || (*version != "1" && *version != "2")) return fail("unsupported_schema_version");
+    const bool boot_bound = *version == "2";
     if (!action_text) return fail("invalid_envelope");
     const auto action = parse_command_action(*action_text);
     if (!action) return fail("unknown_action");
@@ -236,6 +256,23 @@ parsed_command parse_endpoint_command(const json_value& value) {
     switch (*action) {
         case command_action::kill_process:
         case command_action::collect_process_info: {
+            if (boot_bound) {
+                // Schema 2: ticks are a canonical decimal string (the Windows uint64 creation-time form),
+                // and the boot scope is exact. Nothing is coerced.
+                if (!only({"pid", "start_time_ticks", "boot_id"})) return fail("invalid_target");
+                const auto pid = target->find("pid")->as_unsigned();
+                const auto ticks_text = target->find("start_time_ticks")->as_string();
+                const auto boot = target->find("boot_id")->as_string();
+                const auto ticks = ticks_text ? parse_canonical_uint64(*ticks_text) : std::nullopt;
+                if (!pid || *pid == 0U || *pid > std::numeric_limits<std::uint32_t>::max() || !ticks || *ticks == 0U || !boot ||
+                    !boot_digest_ok(*boot)) {
+                    return fail("invalid_target");
+                }
+                command.pid = static_cast<std::uint32_t>(*pid);
+                command.start_ticks = *ticks;
+                command.boot_id = std::string{*boot};
+                break;
+            }
             if (!only({"pid", "start_time_ticks"})) return fail("invalid_target");
             const auto pid = target->find("pid")->as_unsigned();
             const auto ticks = target->find("start_time_ticks")->as_unsigned();
@@ -248,6 +285,7 @@ parsed_command parse_endpoint_command(const json_value& value) {
         }
         case command_action::collect_file:
         case command_action::quarantine_file: {
+            if (boot_bound) return fail("invalid_target");  // schema 2 is a process-target contract
             if (!only({"path"})) return fail("invalid_target");
             const auto path = target->find("path")->as_string();
             if (!path || path->empty() || path->size() > maximum_path_bytes || path->find('\0') != std::string_view::npos) {
@@ -257,10 +295,20 @@ parsed_command parse_endpoint_command(const json_value& value) {
             break;
         }
         default:
-            if (!names.empty()) return fail("invalid_target");
+            if (boot_bound || !names.empty()) return fail("invalid_target");
             break;
     }
     return command;
+}
+
+std::string linux_boot_digest(const std::string_view kernel_boot_id) {
+    if (kernel_boot_id.size() != 36U) return {};
+    for (std::size_t index = 0; index < kernel_boot_id.size(); ++index) {
+        const char c = kernel_boot_id[index];
+        const bool dash = index == 8U || index == 13U || index == 18U || index == 23U;
+        if (dash ? c != '-' : !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return {};
+    }
+    return "boot_" + sha256_hex(kernel_boot_id);
 }
 
 command_poll parse_command_poll(const std::string_view body, const std::size_t maximum_commands) {
@@ -631,6 +679,15 @@ command_outcome command_processor::handle(const endpoint_command& command) {
 
     if (command.agent_id != options_.agent_id || command.host_id != options_.host_id) {
         return refuse(command, "wrong_endpoint", "the command names a different agent or host", true);
+    }
+    if (!command.boot_id.empty()) {
+        if (options_.boot_digest.empty()) return refuse(command, "boot_unavailable", "this endpoint cannot establish its boot identity", true);
+        if (command.boot_id != options_.boot_digest) {
+            return refuse(command, "boot_mismatch", "the target was observed in a different boot of this host", true);
+        }
+    } else if (policy.require_boot_binding &&
+               (command.action == command_action::kill_process || command.action == command_action::collect_process_info)) {
+        return refuse(command, "boot_binding_required", "this endpoint acts only on boot-bound process targets", true);
     }
     if (command.expires_unix <= current) return refuse(command, "expired", "the command had expired before it was handled", true);
     if (command.created_unix > current + policy.clock_skew_seconds) {

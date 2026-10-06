@@ -250,6 +250,8 @@ int main(int argc, char** argv) {
             sensor::command_channel_options channel;
             channel.processor.agent_id = manager_connection->identity.agent_id;
             channel.processor.host_id = config.host_id;
+            channel.processor.boot_digest = sensor::linux_boot_digest(observation.boot_id);
+            channel.processor.policy.require_boot_binding = config.response_require_boot_binding;
             channel.processor.policy.mode = mode;
             channel.processor.policy.allowed.clear();
             for (const auto& name : config.response_actions) {

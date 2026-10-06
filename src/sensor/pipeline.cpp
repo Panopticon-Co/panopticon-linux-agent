@@ -65,14 +65,14 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 38U> allowed{
+    constexpr std::array<std::string_view, 39U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
         "file_include", "file_exclude", "enable_fim", "fim_path", "fim_interval_seconds", "enable_hashing", "hash_max_file_bytes",
         "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events", "enable_security_events", "enable_sensitive_file_events", "manager_url", "identity_path", "ca_bundle",
         "response_mode", "response_actions", "response_poll_seconds", "response_max_lifetime_seconds",
-        "response_max_changes_per_minute", "response_ledger_path"};
+        "response_max_changes_per_minute", "response_ledger_path", "response_require_boot_binding"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -111,6 +111,10 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     if (const auto value = text("collect_environment"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.collect_environment = *value == "true";
+    }
+    if (const auto value = text("response_require_boot_binding"); value.has_value()) {
+        if (*value != "true" && *value != "false") valid = false;
+        config.response_require_boot_binding = *value == "true";
     }
     if (const auto value = text("enable_ebpf"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;

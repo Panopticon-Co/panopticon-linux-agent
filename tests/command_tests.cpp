@@ -54,6 +54,17 @@ std::string envelope(const std::string& id, const std::string& action, const std
 }
 
 const std::string kill_target = "{\"pid\":4242,\"start_time_ticks\":99}";
+// The kernel boot id of the test host, and the schema-2 scope that names it.
+const std::string test_kernel_boot = "a4d9d0e1-c8d8-4a67-a703-bdf6f6f01263";
+const std::string other_kernel_boot = "b4d9d0e1-c8d8-4a67-a703-bdf6f6f01263";
+std::string bound_target(const std::string& boot, const std::string& ticks = "\"99\"") {
+    return "{\"pid\":4242,\"start_time_ticks\":" + ticks + ",\"boot_id\":\"" + boot + "\"}";
+}
+std::string schema2(std::string text) {
+    const std::string from = "\"schema_version\":\"1\"";
+    text.replace(text.find(from), from.size(), "\"schema_version\":\"2\"");
+    return text;
+}
 
 parsed_command parse_one(const std::string& text) {
     std::string why;
@@ -134,7 +145,10 @@ void test_parse_refusals() {
     require(reason(with_script) == "unknown_field", "a script field is refused");
     auto wrong_version = envelope("c1", "KILL_PROCESS", kill_target, "2027-01-15T08:05:00Z");
     wrong_version.replace(wrong_version.find("\"1\""), 3U, "\"2\"");
-    require(reason(wrong_version) == "unsupported_schema_version", "only schema 1 carries a Linux target");
+    require(reason(wrong_version) == "invalid_target", "schema 2 does not take a schema-1 target");
+    auto unknown_version = envelope("c1", "KILL_PROCESS", kill_target, "2027-01-15T08:05:00Z");
+    unknown_version.replace(unknown_version.find("\"1\""), 3U, "\"3\"");
+    require(reason(unknown_version) == "unsupported_schema_version", "schema 3 does not exist");
     require(reason(envelope("c/1", "KILL_PROCESS", kill_target, "2027-01-15T08:05:00Z")) == "invalid_envelope", "an id with a slash");
     require(as_unreadable(parse_one(envelope("c/1", "KILL_PROCESS", kill_target, "2027-01-15T08:05:00Z"))).command_id.empty(),
             "an unusable id names no command");
@@ -312,6 +326,7 @@ struct world {
         command_processor_options options;
         options.agent_id = "agent-1";
         options.host_id = "host-1";
+        options.boot_digest = linux_boot_digest(test_kernel_boot);
         options.policy.mode = mode;
         options.now_unix = [this] { return clock; };
         options.on_accepted = [this](const endpoint_command& command) { accepted.push_back(command.command_id); };
@@ -818,6 +833,78 @@ void test_channel_mixed_batch() {
     require(audit.size() == 3U && audit[1].reason == "wrong_endpoint" && audit[2].reason == "expired", "and its own audit record");
 }
 
+// ---- boot-bound targets (schema 2) ----------------------------------------------------------
+
+void test_boot_bound_commands() {
+    const auto digest = linux_boot_digest(test_kernel_boot);
+    require(digest.size() == 69U && digest.rfind("boot_", 0) == 0U, "boot_ + 64 hex");
+    require(digest == linux_boot_digest(test_kernel_boot), "deterministic");
+    require(digest != linux_boot_digest(other_kernel_boot), "another boot, another scope");
+    require(linux_boot_digest("").empty() && linux_boot_digest(test_kernel_boot + "\n").empty() &&
+                linux_boot_digest("A4D9D0E1-C8D8-4A67-A703-BDF6F6F01263").empty() && linux_boot_digest("not-a-uuid").empty(),
+            "only the kernel's exact text form is digested; nothing is normalised into a match");
+
+    const std::string expires = "2027-01-15T08:05:00Z";
+    const auto parsed = as_command(parse_one(schema2(envelope("b1", "KILL_PROCESS", bound_target(digest), expires))));
+    require(parsed.pid == 4242U && parsed.start_ticks == 99U && parsed.boot_id == digest, "a schema-2 kill");
+    const auto max = as_command(parse_one(schema2(envelope("b2", "COLLECT_PROCESS_INFO", bound_target(digest, "\"18446744073709551615\""), expires))));
+    require(max.start_ticks == 18446744073709551615ULL, "the uint64 maximum");
+    const auto legacy = as_command(parse_one(envelope("b3", "KILL_PROCESS", kill_target, expires)));
+    require(legacy.boot_id.empty(), "schema 1 carries no boot scope");
+
+    const auto reason = [&](const std::string& action, const std::string& target) {
+        return as_unreadable(parse_one(schema2(envelope("b9", action, target, expires)))).reason;
+    };
+    for (const char* ticks : {"99", "\"0\"", "\"099\"", "\"+99\"", "\"9e2\"", "\" 99\"", "\"\"", "\"18446744073709551616\"", "\"99999999999999999999\""}) {
+        require(reason("KILL_PROCESS", bound_target(digest, ticks)) == "invalid_target", "ticks must be a canonical positive uint64 string");
+    }
+    require(reason("KILL_PROCESS", bound_target("boot_" + std::string(63U, 'a'))) == "invalid_target", "a short boot scope");
+    require(reason("KILL_PROCESS", bound_target("boot_" + std::string(64U, 'A'))) == "invalid_target", "an upper-case boot scope");
+    require(reason("KILL_PROCESS", bound_target(test_kernel_boot)) == "invalid_target", "a raw kernel boot id is not a scope");
+    require(reason("KILL_PROCESS", kill_target) == "invalid_target", "schema 2 without a boot");
+    require(reason("KILL_PROCESS", "{\"pid\":4242,\"start_time_ticks\":\"99\",\"boot_id\":\"" + digest + "\",\"x\":1}") == "invalid_target",
+            "an extra field");
+    require(reason("COLLECT_FILE", "{\"path\":\"/tmp/x\"}") == "invalid_target", "schema 2 is a process-target contract");
+    require(reason("ISOLATE_HOST", "{}") == "invalid_target", "and has no targetless form");
+
+    world w{"boot"};
+    const auto bound = [&](const std::string& id, const std::string& boot) {
+        return as_command(parse_one(schema2(envelope(id, "KILL_PROCESS", bound_target(boot), zulu(w.clock + 300), zulu(w.clock)))));
+    };
+    const auto ran = w.processor->handle(bound("same", digest));
+    require(ran.outcome == "succeeded" && w.executor.calls.size() == 1U, "the current boot is acted on");
+    const auto other = w.processor->handle(bound("prev", linux_boot_digest(other_kernel_boot)));
+    require(other.reason == "boot_mismatch" && !other.executed && w.executor.calls.size() == 1U, "a target from another boot is refused");
+    require(w.ledger->find("prev")->reason == "boot_mismatch", "and the refusal is remembered");
+    // Boot scope is checked before expiry: a stale-boot command is reported as that, whatever else is wrong.
+    auto stale = bound("prev-exp", linux_boot_digest(other_kernel_boot));
+    stale.expires_unix = w.clock - 1;
+    require(w.processor->handle(stale).reason == "boot_mismatch", "boot scope first");
+
+    // A sensor that could not read its boot id refuses every boot-bound command.
+    const fs::path dir = scratch("boot-unknown");
+    auto ledger = open_ledger(dir / "commands", 16U);
+    fake_executor executor;
+    command_processor_options options;
+    options.agent_id = "agent-1";
+    options.host_id = "host-1";
+    options.policy.mode = response_mode::enforce;
+    options.now_unix = [&] { return w.clock; };
+    command_processor blind{options, *ledger, executor};
+    require(blind.handle(bound("u1", digest)).reason == "boot_unavailable" && executor.calls.empty(), "no boot identity, no boot-bound action");
+
+    // With binding required, schema-1 process targets are refused; non-process actions are unaffected.
+    options.boot_digest = digest;
+    options.policy.require_boot_binding = true;
+    auto ledger2 = open_ledger(dir / "commands2", 16U);
+    command_processor strict{options, *ledger2, executor};
+    require(strict.handle(w.make("s1")).reason == "boot_binding_required", "an unbound kill");
+    require(strict.handle(w.make("s2", "COLLECT_PROCESS_INFO")).reason == "boot_binding_required", "an unbound collect");
+    require(strict.handle(w.make("s3", "ISOLATE_HOST", "{}")).reason == "unsupported_action", "non-process actions are unaffected");
+    require(strict.handle(bound("s4", digest)).outcome == "succeeded", "a bound target runs");
+    fs::remove_all(dir);
+}
+
 // ---- configuration --------------------------------------------------------------------------
 
 void test_configuration() {
@@ -838,6 +925,9 @@ void test_configuration() {
     require(!succeeded(parse_sensor_config(base + "response_ledger_path=/var/../etc/ledger\n")), "a traversing ledger path");
     require(!succeeded(parse_sensor_config("sensor_id=s1\nhost_id=h1\nresponse_mode=enforce\n")), "commands need a Manager to come from");
     require(succeeded(parse_sensor_config("sensor_id=s1\nhost_id=h1\n")), "a collection-only sensor is unchanged");
+    config = parse_sensor_config(base + "response_mode=enforce\nresponse_require_boot_binding=true\n");
+    require(succeeded(config) && std::get<sensor_config>(config).response_require_boot_binding, "boot binding can be required");
+    require(!succeeded(parse_sensor_config(base + "response_require_boot_binding=yes\n")), "a boolean is true or false");
 }
 
 }  // namespace
@@ -873,6 +963,7 @@ int main() {
         {"channel_restart_does_not_rerun", test_channel_restart_does_not_rerun},
         {"channel_failures_and_hostile_replies", test_channel_failures_and_hostile_replies},
         {"channel_mixed_batch", test_channel_mixed_batch},
+        {"boot_bound_commands", test_boot_bound_commands},
         {"configuration", test_configuration},
     };
     int failures = 0;

@@ -62,6 +62,7 @@ struct sensor_config {
     std::uint64_t response_max_lifetime_seconds{900U};
     std::uint64_t response_max_changes_per_minute{6U};
     std::filesystem::path response_ledger_path;  // empty: <wal_path>.commands
+    bool response_require_boot_binding{false};   // refuse schema-1 (unbound) process targets
     std::size_t maximum_args{64U};
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};
