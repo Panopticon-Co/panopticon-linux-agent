@@ -28,6 +28,7 @@ import fake_manager  # noqa: E402
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--cert", required=True)
     parser.add_argument("--key", required=True)
@@ -105,7 +106,7 @@ def main():
                 return self.reply(200, {"result_id": result.get("result_id")})
             return self.reply(404, {"error": "not found"})
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = ThreadingHTTPServer((args.bind, args.port), Handler)
     server.daemon_threads = True
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(args.cert, args.key)
