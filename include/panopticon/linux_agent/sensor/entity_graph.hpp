@@ -1,6 +1,7 @@
 #pragma once
 
 #include "panopticon/linux_agent/sensor/clock.hpp"
+#include "panopticon/linux_agent/sensor/hash_service.hpp"
 #include "panopticon/linux_agent/sensor/process_info.hpp"
 #include "panopticon/linux_agent/sensor/records.hpp"
 
@@ -49,6 +50,9 @@ struct process_event {
     std::optional<process_credentials> creds_before; // process.cred_change
     std::optional<std::string> technique;            // process.inject
     std::vector<unavailable_field> unavailable;      // event-level, in addition to process ones
+    // Filled in by the pipeline (not the graph) for exec and discovery events: the hash of the
+    // executed image when it was already known, or status "pending" when it is being computed.
+    std::optional<file_hash> executable_hash;
 };
 
 struct entity_graph_options {

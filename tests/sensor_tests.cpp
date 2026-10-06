@@ -619,9 +619,14 @@ public:
     std::vector<std::string> capabilities() const override { return {"process.fork", "process.exec", "process.exit"}; }
     std::string probe() override { return {}; }
     result<bool> start(record_queue& queue) override {
+        queue_ = &queue;
         for (auto& record : records_) (void)queue.push(record);
         active_ = true;
         return true;
+    }
+    // Queues more records after start, as a live provider would.
+    void push(std::vector<raw_record> more) {
+        for (auto& record : more) (void)queue_->push(std::move(record));
     }
     void stop() override { active_ = false; }
     provider_health health() const override { return {"scripted", active_ ? "active" : "stopped", "", capabilities(), records_.size(), 0U}; }
@@ -632,6 +637,7 @@ private:
     std::vector<raw_record> records_;
     std::uint64_t governed_{0U};
     bool active_{false};
+    record_queue* queue_{nullptr};
 };
 
 std::vector<std::string> lines_of(std::FILE* stream) {
@@ -801,6 +807,69 @@ void test_pipeline_reports_integrity_changes() {
     }
 }
 
+void test_pipeline_hashes_executed_images() {
+    const auto proc = fresh_directory("hashproc");
+    const auto data = fresh_directory("hashdata");
+    write_file(data / "tool", "abc");
+    const auto exe = (data / "tool").string();
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
+    fake_process{100U, 1U, "bash", 500U, "/usr/bin/bash", {"-bash"}}.write(proc);
+    fake_process{200U, 100U, "tool", 900U, exe, {"tool"}}.write(proc);
+    fake_process{300U, 100U, "tool", 950U, exe, {"tool"}}.write(proc);
+    // Two executions of the same image: the second one is answered from the cache once the first has finished.
+    std::vector<raw_record> first{record_of(raw_fork{100U, 100U, 200U, 200U, std::nullopt}),
+                                  record_of(raw_exec{200U, 200U, std::nullopt, std::nullopt, std::nullopt})};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = proc;
+    config.enable_hashing = true;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    auto script = std::make_unique<scripted_provider>(first);
+    auto* feeder = script.get();
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::move(script));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        const auto deadline = clock_domain::now_monotonic_ns() + 5000000000ULL;
+        std::size_t seen = 0U;
+        while (clock_domain::now_monotonic_ns() < deadline && seen == 0U) {
+            value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{20}), "step");
+            std::fflush(stream);
+            for (const auto& line : lines_of(stream)) {
+                if (contains(line, "\"type\":\"hash.computed\"")) ++seen;
+            }
+            std::fseek(stream, 0, SEEK_END);
+        }
+        require(seen == 1U, "the pending hash is reported");
+        feeder->push({record_of(raw_fork{100U, 100U, 300U, 300U, std::nullopt}), record_of(raw_exec{300U, 300U, std::nullopt, std::nullopt, std::nullopt})});
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{50}), "second exec");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::vector<std::string> execs;
+    for (const auto& line : lines) {
+        if (contains(line, "\"type\":\"process.exec\"")) execs.push_back(line);
+    }
+    require(execs.size() == 2U, "two exec records");
+    require(contains(execs[0], "\"hash\":{\"status\":\"pending\"}"), "first exec: hash pending");
+    const auto computed = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"type\":\"hash.computed\""); });
+    require(computed != lines.end() && contains(*computed, "\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"") &&
+                contains(*computed, "\"sha1\":\"a9993e364706816aba3e25717850c26c9cd0d89d\"") &&
+                contains(*computed, "\"md5\":\"900150983cd24fb0d6963f7d28e17f72\"") &&
+                contains(*computed, "\"entity_id\":\"" + compute_entity_id("host-test", "boot-test", 200U, 900U) + "\"") &&
+                contains(*computed, "\"exec_gen\":1"),
+            "hash.computed joins to the exec by entity and exec_gen");
+    require(contains(execs[1], "\"hash\":{\"status\":\"computed\",\"sha256\":\"ba7816bf") , "second exec: cache hit is inline");
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "seq stays contiguous with hash records");
+    }
+}
+
 void test_pipeline_emits_host_state_parts() {
     const auto proc = fresh_directory("hostproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
@@ -936,6 +1005,13 @@ void test_sensor_config_is_strict() {
     require(!tuned.enable_fim && tuned.fim_path == "/x/b" && tuned.fim_interval_seconds == 60U, "FIM keys parse");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfim_interval_seconds=59\n")), "FIM interval lower bound");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfim_path=relative\n")), "relative FIM path rejected");
+    const auto& hashing = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "hash defaults");
+    require(hashing.enable_hashing && hashing.hash_max_file_bytes == 256ULL * 1024U * 1024U && hashing.hash_bytes_per_second == 64ULL * 1024U * 1024U,
+            "hashing is on by default with a size and rate budget");
+    const auto& hash_tuned = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_hashing=false\nhash_max_file_bytes=1048576\nhash_bytes_per_second=2097152\n"), "hash keys");
+    require(!hash_tuned.enable_hashing && hash_tuned.hash_max_file_bytes == 1048576U && hash_tuned.hash_bytes_per_second == 2097152U, "hash keys parse");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nhash_max_file_bytes=1\n")), "hash size lower bound");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_hashing=2\n")), "non-boolean enable_hashing rejected");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_fim=maybe\n")), "non-boolean enable_fim rejected");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfile_include=relative\n")), "relative file prefix rejected");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nfile_exclude=/etc/../root\n")), "parent traversal in a file prefix rejected");
@@ -988,6 +1064,7 @@ int main() {
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);
     run("pipeline_reports_integrity_changes", test_pipeline_reports_integrity_changes);
+    run("pipeline_hashes_executed_images", test_pipeline_hashes_executed_images);
     run("provider_family_prefers_first_and_falls_back", test_provider_family_prefers_first_and_falls_back);
     run("sensor_config_is_strict", test_sensor_config_is_strict);
     run("record_queue_counts_drops_and_keeps_order", test_record_queue_counts_drops_and_keeps_order);

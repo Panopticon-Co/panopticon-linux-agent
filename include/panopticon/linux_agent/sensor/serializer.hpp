@@ -98,6 +98,9 @@ public:
     // and the process was still known; otherwise the process is reported as unavailable.
     [[nodiscard]] std::string fim_changed(const fim_change& change, const entity_ptr& actor, std::uint64_t seq,
                                           std::uint64_t observed_unix_ns) const;
+    // hash.computed: the content hash of an executed image that was still pending when the
+    // exec record was written. Joined to that record by process.entity_id + exec_gen.
+    [[nodiscard]] std::string hash_computed(const hash_result& result, std::uint64_t seq, std::uint64_t now_unix_ns) const;
     // fim.baseline: what the monitor started from and how many offline changes it found.
     [[nodiscard]] std::string fim_baseline_record(const fim_start_result& start, std::uint64_t seq, std::uint64_t now_unix_ns) const;
 
@@ -115,7 +118,7 @@ private:
                std::uint64_t time_unix_ns, std::uint64_t observed_unix_ns, const provenance& source) const;
     // Writes the catalog §3.1 process object but leaves it open, so event-specific fields
     // (exit status, ancestry) can be appended; the caller closes it.
-    void write_process(json_writer& out, const process_entity& entity) const;
+    void write_process(json_writer& out, const process_entity& entity, const file_hash* hash = nullptr) const;
 
     sensor_identity identity_;
     const clock_domain& clock_;

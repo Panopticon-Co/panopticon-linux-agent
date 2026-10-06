@@ -140,6 +140,7 @@ int main(int argc, char** argv) {
         if (config.host_id.empty()) config.host_id = "unknown-host";
         config.sensor_id = "sensor-" + config.host_id.substr(0U, 12U);
         config.enable_fim = true;  // development mode: baseline in memory, nothing is stored
+        config.enable_hashing = true;
     }
     if (!proc_root.empty()) config.proc_root = proc_root;
     if (!wal_path.empty()) config.wal_path = wal_path;

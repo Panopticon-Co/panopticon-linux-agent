@@ -351,6 +351,8 @@ result<process_info> read_process(const std::filesystem::path& proc_root, const 
                 info.executable.dev = static_cast<std::uint64_t>(file_status.st_dev);
                 info.executable.inode = static_cast<std::uint64_t>(file_status.st_ino);
                 info.executable.size = static_cast<std::uint64_t>(file_status.st_size);
+                info.executable.mtime_ns = static_cast<std::uint64_t>(file_status.st_mtim.tv_sec) * 1000000000ULL +
+                                           static_cast<std::uint64_t>(file_status.st_mtim.tv_nsec);
                 info.executable.mode = static_cast<std::uint32_t>(file_status.st_mode);
                 info.executable.uid = static_cast<std::uint32_t>(file_status.st_uid);
                 info.executable.gid = static_cast<std::uint32_t>(file_status.st_gid);

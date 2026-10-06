@@ -40,6 +40,10 @@ struct sensor_config {
     bool enable_fim{false};
     std::filesystem::path fim_path;          // empty: baseline kept in memory only
     std::uint64_t fim_interval_seconds{300U};  // full rescan period
+    // Content hashing of executed images (off in the struct like FIM; the parser turns it on).
+    bool enable_hashing{false};
+    std::uint64_t hash_max_file_bytes{256ULL * 1024U * 1024U};
+    std::uint64_t hash_bytes_per_second{64ULL * 1024U * 1024U};
     std::size_t maximum_args{64U};
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};
@@ -139,6 +143,9 @@ private:
     result<bool> emit_health(std::uint64_t now_ns);
     result<bool> emit_process_state(std::uint64_t now_ns);
     result<bool> emit_host_state(std::uint64_t now_ns);
+    // Adds the executable hash (cached, pending or refused) to exec and discovery events.
+    [[nodiscard]] process_event with_executable_hash(const process_event& event);
+    result<bool> emit_hash_results(std::uint64_t observed_ns);
     result<bool> emit_fim_changes(const std::vector<fim_change>& changes, std::uint64_t observed_ns);
     result<bool> collect_losses(std::uint64_t now_ns);
 
@@ -158,6 +165,7 @@ private:
     std::uint64_t last_resample_ns_{};
     std::uint64_t last_fim_ns_{};
     std::unique_ptr<fim_monitor> fim_;
+    std::unique_ptr<hash_service> hashes_;
     std::uint64_t snapshots_{};
     mutable std::mutex status_mutex_;
     std::string status_cache_{"{}"};

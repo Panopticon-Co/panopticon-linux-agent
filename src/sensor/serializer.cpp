@@ -79,7 +79,17 @@ void record_serializer::begin(json_writer& out, const std::string_view record_ty
     out.end_object();
 }
 
-void record_serializer::write_process(json_writer& out, const process_entity& entity) const {
+// The `hash` object of catalog §3.2: the status always, the digests only once known.
+static void write_hash(json_writer& out, const file_hash& hash) {
+    out.key("hash").begin_object();
+    out.field("status", hash.status);
+    if (!hash.sha256.empty()) out.field("sha256", hash.sha256);
+    if (!hash.sha1.empty()) out.field("sha1", hash.sha1);
+    if (!hash.md5.empty()) out.field("md5", hash.md5);
+    out.end_object();
+}
+
+void record_serializer::write_process(json_writer& out, const process_entity& entity, const file_hash* hash) const {
     const auto& info = entity.info;
     out.begin_object();
     if (!entity.entity_id.empty()) out.field("entity_id", entity.entity_id);
@@ -113,6 +123,7 @@ void record_serializer::write_process(json_writer& out, const process_entity& en
         out.field("setuid", (info.executable.mode & 04000U) != 0U);
         out.field("setgid", (info.executable.mode & 02000U) != 0U);
     }
+    if (hash != nullptr) write_hash(out, *hash);
     out.end_object();
 
     out.key("args").begin_array();
@@ -170,7 +181,7 @@ std::string record_serializer::event(const process_event& event, const std::uint
     std::vector<unavailable_field> unavailable = event.unavailable;
     if (event.process) {
         out.key("process");
-        write_process(out, *event.process);
+        write_process(out, *event.process, event.executable_hash ? &*event.executable_hash : nullptr);
         if (event.exit.has_value()) {
             if (event.exit->code.has_value()) out.field("exit_code", static_cast<std::int64_t>(*event.exit->code));
             if (event.exit->signal.has_value()) out.field("exit_signal", static_cast<std::int64_t>(*event.exit->signal));
@@ -345,6 +356,27 @@ std::string record_serializer::file_event(const file_record& record, const std::
         out.field("reason", to_string(field.reason));
         out.end_object();
     }
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
+std::string record_serializer::hash_computed(const hash_result& result, const std::uint64_t seq, const std::uint64_t now_unix_ns) const {
+    json_writer out;
+    begin(out, "event", "hash.computed", seq, now_unix_ns, now_unix_ns, {"hash", "FSSCAN", confidence::observed});
+    out.key("process").begin_object();
+    if (!result.subject.entity_id.empty()) out.field("entity_id", result.subject.entity_id);
+    out.field("exec_gen", result.subject.exec_gen);
+    out.field("pid", result.subject.pid);
+    out.end_object();
+    out.key("executable").begin_object();
+    out.field("path", result.subject.path);
+    out.field("dev", result.subject.key.dev);
+    out.field("inode", result.subject.key.inode);
+    out.field("size", result.subject.key.size);
+    write_hash(out, result.hash);
+    out.end_object();
+    out.key("unavailable").begin_array();
     out.end_array();
     out.end_object();
     return out.take();

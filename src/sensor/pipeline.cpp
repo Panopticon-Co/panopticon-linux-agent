@@ -9,6 +9,7 @@
 #include <map>
 #include <sstream>
 #include <sys/resource.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -64,11 +65,12 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 21U> allowed{
+    constexpr std::array<std::string_view, 24U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
-        "file_include", "file_exclude", "enable_fim", "fim_path", "fim_interval_seconds"};
+        "file_include", "file_exclude", "enable_fim", "fim_path", "fim_interval_seconds", "enable_hashing", "hash_max_file_bytes",
+        "hash_bytes_per_second"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -116,6 +118,13 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     config.enable_fim = true;
     config.fim_path = config.wal_path.parent_path() / "fim.baseline";
     number("fim_interval_seconds", config.fim_interval_seconds, 60U, 86400U);
+    config.enable_hashing = true;
+    number("hash_max_file_bytes", config.hash_max_file_bytes, 1ULL << 20U, 1ULL << 32U);
+    number("hash_bytes_per_second", config.hash_bytes_per_second, 1ULL << 20U, 1ULL << 30U);
+    if (const auto value = text("enable_hashing"); value.has_value()) {
+        if (*value != "true" && *value != "false") valid = false;
+        config.enable_hashing = *value == "true";
+    }
     if (const auto value = text("enable_fim"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.enable_fim = *value == "true";
@@ -210,9 +219,53 @@ result<bool> sensor_pipeline::emit(const std::function<std::string(std::uint64_t
     return true;
 }
 
+process_event sensor_pipeline::with_executable_hash(const process_event& event) {
+    process_event copy = event;
+    const auto& info = event.process->info;
+    const auto& image = info.executable;
+    if (image.kind != executable_kind::file && image.kind != executable_kind::deleted && image.kind != executable_kind::memfd) {
+        return copy;
+    }
+    // Open the image through the process now: the descriptor names the file that was executed
+    // even if the path is replaced or removed before the worker gets to it. An image that was
+    // never identified (the process exited first) is not opened by path: there is no identity to
+    // verify, so the hash is reported as unreadable rather than guessed.
+    int fd = image.known ? ::open((config_.proc_root / std::to_string(info.pid) / "exe").c_str(), O_RDONLY | O_CLOEXEC) : -1;
+    if (fd >= 0) {
+        struct stat opened {};
+        if (::fstat(fd, &opened) != 0 || static_cast<std::uint64_t>(opened.st_dev) != image.dev ||
+            static_cast<std::uint64_t>(opened.st_ino) != image.inode) {
+            ::close(fd);  // the process executed something else in the meantime
+            fd = -1;
+        }
+    }
+    hash_subject subject;
+    subject.entity_id = event.process->entity_id;
+    subject.pid = info.pid;
+    subject.exec_gen = event.process->exec_gen;
+    subject.path = image.path;
+    subject.key = {image.dev, image.inode, image.size, image.mtime_ns};
+    copy.executable_hash = hashes_->submit(std::move(subject), fd);
+    return copy;
+}
+
+result<bool> sensor_pipeline::emit_hash_results(const std::uint64_t observed_ns) {
+    result<bool> outcome = true;
+    if (!hashes_) return outcome;
+    for (const auto& finished : hashes_->drain()) {
+        auto emitted = emit([&](const std::uint64_t seq) { return serializer_.hash_computed(finished, seq, observed_ns); });
+        if (succeeded(emitted)) ++metrics_.events;
+        else outcome = emitted;
+    }
+    return outcome;
+}
+
 result<bool> sensor_pipeline::emit_events(const std::vector<process_event>& events, const std::uint64_t observed_ns) {
     result<bool> outcome = true;
-    for (const auto& event : events) {
+    for (const auto& original : events) {
+        const bool hashable = hashes_ && original.process && (original.type == "process.exec" || original.type == "process.discovered");
+        const process_event hashed = hashable ? with_executable_hash(original) : process_event{};
+        const auto& event = hashable ? hashed : original;
         auto emitted = emit([&](const std::uint64_t seq) { return serializer_.event(event, seq, observed_ns); });
         if (succeeded(emitted)) ++metrics_.events;
         else outcome = emitted;
@@ -451,6 +504,12 @@ result<bool> sensor_pipeline::start() {
     }
     const auto now = clock_domain::now_monotonic_ns();
     const auto unix_now = clock_domain::now_unix_ns();
+    if (config_.enable_hashing) {
+        hash_options options;
+        options.maximum_file_bytes = config_.hash_max_file_bytes;
+        options.bytes_per_second = config_.hash_bytes_per_second;
+        hashes_ = std::make_unique<hash_service>(options);
+    }
     (void)graph_.reconcile(unix_now, false);
     ++metrics_.reconciles;
     (void)collect_losses(now);  // recovery losses from the WAL
@@ -500,6 +559,7 @@ result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono
         (void)emit_host_state(unix_now);
         last_state_ns_ = now_ns;
     }
+    (void)emit_hash_results(clock_domain::now_unix_ns());
     if (fim_) {
         if (now_ns - last_fim_ns_ >= config_.fim_interval_seconds * ns_per_second) {
             (void)emit_fim_changes(fim_->rescan(), clock_domain::now_unix_ns());

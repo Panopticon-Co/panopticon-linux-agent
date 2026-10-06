@@ -52,6 +52,7 @@ struct executable_info {
     std::uint64_t dev{};
     std::uint64_t inode{};
     std::uint64_t size{};
+    std::uint64_t mtime_ns{};  // internal: part of the hash cache key, not serialised
     std::uint32_t mode{};
     std::uint32_t uid{};
     std::uint32_t gid{};
