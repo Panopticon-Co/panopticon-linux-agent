@@ -1,6 +1,6 @@
 # ADR 004: Host isolation via a separate privileged helper process
 
-**Status:** Accepted
+**Status:** Accepted (wired into the command channel by ADR 027)
 **Date:** 2026-09-13
 
 ## Context

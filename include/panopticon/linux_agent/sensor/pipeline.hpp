@@ -72,6 +72,9 @@ struct sensor_config {
     // these directories (absolute, never "/") into response_quarantine_dir (empty: <wal_path>.quarantine).
     std::vector<std::filesystem::path> response_file_roots;
     std::filesystem::path response_quarantine_dir;
+    // The privileged isolation helper's AF_UNIX socket (ADR 004, ADR 027). Required to list ISOLATE_HOST and
+    // RELEASE_HOST_ISOLATION, which must be listed together.
+    std::filesystem::path response_isolation_socket;
     std::size_t maximum_args{64U};
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};

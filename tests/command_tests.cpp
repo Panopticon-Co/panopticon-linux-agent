@@ -185,26 +185,79 @@ void test_parse_poll() {
 
 void test_parse_survives_garbage() {
     std::mt19937_64 random{0xC0FFEE};
-    const auto base = envelope("c1", "KILL_PROCESS", kill_target, "2027-01-15T08:05:00Z", "2027-01-15T08:00:00Z");
-    for (int round = 0; round < 20000; ++round) {
-        auto text = base;
+    // One valid envelope per action (and a signed one, so the authorization member is mutated too), so a mutation
+    // can land anywhere in any action's grammar.
+    const std::string expires = "2027-01-15T08:05:00Z";
+    const std::string created = "2027-01-15T08:00:00Z";
+    std::vector<std::string> bases{
+        envelope("c1", "KILL_PROCESS", kill_target, expires, created),
+        envelope("c2", "COLLECT_PROCESS_INFO", kill_target, expires, created),
+        envelope("c3", "COLLECT_NETWORK_CONNECTIONS", "{}", expires, created),
+        envelope("c4", "COLLECT_FILE", "{\"path\":\"/srv/data/file\"}", expires, created),
+        envelope("c5", "QUARANTINE_FILE", "{\"path\":\"/srv/data/file\"}", expires, created),
+        envelope("c6", "ISOLATE_HOST", "{}", expires, created),
+        envelope("c7", "RELEASE_HOST_ISOLATION", "{}", expires, created),
+        schema2(envelope("c8", "KILL_PROCESS", bound_target(test_kernel_boot), expires, created)),
+    };
+    {
+        auto signed_one = bases[0];
+        signed_one.pop_back();
+        signed_one += ",\"authorization\":{\"algorithm\":\"ES256\",\"key_id\":\"0123456789abcdef\",\"signature\":\"" +
+                      std::string(86U, 'A') + "==\"}}";
+        bases.push_back(signed_one);
+    }
+    std::size_t survivors = 0;
+    for (int round = 0; round < 60000; ++round) {
+        auto text = bases[static_cast<std::size_t>(random() % bases.size())];
         const auto edits = 1U + random() % 4U;
         for (unsigned edit = 0; edit < edits; ++edit) {
-            switch (random() % 3U) {
+            switch (random() % 5U) {
                 case 0: text[random() % text.size()] = static_cast<char>(random() % 256U); break;
                 case 1: text.erase(random() % text.size(), 1U + random() % 6U); break;
-                default: text.insert(random() % text.size(), 1U, static_cast<char>(random() % 256U)); break;
+                case 2: text.insert(random() % text.size(), 1U, static_cast<char>(random() % 256U)); break;
+                case 3: {  // duplicate a slice: repeated keys, doubled values
+                    const auto from = static_cast<std::size_t>(random() % text.size());
+                    const auto length = static_cast<std::size_t>(1U + random() % 24U);
+                    text.insert(random() % text.size(), text.substr(from, length));
+                    break;
+                }
+                default: {  // swap two bytes: reordered members
+                    const auto one = static_cast<std::size_t>(random() % text.size());
+                    const auto two = static_cast<std::size_t>(random() % text.size());
+                    std::swap(text[one], text[two]);
+                    break;
+                }
             }
             if (text.empty()) text = "{";
         }
         const auto list = parse_command_poll("{\"commands\":[" + text + "]}");
         for (const auto& item : list.commands) {
-            if (const auto* command = std::get_if<endpoint_command>(&item)) {
-                // Whatever survives is a fully valid command.
-                require(command->pid != 0U && command->start_ticks != 0U && command->expires_unix > 0, "a survivor is well formed");
+            const auto* command = std::get_if<endpoint_command>(&item);
+            if (command == nullptr) continue;
+            ++survivors;
+            // Whatever survives is a fully valid command of a known action, with an id the ledger can key on.
+            require(!command->command_id.empty() && command->command_id.size() <= 128U, "a survivor has a usable id");
+            require(command->expires_unix > 0, "a survivor expires");
+            require(parse_command_action(to_string(command->action)).has_value(), "a survivor's action is in the vocabulary");
+            switch (command->action) {
+                case command_action::kill_process:
+                case command_action::collect_process_info:
+                    require(command->pid != 0U && command->start_ticks != 0U, "a process survivor names a process");
+                    require(command->path.empty(), "a process survivor has no path");
+                    break;
+                case command_action::collect_file:
+                case command_action::quarantine_file:
+                    require(!command->path.empty() && command->path.size() <= 4096U && command->path.find('\0') == std::string::npos,
+                            "a file survivor names a path without NUL");
+                    require(command->pid == 0U, "a file survivor has no pid");
+                    break;
+                default:
+                    require(command->pid == 0U && command->path.empty(), "a targetless survivor carries no target");
+                    break;
             }
         }
     }
+    require(survivors > 0U, "some mutations leave a valid command, so the invariants were exercised");
 }
 
 // ---- ledger ---------------------------------------------------------------------------------
@@ -374,7 +427,7 @@ void test_processor_checks() {
     refused(w.make("ex", "KILL_PROCESS", kill_target, -1), "expired");
     refused(w.make("ex0", "KILL_PROCESS", kill_target, 0), "expired");
     refused(w.make("long", "KILL_PROCESS", kill_target, 7 * 86400), "lifetime_exceeded");
-    refused(w.make("iso", "ISOLATE_HOST", "{}"), "unsupported_action");
+    refused(w.make("iso", "ISOLATE_HOST", "{}"), "action_not_permitted");  // implemented, but not on the default allow-list
     refused(w.make("qf", "QUARANTINE_FILE", "{\"path\":\"/tmp/x\"}"), "action_not_permitted");  // implemented, but not on the default allow-list
 
     auto future = w.make("fut");
@@ -606,7 +659,7 @@ void test_local_executor_real_processes() {
     require(gone.outcome == "rejected" && (gone.reason == "target_gone" || gone.reason == "target_mismatch"), "a dead target is not signalled");
 
     const auto none = executor->execute(real_command("f1", command_action::isolate_host, 0, 0), false);
-    require(none.reason == "unsupported_action", "an action the sensor lacks is refused by the executor too");
+    require(none.outcome == "rejected" && none.reason == "isolation_unavailable", "isolation without a configured helper is refused by the executor");
 }
 
 // ---- network connection inventory ------------------------------------------------------------
@@ -981,7 +1034,7 @@ void test_boot_bound_commands() {
     command_processor strict{options, *ledger2, executor};
     require(strict.handle(w.make("s1")).reason == "boot_binding_required", "an unbound kill");
     require(strict.handle(w.make("s2", "COLLECT_PROCESS_INFO")).reason == "boot_binding_required", "an unbound collect");
-    require(strict.handle(w.make("s3", "ISOLATE_HOST", "{}")).reason == "unsupported_action", "non-process actions are unaffected");
+    require(strict.handle(w.make("s3", "ISOLATE_HOST", "{}")).reason == "action_not_permitted", "non-process actions are unaffected");
     require(strict.handle(bound("s4", digest)).outcome == "succeeded", "a bound target runs");
     fs::remove_all(dir);
 }
@@ -1335,7 +1388,22 @@ void test_configuration() {
     require(parsed.response_mode == "dry_run" && parsed.response_actions == std::vector<std::string>{"COLLECT_PROCESS_INFO"} && parsed.response_poll_seconds == 2U,
             "values");
     require(!succeeded(parse_sensor_config(base + "response_mode=yes\n")), "a mode outside the vocabulary");
-    require(!succeeded(parse_sensor_config(base + "response_actions=ISOLATE_HOST\n")), "an action the sensor does not implement cannot be listed");
+    require(!succeeded(parse_sensor_config(base + "response_actions=NO_SUCH_ACTION\n")), "an action outside the vocabulary cannot be listed");
+    const std::string signed_base = base + "response_allow_unsigned=true\nresponse_mode=dry_run\n";
+    const std::string both = "response_actions=ISOLATE_HOST,RELEASE_HOST_ISOLATION\n";
+    require(succeeded(parse_sensor_config(signed_base + both + "response_isolation_socket=/run/panopticon/isolation.sock\n")),
+            "isolation with a helper socket, both directions");
+    require(!succeeded(parse_sensor_config(signed_base + both)), "isolation actions need a helper socket");
+    require(!succeeded(parse_sensor_config(signed_base + "response_actions=ISOLATE_HOST\nresponse_isolation_socket=/run/x.sock\n")),
+            "isolation cannot be listed without its release");
+    require(!succeeded(parse_sensor_config(signed_base + "response_actions=RELEASE_HOST_ISOLATION\nresponse_isolation_socket=/run/x.sock\n")),
+            "release alone is not a configuration either");
+    require(!succeeded(parse_sensor_config(signed_base + "response_actions=COLLECT_PROCESS_INFO\nresponse_isolation_socket=/run/x.sock\n")),
+            "a helper socket without the actions that use it");
+    require(!succeeded(parse_sensor_config(signed_base + both + "response_isolation_socket=run/x.sock\n")), "a relative socket path");
+    require(!succeeded(parse_sensor_config(signed_base + both + "response_isolation_socket=/run/../x.sock\n")), "a socket path with ..");
+    require(!succeeded(parse_sensor_config(signed_base + both + "response_isolation_socket=/" + std::string(120U, 'a') + "\n")),
+            "a socket path longer than sun_path");
     require(succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=COLLECT_NETWORK_CONNECTIONS,COLLECT_FILE\n")),
             "the implemented collections can be listed by name");
     require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=QUARANTINE_FILE\n")),

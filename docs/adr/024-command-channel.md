@@ -48,8 +48,9 @@ never repeat the action.
    carries process actions only; file and targetless actions are `invalid_target`.
 7. **Actions today.** `KILL_PROCESS`, `COLLECT_PROCESS_INFO` (bounded name, exe, ppid, uid,
    threads) and `COLLECT_NETWORK_CONNECTIONS` (target `{}`), and, since ADR 026, `COLLECT_FILE` and
-   `QUARANTINE_FILE` (descriptor-safe, roots-limited). `ISOLATE_HOST` and `RELEASE_HOST_ISOLATION`
-   answer `unsupported_action`. The set of seven is
+   `QUARANTINE_FILE` (descriptor-safe, roots-limited), and, since ADR 027, `ISOLATE_HOST` and
+   `RELEASE_HOST_ISOLATION` (a request to the privileged helper of ADR 004). All seven are implemented;
+   the Manager's other names are not in the vocabulary. The set of seven is
    closed; there is no shell action. Collection actions change nothing, so they run in `dry_run`
    too and are not rate limited.
    **Collection output.** A result `detail` is bounded (400 bytes here, 512 in the contract), so a

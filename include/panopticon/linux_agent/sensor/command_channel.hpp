@@ -208,6 +208,13 @@ struct local_executor_options {
     std::chrono::milliseconds owner_scan_budget{500};
     // COLLECT_FILE and QUARANTINE_FILE (ADR 026).
     file_action_options files;
+    // ISOLATE_HOST and RELEASE_HOST_ISOLATION (ADR 027): the privileged helper's socket. Empty: not configured.
+    // The sensor holds no firewall capability; it can only ask the helper for one of two fixed opcodes.
+    std::filesystem::path isolation_socket;
+    // How long one request may take, connect included. It must outlast the helper's own netlink waits (its
+    // receive timeouts are 5 s each); a helper that does not answer in time leaves the outcome `indeterminate`,
+    // never a guess.
+    std::chrono::milliseconds isolation_timeout{20000};
 };
 [[nodiscard]] std::unique_ptr<command_executor> make_local_executor(local_executor_options options);
 

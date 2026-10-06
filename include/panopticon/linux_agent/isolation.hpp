@@ -1,5 +1,6 @@
 #pragma once
 #include "panopticon/linux_agent/error.hpp"
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -37,5 +38,25 @@ inline constexpr std::uint8_t kIsolationStatusRejected{1U};
 // to ask the privileged helper to act.
 [[nodiscard]] result<bool> request_isolation(const std::filesystem::path& socket_path, isolation_opcode opcode,
                                               std::string_view command_id);
+
+// What happened to one request, in the terms a caller must act on. `no_answer` is the dangerous one: the
+// request was sent and no status came back in time, so the helper may or may not have applied it.
+enum class isolation_exchange : std::uint8_t {
+    accepted,     // the helper applied the request and said so
+    refused,      // the helper answered and declined (or the frame was refused locally)
+    unreachable,  // no helper listening: nothing was sent
+    no_answer,    // sent, but no complete status arrived within the timeout
+    invalid,      // the request cannot be encoded (bad command id), or the socket path is unusable
+};
+
+// request_isolation with the distinctions above and a bound on how long the helper may take. The helper is a
+// single-threaded daemon; a sensor thread must never wait on it forever.
+[[nodiscard]] isolation_exchange exchange_isolation_request(const std::filesystem::path& socket_path,
+                                                            isolation_opcode opcode, std::string_view command_id,
+                                                            std::chrono::milliseconds timeout);
+
+// Is something listening on the helper's socket? Connects and closes without sending anything, so it cannot
+// change the firewall. Used by dry-run to prove the path works.
+[[nodiscard]] bool isolation_helper_reachable(const std::filesystem::path& socket_path);
 
 }  // namespace panopticon::linux_agent

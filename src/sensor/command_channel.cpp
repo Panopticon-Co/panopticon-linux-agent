@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/identity.hpp"
+#include "panopticon/linux_agent/isolation.hpp"
 #include "panopticon/linux_agent/response.hpp"
 #include "panopticon/linux_agent/sensor/clock.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
@@ -105,7 +106,8 @@ std::optional<command_action> parse_command_action(const std::string_view text) 
 bool command_action_implemented(const command_action action) noexcept {
     return action == command_action::kill_process || action == command_action::collect_process_info ||
            action == command_action::collect_network_connections || action == command_action::collect_file ||
-           action == command_action::quarantine_file;
+           action == command_action::quarantine_file || action == command_action::isolate_host ||
+           action == command_action::release_host_isolation;
 }
 
 bool command_action_changes_host(const command_action action) noexcept {
@@ -590,6 +592,8 @@ public:
             case command_action::collect_file: return from_file_result(collect_file(command.path, options_.files));
             case command_action::quarantine_file:
                 return from_file_result(quarantine_file(command.path, command.command_id, dry_run, options_.files));
+            case command_action::isolate_host: return isolation(command, dry_run, isolation_opcode::isolate);
+            case command_action::release_host_isolation: return isolation(command, dry_run, isolation_opcode::release);
             default: return {"rejected", "unsupported_action", "this sensor does not carry out that action", {}, 0U, {}};
         }
     }
@@ -602,6 +606,35 @@ private:
         out.detail = clean(result.detail);
         out.affected = result.affected;
         return out;
+    }
+
+    // The sensor never touches the firewall: it asks the privileged helper for one of two fixed opcodes and
+    // reports what came back. Only the command id crosses the socket (ADR 004). A dry run proves the helper is
+    // listening and sends nothing.
+    execution_result isolation(const endpoint_command& command, const bool dry_run, const isolation_opcode opcode) const {
+        const bool isolating = opcode == isolation_opcode::isolate;
+        if (options_.isolation_socket.empty()) {
+            return {"rejected", "isolation_unavailable", "no isolation helper is configured", {}, 0U, {}};
+        }
+        if (dry_run) {
+            if (!isolation_helper_reachable(options_.isolation_socket)) {
+                return {"rejected", "helper_unreachable", "the isolation helper is not listening; nothing sent", {}, 0U, {}};
+            }
+            return {"rejected", "dry_run", "helper reachable, nothing sent", {}, 0U, {}};
+        }
+        switch (exchange_isolation_request(options_.isolation_socket, opcode, command.command_id, options_.isolation_timeout)) {
+            case isolation_exchange::accepted:
+                return {"succeeded", "ok", isolating ? "the helper applied host isolation" : "the helper released host isolation", {}, 1U, {}};
+            case isolation_exchange::refused:
+                return {"failed", "helper_refused", "the isolation helper declined the request", {}, 0U, {}};
+            case isolation_exchange::unreachable:
+                return {"failed", "helper_unreachable", "the isolation helper is not listening", {}, 0U, {}};
+            case isolation_exchange::no_answer:
+                return {"indeterminate", "helper_no_answer",
+                        "the request was sent and no answer came; whether the host is isolated is not known", {}, 0U, {}};
+            case isolation_exchange::invalid: break;
+        }
+        return {"failed", "invalid_request", "the request could not be encoded for the isolation helper", {}, 0U, {}};
     }
 
     execution_result kill(const endpoint_command& command, const bool dry_run) const {
@@ -895,7 +928,18 @@ command_channel_provider::command_channel_provider(command_channel_options optio
 command_channel_provider::~command_channel_provider() { stop(); }
 
 std::vector<std::string> command_channel_provider::capabilities() const {
-    return {"response.command", "response.kill_process", "response.collect_process_info", "response.collect_network_connections"};
+    // What this endpoint can do under its policy, not what the code could do: the Manager plans from this.
+    std::vector<std::string> names{"response.command"};
+    for (const auto action : {command_action::kill_process, command_action::collect_process_info,
+                              command_action::collect_network_connections, command_action::collect_file,
+                              command_action::quarantine_file, command_action::isolate_host,
+                              command_action::release_host_isolation}) {
+        if (!options_.processor.policy.allowed.contains(action)) continue;
+        std::string name{to_string(action)};
+        for (auto& c : name) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        names.push_back("response." + name);
+    }
+    return names;
 }
 
 std::string command_channel_provider::probe() {

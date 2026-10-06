@@ -66,7 +66,7 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 43U> allowed{
+    constexpr std::array<std::string_view, 44U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
@@ -74,7 +74,8 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
         "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events", "enable_security_events", "enable_sensitive_file_events", "manager_url", "identity_path", "ca_bundle",
         "response_mode", "response_actions", "response_poll_seconds", "response_max_lifetime_seconds",
         "response_max_changes_per_minute", "response_ledger_path", "response_require_boot_binding", "response_signing_keys",
-        "response_allow_unsigned", "response_file_roots", "response_quarantine_dir"};
+        "response_allow_unsigned", "response_file_roots", "response_quarantine_dir",
+        "response_isolation_socket"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -138,6 +139,11 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     if (const auto value = text("response_quarantine_dir"); value.has_value()) {
         config.response_quarantine_dir = *value;
         if (!config.response_quarantine_dir.is_absolute() || value->find("..") != std::string::npos) valid = false;
+    }
+    if (const auto value = text("response_isolation_socket"); value.has_value()) {
+        config.response_isolation_socket = *value;
+        // sockaddr_un::sun_path holds 108 bytes including the terminator.
+        if (!config.response_isolation_socket.is_absolute() || value->find("..") != std::string::npos || value->size() >= 108U) valid = false;
     }
     if (const auto value = text("response_signing_keys"); value.has_value()) {
         config.response_signing_keys = *value;
@@ -237,6 +243,13 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     // Quarantine is the one action that moves a file; it acts only where the operator said it may.
     const bool quarantine_listed = std::find(config.response_actions.begin(), config.response_actions.end(), "QUARANTINE_FILE") != config.response_actions.end();
     if (quarantine_listed != !config.response_file_roots.empty()) valid = false;
+    // Isolation is both directions or neither: an endpoint that can cut itself off must be able to be released,
+    // and either action without a helper to ask would be a promise it cannot keep.
+    const auto listed = [&](const char* name) {
+        return std::find(config.response_actions.begin(), config.response_actions.end(), name) != config.response_actions.end();
+    };
+    const bool isolate_listed = listed("ISOLATE_HOST");
+    if (isolate_listed != listed("RELEASE_HOST_ISOLATION") || isolate_listed != !config.response_isolation_socket.empty()) valid = false;
     // Commands are acted on only when signed by a pinned key, or when the operator said in so many words that
     // unsigned commands are acceptable (a lab). There is no silent default to trusting the channel alone.
     if (config.response_mode != "off" && config.response_signing_keys.empty() && !config.response_allow_unsigned) valid = false;

@@ -279,6 +279,7 @@ int main(int argc, char** argv) {
             sensor::local_executor_options executor;
             executor.proc_root = config.proc_root;
             executor.host_id = config.host_id;
+            executor.isolation_socket = config.response_isolation_socket;
             executor.files.roots = config.response_file_roots;
             executor.files.quarantine_dir = config.response_file_roots.empty()
                                                 ? std::filesystem::path{}

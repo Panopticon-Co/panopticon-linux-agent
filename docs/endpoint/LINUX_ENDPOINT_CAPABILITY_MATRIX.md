@@ -177,7 +177,7 @@ limits** · **Perf** impact · **Privacy** implications · **Test** method · **
 | BB3 | Quarantine / restore | M | Containment | `response.result` | OPENAT2 + quarantine store | `O_NOFOLLOW` walk | – | – | content retained | e2e | PARTIAL | PARTIAL |
 | BB4 | Block hash / path | M | Containment | `policy.applied` | BA1 | – | – | – | none | e2e | MISSING | MISSING |
 | BB5 | Block network destination | S | Containment | `policy.applied` | BA2 | – | – | – | none | e2e | MISSING | MISSING |
-| BB6 | Host isolation / release | M | Containment | `response.result` | NFT helper | – | – | – | none | e2e | IMPL | IMPL |
+| BB6 | Host isolation / release | M | Containment | `response.result` | NFT helper, reached through the command channel (ADR 027) | – | – | – | none | e2e (netns, 26 checks) | IMPL | IMPL, REAL-VM VERIFIED |
 
 ### BC–BO. Product, reliability and operations
 
