@@ -251,9 +251,11 @@ scenario_clock() {
   command -v timedatectl >/dev/null && timedatectl set-ntp true 2>/dev/null
   local out; out=$(analyze); local rc=$?
   stop_sensor
-  # Events already queued when the clock steps are converted with the new offset (a few dozen at this load); many more than that with event time far from
-  # observed time means the sensor did not re-base its clock (579 before step detection existed).
-  verdict clock "$([ $alive = yes ] && [ $rc = 0 ] && [ "$(echo "$out" | jfield skewed_events)" -le 50 ] && echo PASS || echo FAIL)"     "alive=$alive stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) skewed_events=$(echo "$out" | jfield skewed_events) clock_steps_logged=$(grep -c 'wall clock stepped' "$W/sensord.log")"
+  # Events already queued when the clock steps are converted with the new offset: 25 to 80 per run at this load (the count varies with what is in flight at each step),
+  # so the limit is 50 per logged step. Event time far from observed time beyond that means the sensor did not re-base its clock (579 before step detection existed).
+  local steps; steps=$(grep -c "wall clock stepped" "$W/sensord.log"); [ "$steps" -ge 1 ] || steps=1
+  verdict clock "$([ $alive = yes ] && [ $rc = 0 ] && [ "$(echo "$out" | jfield skewed_events)" -le $((50 * steps)) ] && echo PASS || echo FAIL)" \
+    "alive=$alive stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) skewed_events=$(echo "$out" | jfield skewed_events) (limit $((50 * steps))) clock_steps_logged=$steps"
 }
 
 scenario_walcorrupt() {
