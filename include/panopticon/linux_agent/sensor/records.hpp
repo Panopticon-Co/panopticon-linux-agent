@@ -271,9 +271,28 @@ struct raw_firewall_change {
     std::uint32_t pid{};
 };
 
+// response.action: one Manager command this sensor answered (ADR 024). `pid` and `start_ticks` name the
+// process the command was aimed at, so the pipeline can attach the entity it knows by that identity.
+struct raw_response_action {
+    std::string command_id;
+    std::string correlation_id;
+    std::string action;   // the Manager's action name, e.g. KILL_PROCESS
+    std::string outcome;  // succeeded, failed, rejected, indeterminate
+    std::string reason;   // machine code: ok, dry_run, expired, replay, target_mismatch, ...
+    std::string detail;
+    std::string mode;     // pidfd or pid_fallback when a signal path was chosen
+    bool dry_run{false};
+    bool executed{false};
+    std::uint32_t pid{};
+    std::uint64_t start_ticks{};
+    std::string path;
+    std::uint32_t affected{};
+};
+
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
                                  raw_session_change, raw_file_event, raw_network_event, raw_auth_event, raw_kernel_event,
-                                 raw_security_event, raw_namespace_change, raw_dns_query, raw_lsm_event, raw_firewall_change>;
+                                 raw_security_event, raw_namespace_change, raw_dns_query, raw_lsm_event, raw_firewall_change,
+                                 raw_response_action>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

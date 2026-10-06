@@ -10,6 +10,7 @@
 #include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/sensor/audit_netlink.hpp"
 #include "panopticon/linux_agent/sensor/auth_log.hpp"
+#include "panopticon/linux_agent/sensor/command_channel.hpp"
 #include "panopticon/linux_agent/sensor/kernel_change.hpp"
 #include "panopticon/linux_agent/sensor/control.hpp"
 #include "panopticon/linux_agent/sensor/ebpf_process.hpp"
@@ -27,6 +28,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -177,6 +179,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<sensor::record_poster> poster;
     std::unique_ptr<sensor::uplink> delivery;
     std::unique_ptr<sensor::uplink_runner> delivery_runner;
+    // The enrolled identity and TLS settings delivery uses; the command channel authenticates the same way.
+    std::optional<sensor::https_poster_options> manager_connection;
     if (!to_stdout && !config.manager_url.empty()) {
         auto enrolled = panopticon::linux_agent::load_enrolled_identity(config.identity_path);
         if (!succeeded(enrolled)) {
@@ -190,6 +194,7 @@ int main(int argc, char** argv) {
             poster_options.manager_url = config.manager_url;
             poster_options.identity = std::get<panopticon::linux_agent::enrolled_identity>(enrolled);
             poster_options.ca_bundle = config.ca_bundle;
+            manager_connection = poster_options;
             poster = sensor::make_https_poster(std::move(poster_options));
             sensor::uplink_options uplink_options;
             uplink_options.quarantine_path = config.wal_path.string() + ".rejected.ndjson";
@@ -235,6 +240,33 @@ int main(int argc, char** argv) {
         // One family, two mechanisms: the kernel audit group is preferred, the log is the fallback.
         providers.push_back(std::make_unique<sensor::audit_netlink_provider>());
         providers.push_back(std::make_unique<sensor::auth_log_provider>());
+    }
+    // Manager commands (ADR 024): only when asked for, and only with an authenticated connection.
+    const auto mode = sensor::parse_response_mode(config.response_mode).value_or(sensor::response_mode::off);
+    if (mode != sensor::response_mode::off) {
+        if (!manager_connection) {
+            std::fprintf(stderr, "panopticon-sensord: command channel disabled: delivery to the Manager is not available\n");
+        } else {
+            sensor::command_channel_options channel;
+            channel.processor.agent_id = manager_connection->identity.agent_id;
+            channel.processor.host_id = config.host_id;
+            channel.processor.policy.mode = mode;
+            channel.processor.policy.allowed.clear();
+            for (const auto& name : config.response_actions) {
+                if (const auto action = sensor::parse_command_action(name)) channel.processor.policy.allowed.insert(*action);
+            }
+            channel.processor.policy.maximum_lifetime_seconds = static_cast<std::int64_t>(config.response_max_lifetime_seconds);
+            channel.processor.policy.maximum_changes_per_minute = config.response_max_changes_per_minute;
+            channel.ledger_path = config.response_ledger_path.empty() ? std::filesystem::path{config.wal_path.string() + ".commands"}
+                                                                      : config.response_ledger_path;
+            channel.poll_interval_ms = config.response_poll_seconds * 1000U;
+            sensor::local_executor_options executor;
+            executor.proc_root = config.proc_root;
+            executor.host_id = config.host_id;
+            providers.push_back(std::make_unique<sensor::command_channel_provider>(
+                std::move(channel), sensor::make_https_command_transport(*manager_connection), sensor::make_local_executor(std::move(executor))));
+            std::fprintf(stderr, "panopticon-sensord: command channel %s\n", sensor::to_string(mode));
+        }
     }
     sensor::sensor_pipeline pipeline{config, identity, clock, *sink, std::move(providers)};
     if (delivery) {

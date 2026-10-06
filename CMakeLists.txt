@@ -103,6 +103,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/fim.cpp
         src/sensor/hash_service.cpp
         src/sensor/control.cpp
+        src/sensor/command_channel.cpp
+        src/sensor/command_https.cpp
         src/sensor/pipeline.cpp
     )
     target_include_directories(panopticon-sensor-core PUBLIC include)
@@ -191,6 +193,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_options(panopticon-response-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-response-tests PRIVATE panopticon-sensor-core)
         add_test(NAME panopticon-response-tests COMMAND panopticon-response-tests)
+        add_executable(panopticon-command-tests tests/command_tests.cpp)
+        target_compile_options(panopticon-command-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(panopticon-command-tests PRIVATE panopticon-sensor-core)
+        add_test(NAME panopticon-command-tests COMMAND panopticon-command-tests)
         add_executable(panopticon-json-tests tests/json_reader_tests.cpp)
         target_compile_options(panopticon-json-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(panopticon-json-tests PRIVATE panopticon-sensor-core)

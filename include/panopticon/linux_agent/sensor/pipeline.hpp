@@ -54,6 +54,14 @@ struct sensor_config {
     bool enable_hashing{false};
     std::uint64_t hash_max_file_bytes{256ULL * 1024U * 1024U};
     std::uint64_t hash_bytes_per_second{64ULL * 1024U * 1024U};
+    // Manager commands (ADR 024). Off unless the file says otherwise: a sensor that only reports
+    // never opens the command channel.
+    std::string response_mode{"off"};  // off, dry_run, enforce
+    std::vector<std::string> response_actions{"KILL_PROCESS", "COLLECT_PROCESS_INFO"};
+    std::uint64_t response_poll_seconds{5U};
+    std::uint64_t response_max_lifetime_seconds{900U};
+    std::uint64_t response_max_changes_per_minute{6U};
+    std::filesystem::path response_ledger_path;  // empty: <wal_path>.commands
     std::size_t maximum_args{64U};
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};
@@ -161,6 +169,7 @@ private:
     result<bool> emit_dns_event(const raw_record& record, const raw_dns_query& dns, std::uint64_t observed_ns);
     result<bool> emit_lsm_event(const raw_record& record, const raw_lsm_event& lsm, std::uint64_t observed_ns);
     result<bool> emit_firewall_event(const raw_record& record, const raw_firewall_change& firewall, std::uint64_t observed_ns);
+    result<bool> emit_response_event(const raw_record& record, const raw_response_action& response, std::uint64_t observed_ns);
     result<bool> emit_loss(loss_report report);
     result<bool> emit_health(std::uint64_t now_ns);
     result<bool> emit_process_state(std::uint64_t now_ns);

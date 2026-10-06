@@ -133,6 +133,15 @@ struct firewall_record {
     raw_firewall_change firewall;
 };
 
+// response.action after the pipeline attached the process the command named, when the sensor knows
+// that exact identity (pid and start time).
+struct response_record {
+    std::uint64_t time_unix_ns{};
+    provenance source;
+    entity_ptr target;
+    raw_response_action response;
+};
+
 // An auth.* event after the pipeline attached the logging process (if it still exists).
 struct auth_record {
     std::uint64_t time_unix_ns{};
@@ -183,6 +192,9 @@ public:
     // lsm.denial / lsm.policy and netfilter.config_change (catalog 4.9).
     [[nodiscard]] std::string lsm_event(const lsm_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
     [[nodiscard]] std::string firewall_event(const firewall_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+
+    // response.action (catalog 4.10).
+    [[nodiscard]] std::string response_event(const response_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
 
     // memory.exec_mapping / kernel.bpf_load (catalog 4.6).
     [[nodiscard]] std::string security_event(const security_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;

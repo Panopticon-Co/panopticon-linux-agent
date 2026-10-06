@@ -65,12 +65,14 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 32U> allowed{
+    constexpr std::array<std::string_view, 38U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
         "file_include", "file_exclude", "enable_fim", "fim_path", "fim_interval_seconds", "enable_hashing", "hash_max_file_bytes",
-        "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events", "enable_security_events", "enable_sensitive_file_events", "manager_url", "identity_path", "ca_bundle"};
+        "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events", "enable_security_events", "enable_sensitive_file_events", "manager_url", "identity_path", "ca_bundle",
+        "response_mode", "response_actions", "response_poll_seconds", "response_max_lifetime_seconds",
+        "response_max_changes_per_minute", "response_ledger_path"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -170,6 +172,36 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     };
     prefixes("file_include", config.file_include);
     prefixes("file_exclude", config.file_exclude);
+    // Manager commands: off unless asked for, and only with delivery configured (the same enrolled
+    // identity and https URL authenticate both directions).
+    number("response_poll_seconds", config.response_poll_seconds, 1U, 300U);
+    number("response_max_lifetime_seconds", config.response_max_lifetime_seconds, 30U, 86400U);
+    number("response_max_changes_per_minute", config.response_max_changes_per_minute, 1U, 600U);
+    if (const auto value = text("response_mode"); value.has_value()) {
+        if (*value != "off" && *value != "dry_run" && *value != "enforce") valid = false;
+        config.response_mode = *value;
+    }
+    if (const auto value = text("response_actions"); value.has_value()) {
+        // Only actions this sensor implements may be listed; the Manager's other names are not valid here.
+        config.response_actions.clear();
+        std::istringstream stream{*value};
+        std::string item;
+        while (std::getline(stream, item, ',')) {
+            item = std::string{trim(item)};
+            if ((item != "KILL_PROCESS" && item != "COLLECT_PROCESS_INFO") ||
+                std::find(config.response_actions.begin(), config.response_actions.end(), item) != config.response_actions.end()) {
+                valid = false;
+            } else {
+                config.response_actions.push_back(item);
+            }
+        }
+        if (config.response_actions.empty()) valid = false;
+    }
+    if (const auto value = text("response_ledger_path"); value.has_value()) {
+        config.response_ledger_path = *value;
+        if (!config.response_ledger_path.is_absolute() || value->find("..") != std::string::npos) valid = false;
+    }
+    if (config.response_mode != "off" && config.manager_url.empty()) valid = false;
     // Delivery needs an https URL and an identity file together; a private CA must be absolute.
     if (config.manager_url.empty() != config.identity_path.empty()) valid = false;
     if (!config.manager_url.empty() && config.manager_url.rfind("https://", 0U) != 0U) valid = false;
@@ -334,6 +366,10 @@ void sensor_pipeline::process_record(const raw_record& record, const std::uint64
         (void)emit_firewall_event(record, *firewall, observed_ns);
         return;
     }
+    if (const auto* response = std::get_if<raw_response_action>(&record.payload)) {
+        (void)emit_response_event(record, *response, observed_ns);
+        return;
+    }
     (void)emit_events(graph_.apply(record), observed_ns);
 }
 
@@ -398,6 +434,22 @@ result<bool> sensor_pipeline::emit_firewall_event(const raw_record& record, cons
     out.actor = firewall.pid != 0U ? graph_.find(firewall.pid) : nullptr;
     out.firewall = firewall;
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.firewall_event(out, seq, observed_ns); });
+    if (succeeded(emitted)) ++metrics_.events;
+    return emitted;
+}
+
+result<bool> sensor_pipeline::emit_response_event(const raw_record& record, const raw_response_action& response, const std::uint64_t observed_ns) {
+    response_record out;
+    out.time_unix_ns = record.time_unix_ns;
+    out.source = record.source;
+    if (response.pid != 0U) {
+        // The entity for this pid, only when it is the instance the command named. After a reuse the
+        // graph holds a different process under the same pid and it is not the command's target.
+        const auto known = graph_.find(response.pid);
+        if (known && known->info.start_ticks == response.start_ticks) out.target = known;
+    }
+    out.response = response;
+    auto emitted = emit([&](const std::uint64_t seq) { return serializer_.response_event(out, seq, observed_ns); });
     if (succeeded(emitted)) ++metrics_.events;
     return emitted;
 }

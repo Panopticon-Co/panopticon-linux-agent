@@ -609,6 +609,39 @@ std::string record_serializer::firewall_event(const firewall_record& record, con
     return out.take();
 }
 
+std::string record_serializer::response_event(const response_record& record, const std::uint64_t seq,
+                                              const std::uint64_t observed_unix_ns) const {
+    const auto& response = record.response;
+    json_writer out;
+    begin(out, "event", "response.action", seq, record.time_unix_ns, observed_unix_ns, record.source);
+    std::vector<unavailable_field> unavailable;
+    // The process is the one the command named, and only when the sensor knows that exact identity.
+    // A pid that now belongs to a different process is not attributed to the command's target.
+    write_audit_actor(out, record.target, response.pid, unavailable, [&](const process_entity& entity) { write_process(out, entity); });
+    out.key("response").begin_object();
+    out.field("command_id", response.command_id);
+    out.field("correlation_id", response.correlation_id);
+    out.field("action", response.action);
+    out.field("outcome", response.outcome);
+    out.field("reason", response.reason);
+    out.field("dry_run", response.dry_run);
+    out.field("executed", response.executed);
+    if (!response.mode.empty()) out.field("mode", response.mode);
+    if (response.pid != 0U) {
+        out.key("target").begin_object();
+        out.field("pid", response.pid);
+        out.field("start_time_ticks", response.start_ticks);
+        out.end_object();
+    }
+    if (!response.path.empty()) out.field("path", response.path);
+    if (response.affected != 0U) out.field("affected", response.affected);
+    if (!response.detail.empty()) out.field("detail", response.detail);
+    out.end_object();
+    write_unavailable(out, unavailable);
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::auth_event(const auth_record& record, const std::uint64_t seq,
                                           const std::uint64_t observed_unix_ns) const {
     const auto& auth = record.auth;
