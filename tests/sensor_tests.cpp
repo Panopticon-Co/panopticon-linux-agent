@@ -824,6 +824,74 @@ void test_pipeline_enriches_network_events() {
     }
 }
 
+void test_pipeline_serializes_auth_events() {
+    const auto root = fresh_directory("authproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    const auto make = [](const auth_kind kind, const std::string& service, const std::uint32_t pid) {
+        raw_auth_event event;
+        event.kind = kind;
+        event.service = service;
+        event.method = service == "sshd" ? "publickey" : "sudo";
+        event.user = "vagrant";
+        event.pid = pid;
+        if (service == "sshd") {
+            event.source_address = "203.0.113.9";
+            event.source_port = 40000U;
+            event.key_type = "ED25519";
+            event.key_fingerprint = "SHA256:abc";
+            event.invalid_user = kind == auth_kind::login_failure;
+        } else {
+            event.target_user = "root";
+            event.command = "/bin/id";
+            event.sanitized = true;
+        }
+        return record_of(event);
+    };
+    std::vector<raw_record> script{make(auth_kind::login_success, "sshd", 4242U), make(auth_kind::login_failure, "sshd", 0U),
+                                   make(auth_kind::privilege_success, "sudo", 1U)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script, 0U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    const auto find = [&](const std::string_view type) {
+        const auto found = std::find_if(lines.begin(), lines.end(), [&](const std::string& line) {
+            return contains(line, std::string{"\"type\":\""} + std::string{type} + "\"");
+        });
+        require(found != lines.end(), std::string{"record present: "} + std::string{type});
+        return *found;
+    };
+    const auto login = find("auth.login");
+    require(contains(login, "\"outcome\":\"success\"") && contains(login, "\"service\":\"sshd\"") && contains(login, "\"user\":\"vagrant\"") &&
+                contains(login, "\"source\":{\"ip\":\"203.0.113.9\",\"port\":40000}") &&
+                contains(login, "\"key\":{\"type\":\"ED25519\",\"fingerprint\":\"SHA256:abc\"}") && contains(login, "\"pid\":4242") &&
+                contains(login, "{\"field\":\"process\",\"reason\":\"process_exited\"}"),
+            "a login names the user, the source and the key, and says the process is gone");
+    const auto failure = find("auth.failure");
+    require(contains(failure, "\"outcome\":\"failure\"") && contains(failure, "\"invalid_user\":true") &&
+                contains(failure, "{\"field\":\"process\",\"reason\":\"not_supported_by_provider\"}"),
+            "a failure without a pid says the provider cannot name the process");
+    const auto privilege = find("auth.privilege");
+    require(contains(privilege, "\"target_user\":\"root\"") && contains(privilege, "\"command\":\"/bin/id\"") && contains(privilege, "\"sanitized\":true") &&
+                contains(privilege, "\"name\":\"systemd\""),
+            "a privilege event carries the target user and command, and the actor when it is known");
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "seq stays contiguous with auth records");
+    }
+}
+
 void test_pipeline_reports_integrity_changes() {
     const auto proc = fresh_directory("fimproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
@@ -1073,6 +1141,10 @@ void test_sensor_config_is_strict() {
     require(!value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_network_events=false\n"), "network off").enable_network_events,
             "network telemetry can be disabled");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_network_events=maybe\n")), "non-boolean enable_network_events rejected");
+    require(value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "defaults").enable_auth_events, "authentication telemetry is on by default");
+    require(!value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_auth_events=false\n"), "auth off").enable_auth_events,
+            "authentication telemetry can be disabled");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_auth_events=maybe\n")), "non-boolean enable_auth_events rejected");
     const auto& integrity = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nwal_path=/data/wal\n"), "fim defaults");
     require(integrity.enable_fim && integrity.fim_path == "/data/fim.baseline" && integrity.fim_interval_seconds == 300U, "FIM is on by default, next to the WAL");
     const auto& tuned = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_fim=false\nfim_path=/x/b\nfim_interval_seconds=60\n"), "fim keys");
@@ -1138,6 +1210,7 @@ int main() {
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);
     run("pipeline_enriches_network_events", test_pipeline_enriches_network_events);
+    run("pipeline_serializes_auth_events", test_pipeline_serializes_auth_events);
     run("pipeline_reports_integrity_changes", test_pipeline_reports_integrity_changes);
     run("pipeline_hashes_executed_images", test_pipeline_hashes_executed_images);
     run("provider_family_prefers_first_and_falls_back", test_provider_family_prefers_first_and_falls_back);

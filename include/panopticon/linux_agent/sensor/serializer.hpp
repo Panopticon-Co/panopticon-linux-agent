@@ -84,6 +84,14 @@ struct network_record {
     raw_network_event network;
 };
 
+// An auth.* event after the pipeline attached the logging process (if it still exists).
+struct auth_record {
+    std::uint64_t time_unix_ns{};
+    provenance source;
+    entity_ptr actor;
+    raw_auth_event auth;
+};
+
 class record_serializer {
 public:
     record_serializer(sensor_identity identity, const clock_domain& clock);
@@ -104,6 +112,9 @@ public:
 
     // network.connect / network.accept / network.listen (catalog §4.3).
     [[nodiscard]] std::string network_event(const network_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+
+    // auth.login / auth.failure / auth.privilege (catalog 4.4).
+    [[nodiscard]] std::string auth_event(const auth_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
 
     // fim.changed (catalog §4.2). `actor` is the acting process when a file event named the path
     // and the process was still known; otherwise the process is reported as unavailable.

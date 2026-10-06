@@ -7,6 +7,7 @@
 //   panopticon-sensord ... --control-socket PATH         serve status/coverage/state on a 0600 unix socket
 
 #include "panopticon/linux_agent/host.hpp"
+#include "panopticon/linux_agent/sensor/auth_log.hpp"
 #include "panopticon/linux_agent/sensor/control.hpp"
 #include "panopticon/linux_agent/sensor/ebpf_process.hpp"
 #include "panopticon/linux_agent/sensor/fanotify_file.hpp"
@@ -186,6 +187,7 @@ int main(int argc, char** argv) {
         providers.push_back(std::make_unique<sensor::fanotify_file_provider>(std::move(file_options)));
     }
     if (config.enable_network_events) providers.push_back(std::make_unique<sensor::sockdiag_network_provider>());
+    if (config.enable_auth_events) providers.push_back(std::make_unique<sensor::auth_log_provider>());
     sensor::sensor_pipeline pipeline{config, identity, clock, *sink, std::move(providers)};
     if (auto started = pipeline.start(); !succeeded(started)) {
         std::fprintf(stderr, "panopticon-sensord: start: %s\n", std::get<error>(started).message.c_str());

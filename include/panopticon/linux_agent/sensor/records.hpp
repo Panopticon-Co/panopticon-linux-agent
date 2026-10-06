@@ -127,8 +127,38 @@ struct raw_network_event {
     std::vector<unavailable_field> unavailable;
 };
 
+enum class auth_kind : std::uint8_t {
+    login_success,
+    login_failure,
+    privilege_success,  // sudo, su, pkexec
+    privilege_failure,
+};
+[[nodiscard]] const char* to_string(auth_kind value) noexcept;
+
+// An authentication event taken from a log line. Everything here is text a user-space program
+// wrote, and parts of it (user names, commands) are chosen by whoever is being authenticated, so
+// it is bounded and cleaned before it gets here and reported as user_space_reported.
+struct raw_auth_event {
+    auth_kind kind{auth_kind::login_success};
+    std::string service;  // sshd, sudo, su, login, pkexec
+    std::string method;   // publickey, password, keyboard-interactive, console, ...
+    std::string user;     // who authenticated, or who tried to
+    std::string target_user;  // sudo/su/pkexec: the account taken on
+    std::string source_address;  // empty for local authentication
+    std::uint16_t source_port{};
+    std::string key_type;         // publickey logins: RSA, ED25519, ...
+    std::string key_fingerprint;  // SHA256:...
+    std::string tty;
+    std::string working_directory;
+    std::string command;
+    std::uint32_t pid{};      // the logging process (sshd child, sudo)
+    bool invalid_user{false};  // sshd: the account does not exist
+    bool sanitized{false};     // a field contained control or non-ASCII bytes that were replaced
+    bool truncated{false};     // a field was cut at its limit
+};
+
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
-                                 raw_session_change, raw_file_event, raw_network_event>;
+                                 raw_session_change, raw_file_event, raw_network_event, raw_auth_event>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

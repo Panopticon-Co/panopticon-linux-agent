@@ -37,6 +37,16 @@ const char* to_string(const network_operation value) noexcept {
     return "connect";
 }
 
+const char* to_string(const auth_kind value) noexcept {
+    switch (value) {
+    case auth_kind::login_success: return "login_success";
+    case auth_kind::login_failure: return "login_failure";
+    case auth_kind::privilege_success: return "privilege_success";
+    case auth_kind::privilege_failure: return "privilege_failure";
+    }
+    return "login_failure";
+}
+
 exit_details decode_exit_status(const std::uint32_t status) noexcept {
     exit_details details;
     const auto low = status & 0x7FU;
@@ -155,8 +165,10 @@ std::vector<process_event> entity_graph::apply(const raw_record& record) {
             else if constexpr (std::is_same_v<payload_type, raw_credential_change>) return on_credentials(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_ptrace>) return on_ptrace(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_comm_change>) return on_comm(record, payload);
-            else if constexpr (std::is_same_v<payload_type, raw_file_event> || std::is_same_v<payload_type, raw_network_event>) return {};  // not a process change
-            else return on_session(record, payload);
+            else if constexpr (std::is_same_v<payload_type, raw_file_event> || std::is_same_v<payload_type, raw_network_event> ||
+                               std::is_same_v<payload_type, raw_auth_event>) {
+                return {};  // not a process change
+            } else return on_session(record, payload);
         },
         record.payload);
 }

@@ -415,6 +415,63 @@ std::string record_serializer::network_event(const network_record& record, const
     return out.take();
 }
 
+std::string record_serializer::auth_event(const auth_record& record, const std::uint64_t seq,
+                                          const std::uint64_t observed_unix_ns) const {
+    const auto& auth = record.auth;
+    const bool login = auth.kind == auth_kind::login_success || auth.kind == auth_kind::login_failure;
+    const bool success = auth.kind == auth_kind::login_success || auth.kind == auth_kind::privilege_success;
+    json_writer out;
+    begin(out, "event", login ? (success ? "auth.login" : "auth.failure") : "auth.privilege", seq, record.time_unix_ns, observed_unix_ns,
+          record.source);
+    std::vector<unavailable_field> unavailable;
+    if (record.actor) {
+        out.key("process");
+        write_process(out, *record.actor);
+        out.end_object();
+    } else {
+        out.key("process").begin_object();
+        if (auth.pid != 0U) out.field("pid", auth.pid);
+        out.end_object();
+        if (auth.pid != 0U) unavailable.push_back({"process", unavailable_reason::process_exited});
+        else unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+    }
+    out.key("auth").begin_object();
+    out.field("service", auth.service);
+    if (!auth.method.empty()) out.field("method", auth.method);
+    out.field("outcome", success ? "success" : "failure");
+    out.field("user", auth.user);
+    if (!auth.target_user.empty()) out.field("target_user", auth.target_user);
+    if (auth.invalid_user) out.field("invalid_user", true);
+    if (!auth.source_address.empty()) {
+        out.key("source").begin_object();
+        out.field("ip", auth.source_address);
+        out.field("port", static_cast<std::uint32_t>(auth.source_port));
+        out.end_object();
+    }
+    if (!auth.key_fingerprint.empty()) {
+        out.key("key").begin_object();
+        out.field("type", auth.key_type);
+        out.field("fingerprint", auth.key_fingerprint);
+        out.end_object();
+    }
+    if (!auth.tty.empty()) out.field("tty", auth.tty);
+    if (!auth.working_directory.empty()) out.field("working_directory", auth.working_directory);
+    if (!auth.command.empty()) out.field("command", auth.command);
+    if (auth.sanitized) out.field("sanitized", true);
+    if (auth.truncated) out.field("truncated", true);
+    out.end_object();
+    out.key("unavailable").begin_array();
+    for (const auto& field : unavailable) {
+        out.begin_object();
+        out.field("field", field.field);
+        out.field("reason", to_string(field.reason));
+        out.end_object();
+    }
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::hash_computed(const hash_result& result, const std::uint64_t seq, const std::uint64_t now_unix_ns) const {
     json_writer out;
     begin(out, "event", "hash.computed", seq, now_unix_ns, now_unix_ns, {"hash", "FSSCAN", confidence::observed});
