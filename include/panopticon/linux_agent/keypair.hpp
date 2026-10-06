@@ -41,6 +41,12 @@ struct ec_keypair {
 // signature (converted from OpenSSL's native DER signature output).
 [[nodiscard]] result<ec_raw_signature> sign_raw(const ec_keypair& keypair, const std::vector<std::uint8_t>& data);
 
+// Verifies a raw r||s ECDSA P-256 / SHA-256 signature against a raw uncompressed public point. An error
+// means the point is not a valid P-256 key (not on the curve, wrong encoding); `false` means the key is
+// valid and the signature does not match. Anything unexpected is a failure to verify, never a pass.
+[[nodiscard]] result<bool> verify_raw(const ec_public_key_point& public_point, const std::vector<std::uint8_t>& data,
+                                      const ec_raw_signature& signature);
+
 // Persists a keypair's private key to `path` (0600, write-temp-then-rename)
 // so a crash mid-write never leaves a partial, ambiguous key file behind.
 [[nodiscard]] result<bool> store_ec_keypair(const std::filesystem::path& path, const ec_keypair& keypair);

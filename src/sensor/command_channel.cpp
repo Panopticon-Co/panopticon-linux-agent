@@ -202,8 +202,8 @@ parsed_command parse_endpoint_command(const json_value& value) {
     if (const auto correlation = string_member(value, "correlation_id"); correlation && command_id_ok(*correlation)) {
         failure.correlation_id = *correlation;
     }
-    static constexpr std::array<std::string_view, 9U> allowed{"command_id", "agent_id", "host_id", "schema_version", "action",
-                                                              "expires_at", "created_at", "correlation_id", "target"};
+    static constexpr std::array<std::string_view, 10U> allowed{"command_id", "agent_id", "host_id", "schema_version", "action",
+                                                               "expires_at", "created_at", "correlation_id", "target", "authorization"};
     for (const auto& key : value.keys()) {
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
             failure.reason = "unknown_field";
@@ -245,6 +245,26 @@ parsed_command parse_endpoint_command(const json_value& value) {
         const auto parsed = text ? parse_utc_offset_timestamp(*text) : std::nullopt;
         if (!parsed) return fail("invalid_created_at");
         command.created_unix = *parsed;
+    }
+    if (const auto* authorization = value.find("authorization"); authorization != nullptr) {
+        // A closed object: an extra member is a refusal, as everywhere else in the envelope.
+        const auto& members = authorization->keys();
+        if (!authorization->is_object() || members.size() != 3U) return fail("invalid_authorization");
+        const auto algorithm = string_member(*authorization, "algorithm");
+        const auto key_id = string_member(*authorization, "key_id");
+        const auto signature = string_member(*authorization, "signature");
+        if (!algorithm || !key_id || !signature) return fail("invalid_authorization");
+        if (*algorithm != "ES256" || key_id->size() != 16U) return fail("invalid_authorization");
+        if (!std::all_of(key_id->begin(), key_id->end(), [](const char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) {
+            return fail("invalid_authorization");
+        }
+        const auto raw = decode_base64(*signature);
+        if (!raw || raw->size() != 64U) return fail("invalid_authorization");
+        command_authorization parsed;
+        parsed.algorithm = std::string{*algorithm};
+        parsed.key_id = std::string{*key_id};
+        std::copy(raw->begin(), raw->end(), parsed.signature.begin());
+        command.authorization = std::move(parsed);
     }
     const auto* target = value.find("target");
     if (target == nullptr || !target->is_object()) return fail("invalid_target");
@@ -711,6 +731,24 @@ command_outcome command_processor::handle(const endpoint_command& command) {
     if (command.agent_id != options_.agent_id || command.host_id != options_.host_id) {
         return refuse(command, "wrong_endpoint", "the command names a different agent or host", true);
     }
+    // Who issued it comes before anything about what it asks for. A pinned key means every command must be
+    // signed by one of them; with none pinned the endpoint was configured to accept unsigned commands, or
+    // refuses everything.
+    if (options_.keyring) {
+        switch (options_.keyring->check(command)) {
+            case authorization_verdict::valid: break;
+            case authorization_verdict::missing:
+                return refuse(command, "signature_required", "this endpoint acts only on commands signed by the Manager's command authority", true);
+            case authorization_verdict::unknown_key:
+                return refuse(command, "unknown_signing_key", "the command is signed with a key this endpoint does not trust", true);
+            case authorization_verdict::unsigned_window:
+                return refuse(command, "signature_invalid", "a signed command must carry created_at inside the signature", true);
+            case authorization_verdict::bad_signature:
+                return refuse(command, "signature_invalid", "the signature does not match the command", true);
+        }
+    } else if (policy.require_signature) {
+        return refuse(command, "signature_required", "signed commands are required and no signing key is configured", true);
+    }
     if (!command.boot_id.empty()) {
         if (options_.boot_digest.empty()) return refuse(command, "boot_unavailable", "this endpoint cannot establish its boot identity", true);
         if (command.boot_id != options_.boot_digest) {
@@ -915,7 +953,12 @@ void command_channel_provider::report(const command_outcome& outcome, record_que
     }
     {
         std::lock_guard lock{mutex_};
-        if (outcome.outcome == "rejected") ++metrics_.rejected;
+        if (outcome.outcome == "rejected") {
+            ++metrics_.rejected;
+            if (outcome.reason == "signature_required" || outcome.reason == "unknown_signing_key" || outcome.reason == "signature_invalid") {
+                ++metrics_.authorization_refused;
+            }
+        }
         else if (outcome.executed) ++metrics_.executed;
     }
     if (outcome.command_id.empty()) return;
@@ -941,6 +984,7 @@ std::uint64_t command_channel_provider::step(record_queue& queue) {
         std::lock_guard lock{mutex_};
         ++metrics_.polls;
     }
+    if (options_.processor.keyring) options_.processor.keyring->refresh();  // a revoked key stops working at the next poll
     // Results the Manager never acknowledged go first: once a command is accepted the Manager does
     // not send it again, so nothing else would repeat the answer.
     for (const auto& [id, entry] : ledger_->unreported()) {
@@ -965,6 +1009,7 @@ std::uint64_t command_channel_provider::step(record_queue& queue) {
         std::lock_guard lock{mutex_};
         state_ = "active";
         metrics_.last_error.clear();
+        if (options_.processor.keyring) metrics_.last_error = options_.processor.keyring->last_error();
         backoff_ms_ = 0U;
     }
     const auto poll = parse_command_poll(reply.body);

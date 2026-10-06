@@ -252,6 +252,20 @@ int main(int argc, char** argv) {
             channel.processor.host_id = config.host_id;
             channel.processor.boot_digest = sensor::linux_boot_digest(observation.boot_id);
             channel.processor.policy.require_boot_binding = config.response_require_boot_binding;
+            bool keys_ok = true;
+            if (!config.response_signing_keys.empty()) {
+                auto keyring = sensor::command_keyring::load(config.response_signing_keys);
+                if (succeeded(keyring)) {
+                    channel.processor.keyring = std::move(std::get<std::unique_ptr<sensor::command_keyring>>(keyring));
+                    std::fprintf(stderr, "panopticon-sensord: command signing: %zu key(s) pinned\n", channel.processor.keyring->size());
+                } else {
+                    // Fail closed: a configured trust anchor that cannot be read is not a reason to trust the channel alone.
+                    keys_ok = false;
+                    std::fprintf(stderr, "panopticon-sensord: command channel disabled: %s\n", std::get<error>(keyring).message.c_str());
+                }
+            } else {
+                std::fprintf(stderr, "panopticon-sensord: WARNING command signing is off (response_allow_unsigned=true): commands are trusted on the TLS identity alone\n");
+            }
             channel.processor.policy.mode = mode;
             channel.processor.policy.allowed.clear();
             for (const auto& name : config.response_actions) {
@@ -265,9 +279,11 @@ int main(int argc, char** argv) {
             sensor::local_executor_options executor;
             executor.proc_root = config.proc_root;
             executor.host_id = config.host_id;
-            providers.push_back(std::make_unique<sensor::command_channel_provider>(
-                std::move(channel), sensor::make_https_command_transport(*manager_connection), sensor::make_local_executor(std::move(executor))));
-            std::fprintf(stderr, "panopticon-sensord: command channel %s\n", sensor::to_string(mode));
+            if (keys_ok) {
+                providers.push_back(std::make_unique<sensor::command_channel_provider>(
+                    std::move(channel), sensor::make_https_command_transport(*manager_connection), sensor::make_local_executor(std::move(executor))));
+                std::fprintf(stderr, "panopticon-sensord: command channel %s\n", sensor::to_string(mode));
+            }
         }
     }
     sensor::sensor_pipeline pipeline{config, identity, clock, *sink, std::move(providers)};

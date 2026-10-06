@@ -65,14 +65,15 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 39U> allowed{
+    constexpr std::array<std::string_view, 41U> allowed{
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
         "file_include", "file_exclude", "enable_fim", "fim_path", "fim_interval_seconds", "enable_hashing", "hash_max_file_bytes",
         "hash_bytes_per_second", "enable_network_events", "enable_auth_events", "enable_kernel_events", "enable_security_events", "enable_sensitive_file_events", "manager_url", "identity_path", "ca_bundle",
         "response_mode", "response_actions", "response_poll_seconds", "response_max_lifetime_seconds",
-        "response_max_changes_per_minute", "response_ledger_path", "response_require_boot_binding"};
+        "response_max_changes_per_minute", "response_ledger_path", "response_require_boot_binding", "response_signing_keys",
+        "response_allow_unsigned"};
     for (const auto& [key, value] : values) {
         (void)value;
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
@@ -115,6 +116,14 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     if (const auto value = text("response_require_boot_binding"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.response_require_boot_binding = *value == "true";
+    }
+    if (const auto value = text("response_allow_unsigned"); value.has_value()) {
+        if (*value != "true" && *value != "false") valid = false;
+        config.response_allow_unsigned = *value == "true";
+    }
+    if (const auto value = text("response_signing_keys"); value.has_value()) {
+        config.response_signing_keys = *value;
+        if (!config.response_signing_keys.is_absolute() || value->find("..") != std::string::npos) valid = false;
     }
     if (const auto value = text("enable_ebpf"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
@@ -206,6 +215,10 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
         if (!config.response_ledger_path.is_absolute() || value->find("..") != std::string::npos) valid = false;
     }
     if (config.response_mode != "off" && config.manager_url.empty()) valid = false;
+    // Commands are acted on only when signed by a pinned key, or when the operator said in so many words that
+    // unsigned commands are acceptable (a lab). There is no silent default to trusting the channel alone.
+    if (config.response_mode != "off" && config.response_signing_keys.empty() && !config.response_allow_unsigned) valid = false;
+    if (!config.response_signing_keys.empty() && config.response_allow_unsigned) valid = false;
     // Delivery needs an https URL and an identity file together; a private CA must be absolute.
     if (config.manager_url.empty() != config.identity_path.empty()) valid = false;
     if (!config.manager_url.empty() && config.manager_url.rfind("https://", 0U) != 0U) valid = false;

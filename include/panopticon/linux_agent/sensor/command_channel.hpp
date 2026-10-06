@@ -1,6 +1,7 @@
 #pragma once
 
 #include "panopticon/linux_agent/error.hpp"
+#include "panopticon/linux_agent/sensor/command_auth.hpp"
 #include "panopticon/linux_agent/sensor/json_reader.hpp"
 #include "panopticon/linux_agent/sensor/provider.hpp"
 #include "panopticon/linux_agent/sensor/records.hpp"
@@ -75,6 +76,8 @@ struct endpoint_command {
     // Schema 2 only: the boot the target was observed in, "boot_" + 64 hex (see linux_boot_digest).
     // Empty for schema 1, whose process target is bound to a boot only by its start ticks.
     std::string boot_id;
+    // The signature the Manager's command authority made over this command, when it carried one.
+    std::optional<command_authorization> authorization;
 };
 
 // The boot scope a schema-2 command names for this host: "boot_" followed by the lowercase hex SHA-256
@@ -121,6 +124,9 @@ struct command_policy {
     // Refuse process actions that are not boot-bound (schema 1). Off until the Manager issues schema 2
     // to Linux endpoints; then a target from a previous boot cannot be acted on by start ticks alone.
     bool require_boot_binding{false};
+    // Refuse every command: set when signatures are required and no key is pinned (a misconfiguration that
+    // must not fall back to acting on unsigned commands).
+    bool require_signature{false};
     // Changing actions performed in any rolling minute; the next one is refused. A runaway
     // automation cannot take the host apart faster than a person can notice.
     std::size_t maximum_changes_per_minute{6U};
@@ -224,6 +230,9 @@ struct command_processor_options {
     std::string agent_id;
     std::string host_id;
     std::string boot_digest;  // linux_boot_digest of the running kernel; empty: schema-2 commands are refused
+    // The pinned command-signing keys. When set, a command is acted on only with a valid signature from one of
+    // them; unsigned commands are refused. Empty: see command_policy::require_signature.
+    std::shared_ptr<command_keyring> keyring;
     command_policy policy;
     std::function<std::int64_t()> now_unix;  // empty: the system clock
     // Called once a command has passed every check and its intent is durably recorded, just before it
@@ -293,6 +302,7 @@ struct command_channel_metrics {
     std::uint64_t results_reported{};
     std::uint64_t result_failures{};
     std::uint64_t unreadable{};
+    std::uint64_t authorization_refused{};  // refused for a missing, unknown or invalid signature
     std::string last_error;
 };
 

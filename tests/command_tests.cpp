@@ -2,6 +2,7 @@
 // procedure, the local executor against real processes, and the poll/accept/result exchange through
 // a fake Manager.
 
+#include "panopticon/linux_agent/keypair.hpp"
 #include "panopticon/linux_agent/sensor/clock.hpp"
 #include "panopticon/linux_agent/sensor/command_channel.hpp"
 #include "panopticon/linux_agent/sensor/json_reader.hpp"
@@ -985,13 +986,350 @@ void test_boot_bound_commands() {
     fs::remove_all(dir);
 }
 
+// ---- command authorization (ADR 025) ---------------------------------------------------------
+
+std::string base64_encode_for_test(const std::uint8_t* data, const std::size_t size) {
+    static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    for (std::size_t index = 0; index < size; index += 3U) {
+        const unsigned a = data[index];
+        const unsigned b = index + 1U < size ? data[index + 1U] : 0U;
+        const unsigned c = index + 2U < size ? data[index + 2U] : 0U;
+        const unsigned group = (a << 16U) | (b << 8U) | c;
+        out.push_back(alphabet[(group >> 18U) & 63U]);
+        out.push_back(alphabet[(group >> 12U) & 63U]);
+        out.push_back(index + 1U < size ? alphabet[(group >> 6U) & 63U] : '=');
+        out.push_back(index + 2U < size ? alphabet[group & 63U] : '=');
+    }
+    return out;
+}
+
+ec_keypair make_key() {
+    auto generated = generate_ec_p256_keypair();
+    require(succeeded(generated), "a test key");
+    return std::get<ec_keypair>(generated);
+}
+
+endpoint_command sign_command(endpoint_command command, const ec_keypair& key) {
+    const auto input = command_signing_input(command);
+    const auto signature = sign_raw(key, std::vector<std::uint8_t>(input.begin(), input.end()));
+    require(succeeded(signature), "signing works");
+    command_authorization authorization;
+    authorization.algorithm = "ES256";
+    authorization.key_id = signing_key_id(key.public_point);
+    authorization.signature = std::get<ec_raw_signature>(signature);
+    command.authorization = authorization;
+    return command;
+}
+
+std::string authorization_json(const endpoint_command& command) {
+    const auto& a = *command.authorization;
+    return "{\"algorithm\":\"" + a.algorithm + "\",\"key_id\":\"" + a.key_id + "\",\"signature\":\"" +
+           base64_encode_for_test(a.signature.data(), a.signature.size()) + "\"}";
+}
+
+void test_ecdsa_verify_and_base64() {
+    const auto key = make_key();
+    const auto other = make_key();
+    const std::vector<std::uint8_t> data{'p', 'a', 'n'};
+    const auto signature = sign_raw(key, data);
+    require(succeeded(signature), "sign");
+    const auto& raw = std::get<ec_raw_signature>(signature);
+    const auto ok = verify_raw(key.public_point, data, raw);
+    require(succeeded(ok) && std::get<bool>(ok), "a signature verifies under its own key");
+    auto tampered = data;
+    tampered[0] ^= 1U;
+    const auto wrong_data = verify_raw(key.public_point, tampered, raw);
+    require(succeeded(wrong_data) && !std::get<bool>(wrong_data), "other data does not");
+    require(!std::get<bool>(verify_raw(other.public_point, data, raw)), "another key does not");
+    auto flipped = raw;
+    flipped[10] ^= 0x80U;
+    require(!std::get<bool>(verify_raw(key.public_point, data, flipped)), "a damaged signature does not");
+    require(!std::get<bool>(verify_raw(key.public_point, data, ec_raw_signature{})), "an all-zero signature does not (and does not crash)");
+    ec_public_key_point off_curve = key.public_point;
+    off_curve[40] ^= 1U;
+    require(!succeeded(verify_raw(off_curve, data, raw)), "a point off the curve is an error, not a key that verifies nothing");
+    ec_public_key_point compressed = key.public_point;
+    compressed[0] = 0x02;
+    require(!succeeded(verify_raw(compressed, data, raw)), "only the uncompressed form");
+
+    const auto bytes = [](const char* text) { return decode_base64(text); };
+    require(bytes("QQ==") && *bytes("QQ==") == std::vector<std::uint8_t>{'A'}, "padding");
+    require(bytes("TWFu") && *bytes("TWFu") == std::vector<std::uint8_t>{'M', 'a', 'n'}, "no padding");
+    for (const char* bad : {"", "QQ=", "Q===", "QR==", "QQ==QQ==", "QQ =", "QQ\n=", "QU-_", "QUJD=", "====", "Q Q=", "QQ=A"}) {
+        require(!bytes(bad), bad);
+    }
+}
+
+void test_signing_input_is_unambiguous() {
+    const auto base = as_command(parse_one(envelope("c1", "KILL_PROCESS", kill_target, "2027-01-15T08:05:00Z", "2027-01-15T08:00:00Z")));
+    const auto input = command_signing_input(base);
+    require(input.rfind("panopticon-command-auth/1\n", 0) == 0U, "domain separation");
+    const auto differs = [&](auto change, const char* what) {
+        auto copy = base;
+        change(copy);
+        require(command_signing_input(copy) != input, what);
+    };
+    differs([](endpoint_command& c) { c.command_id = "c2"; }, "command id");
+    differs([](endpoint_command& c) { c.correlation_id = "x"; }, "correlation id");
+    differs([](endpoint_command& c) { c.agent_id = "agent-2"; }, "agent");
+    differs([](endpoint_command& c) { c.host_id = "host-2"; }, "host");
+    differs([](endpoint_command& c) { c.action = command_action::collect_process_info; }, "action");
+    differs([](endpoint_command& c) { c.created_unix += 1; }, "created_at");
+    differs([](endpoint_command& c) { c.expires_unix += 1; }, "expires_at");
+    differs([](endpoint_command& c) { c.pid += 1U; }, "pid");
+    differs([](endpoint_command& c) { c.start_ticks += 1U; }, "start ticks");
+    differs([](endpoint_command& c) { c.boot_id = "boot_" + std::string(64U, 'a'); }, "boot scope (and schema version)");
+    differs([](endpoint_command& c) { c.path = "/etc/shadow"; }, "path");
+    // A value can not run into its neighbour: shifting characters between fields changes the input.
+    auto left = base;
+    auto right = base;
+    left.command_id = "ab";
+    left.correlation_id = "c";
+    right.command_id = "a";
+    right.correlation_id = "bc";
+    require(command_signing_input(left) != command_signing_input(right), "length-prefixed fields do not collide");
+    auto newline_a = base;
+    auto newline_b = base;
+    newline_a.path = "/a\npath:1:/b";
+    newline_b.path = "/a";
+    require(command_signing_input(newline_a) != command_signing_input(newline_b), "a path cannot forge a field");
+}
+
+void test_parse_authorization() {
+    const auto key = make_key();
+    const std::string expires = "2027-01-15T08:05:00Z";
+    const std::string created = "2027-01-15T08:00:00Z";
+    const auto plain = as_command(parse_one(envelope("a1", "KILL_PROCESS", kill_target, expires, created)));
+    const auto signed_one = sign_command(plain, key);
+    const auto with = [&](const std::string& authorization) {
+        std::string text = envelope("a1", "KILL_PROCESS", kill_target, expires, created);
+        text.insert(text.size() - 1U, ",\"authorization\":" + authorization);
+        return parse_one(text);
+    };
+    const auto parsed = as_command(with(authorization_json(signed_one)));
+    require(parsed.authorization && parsed.authorization->key_id == signed_one.authorization->key_id &&
+                parsed.authorization->signature == signed_one.authorization->signature && parsed.authorization->algorithm == "ES256",
+            "a well-formed authorization parses");
+    require(!as_command(parse_one(envelope("a2", "KILL_PROCESS", kill_target, expires, created))).authorization, "none is none");
+
+    const auto a = authorization_json(signed_one);
+    const auto replace = [&](const std::string& from, const std::string& to) {
+        auto text = a;
+        text.replace(text.find(from), from.size(), to);
+        return text;
+    };
+    const std::string good_key = signed_one.authorization->key_id;
+    const std::string sig64 = base64_encode_for_test(signed_one.authorization->signature.data(), 64U);
+    auto upper = good_key;
+    upper[0] = 'A';
+    const std::vector<std::pair<std::string, std::string>> bad{
+        {"not an object", "\"abc\""},
+        {"empty object", "{}"},
+        {"extra member", a.substr(0U, a.size() - 1U) + ",\"x\":1}"},
+        {"missing member", "{\"algorithm\":\"ES256\",\"key_id\":\"" + good_key + "\"}"},
+        {"other algorithm", replace("ES256", "ES384")},
+        {"none algorithm", replace("ES256", "none")},
+        {"short key id", replace(good_key, good_key.substr(0U, 15U))},
+        {"upper-case key id", replace(good_key, upper)},
+        {"non-hex key id", replace(good_key, std::string(16U, 'z'))},
+        {"signature too short", replace(sig64, base64_encode_for_test(signed_one.authorization->signature.data(), 63U))},
+        {"signature not base64", replace(sig64, std::string(sig64.size(), '*'))},
+        {"signature number", "{\"algorithm\":\"ES256\",\"key_id\":\"" + good_key + "\",\"signature\":5}"},
+    };
+    for (const auto& [why, text] : bad) {
+        const auto outcome = with(text);
+        require(std::holds_alternative<command_unreadable>(outcome) && std::get<command_unreadable>(outcome).reason == "invalid_authorization", why.c_str());
+        require(std::get<command_unreadable>(outcome).command_id == "a1", "and the command stays addressable so the Manager can close it");
+    }
+}
+
+// A processor with a pinned key, the way the sensor builds one.
+struct signed_world {
+    fs::path dir;
+    fake_executor executor;
+    std::unique_ptr<command_ledger> ledger;
+    std::unique_ptr<command_processor> processor;
+    std::int64_t clock{now_fixed};
+    ec_keypair key{make_key()};
+    std::shared_ptr<command_keyring> keyring;
+
+    explicit signed_world(const std::string& name, std::vector<ec_public_key_point> trusted = {}, const bool require = false,
+                          const bool pin_own_key = true)
+        : dir{scratch(name)} {
+        ledger = open_ledger(dir / "commands", 64U);
+        if (pin_own_key) trusted.push_back(key.public_point);
+        if (!trusted.empty()) keyring = std::shared_ptr<command_keyring>{command_keyring::from_points(trusted).release()};
+        command_processor_options options;
+        options.agent_id = "agent-1";
+        options.host_id = "host-1";
+        options.boot_digest = linux_boot_digest(test_kernel_boot);
+        options.policy.mode = response_mode::enforce;
+        options.policy.require_signature = require;
+        options.keyring = keyring;
+        options.now_unix = [this] { return clock; };
+        processor = std::make_unique<command_processor>(std::move(options), *ledger, executor);
+    }
+    ~signed_world() { fs::remove_all(dir); }
+
+    endpoint_command make(const std::string& id, const std::string& action = "KILL_PROCESS", const std::string& target = kill_target) const {
+        return as_command(parse_one(envelope(id, action, target, zulu(clock + 300), zulu(clock))));
+    }
+};
+
+void test_processor_requires_valid_signature() {
+    signed_world w{"signed"};
+    const auto refused = [&](const endpoint_command& command, const char* reason) {
+        const auto outcome = w.processor->handle(command);
+        require(outcome.outcome == "rejected" && outcome.reason == reason && !outcome.executed, reason);
+        require(w.executor.calls.empty(), "a refused command never reaches the executor");
+        require(w.ledger->find(command.command_id)->state == command_ledger::phase::done, "and the refusal is remembered");
+    };
+    refused(w.make("unsigned"), "signature_required");
+
+    const auto foreign = make_key();
+    refused(sign_command(w.make("foreign"), foreign), "unknown_signing_key");
+
+    // Every field the endpoint acts on is covered: change one after signing and the signature no longer fits.
+    const auto tamper = [&](const std::string& id, auto change, const char* what) {
+        auto command = sign_command(w.make(id), w.key);
+        change(command);
+        const auto outcome = w.processor->handle(command);
+        require(outcome.reason == "signature_invalid" && !outcome.executed, what);
+    };
+    tamper("t-pid", [](endpoint_command& c) { c.pid = 1234U; }, "a different pid");
+    tamper("t-ticks", [](endpoint_command& c) { c.start_ticks = 100U; }, "different start ticks");
+    tamper("t-exp", [](endpoint_command& c) { c.expires_unix += 600; }, "a longer life");
+    tamper("t-act", [](endpoint_command& c) { c.action = command_action::collect_process_info; }, "another action");
+    tamper("t-corr", [](endpoint_command& c) { c.correlation_id = "other"; }, "another correlation id");
+    tamper("t-algo", [](endpoint_command& c) { c.authorization->algorithm = "ES384"; }, "another algorithm");
+    auto damaged = sign_command(w.make("t-sig"), w.key);
+    damaged.authorization->signature[3] ^= 1U;
+    require(w.processor->handle(damaged).reason == "signature_invalid", "a damaged signature");
+
+    // A signature cannot give a command a window it was not signed with.
+    auto no_window = w.make("t-window");
+    no_window.created_unix = 0;
+    require(w.processor->handle(sign_command(no_window, w.key)).reason == "signature_invalid", "created_at is part of the signed window");
+
+    require(w.executor.calls.empty(), "nothing above ran");
+    const auto good = sign_command(w.make("good"), w.key);
+    const auto ran = w.processor->handle(good);
+    require(ran.outcome == "succeeded" && ran.executed && w.executor.calls.size() == 1U, "a signed command runs");
+    const auto replay = w.processor->handle(good);
+    require(replay.reason == "replay" && w.executor.calls.size() == 1U, "the same signed command is a replay");
+
+    // The ledger holds a refused id, so a later correctly signed command with that id is a replay too: ids
+    // are single-use whatever happened to them.
+    require(w.processor->handle(sign_command(w.make("unsigned"), w.key)).reason == "replay", "a refused id is spent");
+    // Wrong endpoint is still decided first.
+    auto wrong_host = w.make("wh");
+    wrong_host.host_id = "other-host";
+    require(w.processor->handle(wrong_host).reason == "wrong_endpoint", "wrong endpoint is decided before the signature");
+}
+
+void test_processor_signature_policy() {
+    // No key and signatures required: nothing runs, whatever the command carries.
+    signed_world strict{"signed-strict", {}, true, false};
+    require(strict.processor->handle(strict.make("s1")).reason == "signature_required", "required with no key pinned");
+    require(strict.processor->handle(sign_command(strict.make("s2"), strict.key)).reason == "signature_required", "a signature nobody can check");
+    require(strict.executor.calls.empty(), "nothing ran");
+    // No key and not required (the explicit lab opt-out): unsigned commands are acted on, as before this change.
+    signed_world lab{"signed-lab", {}, false, false};
+    require(lab.processor->handle(lab.make("l1")).executed, "response_allow_unsigned keeps the TLS-only behaviour");
+    // Several keys: rotation. A command signed by either runs.
+    const auto old_key = make_key();
+    const auto fresh = make_key();
+    signed_world both{"signed-both", {old_key.public_point, fresh.public_point}, false, false};
+    require(both.processor->handle(sign_command(both.make("r1"), old_key)).executed, "the old key");
+    require(both.processor->handle(sign_command(both.make("r2"), fresh)).executed, "the new key");
+    require(both.keyring->size() == 2U, "two keys pinned");
+    require(both.processor->handle(sign_command(both.make("r3"), both.key)).reason == "unknown_signing_key", "a third key is not trusted");
+}
+
+void test_keyring_file_and_revocation() {
+    const fs::path dir = scratch("keyring");
+    const auto k1 = make_key();
+    const auto k2 = make_key();
+    const auto line = [](const ec_keypair& key, const char* label) {
+        return base64_encode_for_test(key.public_point.data(), key.public_point.size()) + (label[0] != '\0' ? std::string{" "} + label : std::string{});
+    };
+    const auto write = [&](const std::string& text) {
+        std::ofstream out{dir / "keys", std::ios::trunc};
+        out << text;
+    };
+    write("# the command authority\n\n" + line(k1, "primary") + "\n  " + line(k2, "") + "  \n");
+    auto loaded = command_keyring::load(dir / "keys");
+    require(succeeded(loaded), "a file with comments, labels and blanks loads");
+    auto ring = std::move(std::get<std::unique_ptr<command_keyring>>(loaded));
+    require(ring->size() == 2U, "two keys");
+    const auto ids = ring->key_ids();
+    require(std::find(ids.begin(), ids.end(), signing_key_id(k1.public_point)) != ids.end(), "the id names the key");
+
+    const auto command = as_command(parse_one(envelope("k1", "KILL_PROCESS", kill_target, "2027-01-15T08:05:00Z", "2027-01-15T08:00:00Z")));
+    require(ring->check(sign_command(command, k1)) == authorization_verdict::valid, "key one");
+    require(ring->check(sign_command(command, k2)) == authorization_verdict::valid, "key two");
+    require(ring->check(command) == authorization_verdict::missing, "none");
+
+    // Revocation by removal takes effect at the next refresh, with no restart.
+    write("# rotated\n" + line(k2, "") + "\n");
+    ring->refresh();
+    require(ring->size() == 1U && ring->check(sign_command(command, k1)) == authorization_verdict::unknown_key, "a removed key is revoked");
+    require(ring->check(sign_command(command, k2)) == authorization_verdict::valid && ring->last_error().empty(), "the other still works");
+
+    // A damaged file keeps the keys in force and says so; it never widens trust.
+    write("this is not a key\n" + line(k1, "") + "\n");
+    ring->refresh();
+    require(ring->size() == 1U && !ring->last_error().empty(), "an invalid file is reported and the previous keys stay");
+    require(ring->check(sign_command(command, k1)) == authorization_verdict::unknown_key, "the key in the bad file was not adopted");
+    write(line(k1, "") + "xx\n");
+    ring->refresh();
+    require(ring->size() == 1U && !ring->last_error().empty(), "a key with trailing junk is invalid");
+
+    // An emptied file revokes everything.
+    write("# no keys\n");
+    ring->refresh();
+    require(ring->size() == 0U && ring->check(sign_command(command, k2)) == authorization_verdict::unknown_key, "an empty file revokes all");
+
+    require(!succeeded(command_keyring::load(dir / "missing")), "a missing file does not load");
+    write("AAAA\n");
+    require(!succeeded(command_keyring::load(dir / "keys")), "a short key does not load");
+    ec_public_key_point off = k1.public_point;
+    off[50] ^= 1U;
+    write(base64_encode_for_test(off.data(), off.size()) + "\n");
+    require(!succeeded(command_keyring::load(dir / "keys")), "a point off the curve does not load");
+    fs::remove_all(dir);
+}
+
+void test_signature_covers_values_not_json_text() {
+    // The signature travels as JSON and verifies against the parsed command.
+    const auto key = make_key();
+    const std::string expires = zulu(now_fixed + 300);
+    const std::string created = zulu(now_fixed);
+    const auto plain = as_command(parse_one(envelope("w1", "COLLECT_PROCESS_INFO", kill_target, expires, created)));
+    const auto signed_one = sign_command(plain, key);
+    std::string text = envelope("w1", "COLLECT_PROCESS_INFO", kill_target, expires, created);
+    text.insert(text.size() - 1U, ",\"authorization\":" + authorization_json(signed_one));
+    const auto parsed = as_command(parse_one(text));
+    const auto ring = std::shared_ptr<command_keyring>{command_keyring::from_points({key.public_point}).release()};
+    require(ring->check(parsed) == authorization_verdict::valid, "what arrives as JSON verifies");
+    // The same JSON with the target edited does not.
+    std::string edited = text;
+    edited.replace(edited.find("4242"), 4U, "4243");
+    require(ring->check(as_command(parse_one(edited))) == authorization_verdict::bad_signature, "an edited target fails");
+    // Key order and spacing are the Manager's business and are not part of the signature.
+    const std::string base = envelope("w1", "COLLECT_PROCESS_INFO", kill_target, expires, created);
+    const std::string reordered = "{\"authorization\":" + authorization_json(signed_one) + "," + base.substr(1U);
+    require(ring->check(as_command(parse_one(reordered))) == authorization_verdict::valid, "key order is not part of the signature");
+}
+
 // ---- configuration --------------------------------------------------------------------------
 
 void test_configuration() {
     const std::string base = "sensor_id=s1\nhost_id=h1\nmanager_url=https://manager.example:8553\nidentity_path=/etc/panopticon/identity.json\n";
     auto config = parse_sensor_config(base);
     require(succeeded(config) && std::get<sensor_config>(config).response_mode == "off", "the channel is off by default");
-    config = parse_sensor_config(base + "response_mode=dry_run\nresponse_actions=COLLECT_PROCESS_INFO\nresponse_poll_seconds=2\nresponse_max_changes_per_minute=3\n");
+    config = parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=COLLECT_PROCESS_INFO\nresponse_poll_seconds=2\nresponse_max_changes_per_minute=3\n");
     require(succeeded(config), "dry_run parses");
     const auto& parsed = std::get<sensor_config>(config);
     require(parsed.response_mode == "dry_run" && parsed.response_actions == std::vector<std::string>{"COLLECT_PROCESS_INFO"} && parsed.response_poll_seconds == 2U,
@@ -1005,9 +1343,19 @@ void test_configuration() {
     require(!succeeded(parse_sensor_config(base + "response_ledger_path=/var/../etc/ledger\n")), "a traversing ledger path");
     require(!succeeded(parse_sensor_config("sensor_id=s1\nhost_id=h1\nresponse_mode=enforce\n")), "commands need a Manager to come from");
     require(succeeded(parse_sensor_config("sensor_id=s1\nhost_id=h1\n")), "a collection-only sensor is unchanged");
-    config = parse_sensor_config(base + "response_mode=enforce\nresponse_require_boot_binding=true\n");
+    config = parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=enforce\nresponse_require_boot_binding=true\n");
     require(succeeded(config) && std::get<sensor_config>(config).response_require_boot_binding, "boot binding can be required");
     require(!succeeded(parse_sensor_config(base + "response_require_boot_binding=yes\n")), "a boolean is true or false");
+    // Command authorization: a response mode needs pinned keys or an explicit unsigned opt-in, never neither.
+    require(!succeeded(parse_sensor_config(base + "response_mode=dry_run\n")), "no keys and no opt-in: refused at configuration time");
+    require(!succeeded(parse_sensor_config(base + "response_mode=enforce\n")), "enforce too");
+    require(succeeded(parse_sensor_config(base + "response_mode=enforce\nresponse_signing_keys=/etc/panopticon/command-keys\n")), "pinned keys");
+    require(!succeeded(parse_sensor_config(base + "response_mode=enforce\nresponse_signing_keys=/etc/panopticon/command-keys\nresponse_allow_unsigned=true\n")),
+            "keys and the unsigned opt-in contradict each other");
+    require(!succeeded(parse_sensor_config(base + "response_mode=enforce\nresponse_signing_keys=keys\n")), "a relative key path");
+    require(!succeeded(parse_sensor_config(base + "response_mode=enforce\nresponse_signing_keys=/etc/../tmp/keys\n")), "a traversing key path");
+    require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=maybe\n")), "a boolean is true or false");
+    require(succeeded(parse_sensor_config(base)), "off needs neither");
 }
 
 }  // namespace
@@ -1046,6 +1394,13 @@ int main() {
         {"channel_failures_and_hostile_replies", test_channel_failures_and_hostile_replies},
         {"channel_mixed_batch", test_channel_mixed_batch},
         {"boot_bound_commands", test_boot_bound_commands},
+        {"ecdsa_verify_and_base64", test_ecdsa_verify_and_base64},
+        {"signing_input_is_unambiguous", test_signing_input_is_unambiguous},
+        {"parse_authorization", test_parse_authorization},
+        {"processor_requires_valid_signature", test_processor_requires_valid_signature},
+        {"processor_signature_policy", test_processor_signature_policy},
+        {"keyring_file_and_revocation", test_keyring_file_and_revocation},
+        {"signature_covers_values_not_json_text", test_signature_covers_values_not_json_text},
         {"configuration", test_configuration},
     };
     int failures = 0;

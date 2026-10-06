@@ -6,6 +6,7 @@
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
 #include <openssl/obj_mac.h>
+#include <openssl/x509.h>
 
 #include <cstdio>
 #include <cstring>
@@ -115,6 +116,39 @@ result<ec_raw_signature> sign_raw(const ec_keypair& keypair, const std::vector<s
         return error{error_code::io_failure, "cannot encode ECDSA signature as raw r||s"};
     }
     return raw;
+}
+
+result<bool> verify_raw(const ec_public_key_point& public_point, const std::vector<std::uint8_t>& data, const ec_raw_signature& signature) {
+    // SubjectPublicKeyInfo for id-ecPublicKey / prime256v1 followed by the point; d2i_PUBKEY rejects a point that
+    // is not on the curve, so a malformed key is an error here and not a key that verifies nothing.
+    static constexpr std::uint8_t spki_prefix[] = {0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01,
+                                                    0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00};
+    if (public_point[0] != 0x04) return error{error_code::invalid_input, "EC public key is not an uncompressed point"};
+    std::vector<std::uint8_t> spki(spki_prefix, spki_prefix + sizeof(spki_prefix));
+    spki.insert(spki.end(), public_point.begin(), public_point.end());
+    const std::uint8_t* cursor = spki.data();
+    auto pkey = make_pkey(d2i_PUBKEY(nullptr, &cursor, static_cast<long>(spki.size())));
+    if (!pkey) return error{error_code::invalid_input, "not a valid P-256 public key"};
+
+    BIGNUM* r = BN_bin2bn(signature.data(), 32, nullptr);
+    BIGNUM* s = BN_bin2bn(signature.data() + 32, 32, nullptr);
+    EcdsaSigPtr sig{ECDSA_SIG_new(), ECDSA_SIG_free};
+    if (r == nullptr || s == nullptr || !sig || ECDSA_SIG_set0(sig.get(), r, s) != 1) {
+        BN_free(r);  // set0 takes ownership only on success
+        BN_free(s);
+        return error{error_code::io_failure, "cannot decode the raw signature"};
+    }
+    std::uint8_t* der = nullptr;
+    const int der_length = i2d_ECDSA_SIG(sig.get(), &der);
+    if (der_length <= 0 || der == nullptr) return false;
+    std::vector<std::uint8_t> der_signature(der, der + der_length);
+    OPENSSL_free(der);
+
+    EvpMdCtxPtr md_ctx{EVP_MD_CTX_new(), EVP_MD_CTX_free};
+    if (!md_ctx || EVP_DigestVerifyInit(md_ctx.get(), nullptr, EVP_sha256(), nullptr, pkey.get()) <= 0) {
+        return error{error_code::io_failure, "cannot initialize ECDSA verification"};
+    }
+    return EVP_DigestVerify(md_ctx.get(), der_signature.data(), der_signature.size(), data.data(), data.size()) == 1;
 }
 
 result<bool> store_ec_keypair(const std::filesystem::path& path, const ec_keypair& keypair) {
