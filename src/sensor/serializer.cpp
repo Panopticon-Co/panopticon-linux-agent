@@ -1,6 +1,7 @@
 #include "panopticon/linux_agent/sensor/serializer.hpp"
 
 #include "panopticon/linux_agent/event.hpp"
+#include "panopticon/linux_agent/sensor/container_identity.hpp"
 
 #include <algorithm>
 #include <array>
@@ -164,6 +165,13 @@ void record_serializer::write_process(json_writer& out, const process_entity& en
     if (!info.cgroup.empty()) {
         out.field("cgroup", info.cgroup);
         if (const auto unit = systemd_unit(info.cgroup); !unit.empty()) out.field("unit", unit);
+        if (const auto container = parse_container_cgroup(info.cgroup)) {
+            out.key("container").begin_object();
+            out.field("id", container->id);
+            out.field("runtime", container->runtime);
+            if (!container->pod_uid.empty()) out.field("pod_uid", container->pod_uid);
+            out.end_object();
+        }
     }
     if (const auto tty = tty_name(info.tty_nr); !tty.empty()) out.field("tty", tty);
     out.field("pgid", info.pgid);

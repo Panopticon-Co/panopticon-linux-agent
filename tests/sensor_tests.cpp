@@ -2,6 +2,7 @@
 // processes and compare what the sensor reads with what the test knows it created.
 
 #include "panopticon/linux_agent/sensor/clock.hpp"
+#include "panopticon/linux_agent/sensor/container_identity.hpp"
 #include "panopticon/linux_agent/sensor/entity_graph.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
 #include "panopticon/linux_agent/sensor/netlink_proc.hpp"
@@ -1307,8 +1308,46 @@ void run(const char* name, void (*test)()) {
 
 }  // namespace
 
+void test_parse_container_cgroup() {
+    const std::string id = "a350fac50ee37dc176158ed8c5be13204c6fb12b56a3cf6d20b9fcb51cce40e2";
+    const std::string pod_dashes = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+    const std::string pod_underscores = "0a1b2c3d_4e5f_6071_8293_a4b5c6d7e8f9";
+
+    auto found = parse_container_cgroup("/system.slice/docker-" + id + ".scope");
+    require(found && found->id == id && found->runtime == "docker" && found->pod_uid.empty(), "docker with the systemd driver");
+    found = parse_container_cgroup("/docker/" + id);
+    require(found && found->id == id && found->runtime == "docker", "docker with the cgroupfs driver");
+    found = parse_container_cgroup("/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod" + pod_underscores + ".slice/cri-containerd-" + id + ".scope");
+    require(found && found->id == id && found->runtime == "containerd" && found->pod_uid == pod_dashes, "containerd in a burstable pod, uid restored with dashes");
+    found = parse_container_cgroup("/kubepods/besteffort/pod" + pod_dashes + "/" + id);
+    require(found && found->id == id && found->runtime == "kubernetes" && found->pod_uid == pod_dashes, "cgroupfs pod names the pod but not the runtime");
+    found = parse_container_cgroup("/kubepods.slice/kubepods-pod" + pod_underscores + ".slice/crio-" + id + ".scope");
+    require(found && found->runtime == "crio" && found->pod_uid == pod_dashes, "cri-o in a guaranteed pod");
+    found = parse_container_cgroup("/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-" + id + ".scope/container");
+    require(found && found->id == id && found->runtime == "podman", "rootless podman below a user slice");
+
+    // Helper processes are not the container, and ordinary host paths are not containers.
+    require(!parse_container_cgroup("/machine.slice/crio-conmon-" + id + ".scope"), "conmon is not the container");
+    require(!parse_container_cgroup("/machine.slice/libpod-conmon-" + id + ".scope"), "podman conmon is not the container");
+    require(!parse_container_cgroup("/user.slice/user-1000.slice/session-145.scope"), "a login session");
+    require(!parse_container_cgroup("/system.slice/ssh.service"), "a host service");
+    require(!parse_container_cgroup("/"), "the root cgroup");
+    require(!parse_container_cgroup(""), "no cgroup");
+    require(!parse_container_cgroup("/docker/" + std::string(65, 'a')), "an id longer than a container id");
+    require(!parse_container_cgroup("/docker/" + std::string(11, 'a')), "an id shorter than a container id");
+    require(!parse_container_cgroup("/docker/" + std::string(64, 'G')), "not hexadecimal");
+    require(!parse_container_cgroup("/kubepods/pod" + std::string(36, 'z') + "/" + id.substr(0U, 10U)), "malformed pod uid and short id");
+
+    // Hostile input is bounded.
+    std::string deep;
+    for (int level = 0; level < 5000; ++level) deep += "/a";
+    require(!parse_container_cgroup(deep), "an absurdly deep path");
+    require(!parse_container_cgroup(std::string(100000, 'x')), "an absurdly long path");
+}
+
 int main() {
     std::cout << std::unitbuf;
+    run("parse_container_cgroup", test_parse_container_cgroup);
     run("json_escapes_and_replaces_invalid_utf8", test_json_escapes_and_replaces_invalid_utf8);
     run("clock_formats_rfc3339_and_converts_ticks", test_clock_formats_rfc3339_and_converts_ticks);
     run("parse_stat_handles_hostile_comm", test_parse_stat_handles_hostile_comm);
