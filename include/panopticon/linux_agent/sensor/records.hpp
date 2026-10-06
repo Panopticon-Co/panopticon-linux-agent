@@ -238,9 +238,42 @@ struct raw_security_event {
     std::string name;          // program name (prog_load) or tracepoint name (raw_tracepoint_open)
 };
 
+// A decision of a mandatory access control module (AppArmor, SELinux), or a change to its policy
+// or mode, read from the kernel audit stream (ADR 023). The text is chosen partly by the process
+// that was denied (its file names, its command name), so it is bounded and made printable.
+struct raw_lsm_event {
+    bool policy_change{false};  // true: lsm.policy, false: lsm.denial
+    std::string module;         // apparmor, selinux
+    std::string operation;      // denial: open, mknod, exec, ...; policy: profile_load, profile_replace, profile_remove, enforcing, permissive, policy_load, enabled, disabled
+    std::string outcome;        // denial only: denied, or would_deny when the module only logs (AppArmor complain mode, SELinux permissive)
+    std::string object;         // the path or name the access was for
+    std::string requested;      // access asked for ("r", "w", "c", or the SELinux permissions)
+    std::string denied;         // the part that was not allowed
+    std::string profile;        // AppArmor profile, or the SELinux source context
+    std::string target_context; // SELinux target context
+    std::string object_class;   // SELinux tclass
+    std::string comm;
+    std::uint32_t pid{};        // 0 when the record names no process (policy loads, mode changes)
+    bool sanitized{false};
+};
+
+// A change to the packet filter rules, from the audit NETFILTER_CFG record, reported as
+// netfilter.config_change (firewall.changed is the inventory diff). The process is the one that
+// made the change (iptables, nft, a container runtime).
+struct raw_firewall_change {
+    std::string subsystem;  // nft, xtables
+    std::string operation;  // nft_register_rule, xt_replace, ...
+    std::string table;
+    std::string family;     // ipv4, ipv6, inet, arp, bridge, netdev or family-N
+    std::uint32_t entries{};
+    std::optional<std::uint64_t> generation;  // nft: the ruleset generation after the change
+    std::string comm;
+    std::uint32_t pid{};
+};
+
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
                                  raw_session_change, raw_file_event, raw_network_event, raw_auth_event, raw_kernel_event,
-                                 raw_security_event, raw_namespace_change, raw_dns_query>;
+                                 raw_security_event, raw_namespace_change, raw_dns_query, raw_lsm_event, raw_firewall_change>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

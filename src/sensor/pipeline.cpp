@@ -326,6 +326,14 @@ void sensor_pipeline::process_record(const raw_record& record, const std::uint64
         (void)emit_dns_event(record, *dns, observed_ns);
         return;
     }
+    if (const auto* lsm = std::get_if<raw_lsm_event>(&record.payload)) {
+        (void)emit_lsm_event(record, *lsm, observed_ns);
+        return;
+    }
+    if (const auto* firewall = std::get_if<raw_firewall_change>(&record.payload)) {
+        (void)emit_firewall_event(record, *firewall, observed_ns);
+        return;
+    }
     (void)emit_events(graph_.apply(record), observed_ns);
 }
 
@@ -368,6 +376,28 @@ result<bool> sensor_pipeline::emit_dns_event(const raw_record& record, const raw
     out.actor = dns.pid != 0U ? graph_.find(dns.pid) : nullptr;
     out.dns = dns;
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.dns_event(out, seq, observed_ns); });
+    if (succeeded(emitted)) ++metrics_.events;
+    return emitted;
+}
+
+result<bool> sensor_pipeline::emit_lsm_event(const raw_record& record, const raw_lsm_event& lsm, const std::uint64_t observed_ns) {
+    lsm_record out;
+    out.time_unix_ns = record.time_unix_ns;
+    out.source = record.source;
+    out.actor = lsm.pid != 0U ? graph_.find(lsm.pid) : nullptr;
+    out.lsm = lsm;
+    auto emitted = emit([&](const std::uint64_t seq) { return serializer_.lsm_event(out, seq, observed_ns); });
+    if (succeeded(emitted)) ++metrics_.events;
+    return emitted;
+}
+
+result<bool> sensor_pipeline::emit_firewall_event(const raw_record& record, const raw_firewall_change& firewall, const std::uint64_t observed_ns) {
+    firewall_record out;
+    out.time_unix_ns = record.time_unix_ns;
+    out.source = record.source;
+    out.actor = firewall.pid != 0U ? graph_.find(firewall.pid) : nullptr;
+    out.firewall = firewall;
+    auto emitted = emit([&](const std::uint64_t seq) { return serializer_.firewall_event(out, seq, observed_ns); });
     if (succeeded(emitted)) ++metrics_.events;
     return emitted;
 }

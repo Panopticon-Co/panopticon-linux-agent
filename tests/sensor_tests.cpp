@@ -1430,6 +1430,71 @@ void test_pipeline_emits_dns_queries() {
     require(contains(queries[1], "{\"field\":\"process\",\"reason\":\"process_exited\"}") && contains(queries[1], "\"pid\":4242"), "an unknown asker is reported, not invented");
 }
 
+void test_pipeline_emits_lsm_and_firewall_events() {
+    const auto root = fresh_directory("lsmproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "cat", 500U, "/usr/bin/cat", {"cat", "/etc/hostname"}}.write(root);
+    raw_lsm_event denial;
+    denial.module = "apparmor";
+    denial.operation = "open";
+    denial.outcome = "denied";
+    denial.object = "/etc/hostname";
+    denial.requested = "r";
+    denial.denied = "r";
+    denial.profile = "panopticon-aa-test";
+    denial.comm = "cat";
+    denial.pid = 100U;
+    raw_lsm_event policy;
+    policy.policy_change = true;
+    policy.module = "selinux";
+    policy.operation = "enforcing";
+    raw_firewall_change firewall;
+    firewall.subsystem = "nft";
+    firewall.operation = "nft_register_rule";
+    firewall.table = "raw";
+    firewall.family = "ipv4";
+    firewall.entries = 1U;
+    firewall.generation = 48U;
+    firewall.comm = "iptables";
+    firewall.pid = 4242U;
+    std::vector<raw_record> script{record_of(denial), record_of(policy), record_of(firewall)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script, 0U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::string denial_line;
+    std::string policy_line;
+    std::string firewall_line;
+    for (const auto& line : lines) {
+        if (contains(line, "\"type\":\"lsm.denial\"")) denial_line = line;
+        if (contains(line, "\"type\":\"lsm.policy\"")) policy_line = line;
+        if (contains(line, "\"type\":\"netfilter.config_change\"")) firewall_line = line;
+    }
+    require(contains(denial_line, "\"name\":\"cat\"") && contains(denial_line, "\"entity_id\":\""), "the denied process is resolved from the entity graph");
+    require(contains(denial_line, "\"lsm\":{\"module\":\"apparmor\",\"operation\":\"open\",\"outcome\":\"denied\",\"object\":\"/etc/hostname\",\"requested\":\"r\","
+                                  "\"denied\":\"r\",\"profile\":\"panopticon-aa-test\",\"comm\":\"cat\"}"),
+            "the lsm body");
+    require(contains(policy_line, "\"lsm\":{\"module\":\"selinux\",\"operation\":\"enforcing\"}") && !contains(policy_line, "\"outcome\"") &&
+                contains(policy_line, "{\"field\":\"process\",\"reason\":\"not_supported_by_provider\"}"),
+            "a policy change has no outcome and no process");
+    require(contains(firewall_line, "\"netfilter\":{\"subsystem\":\"nft\",\"operation\":\"nft_register_rule\",\"table\":\"raw\",\"family\":\"ipv4\",\"entries\":1,"
+                                    "\"generation\":48,\"comm\":\"iptables\"}") &&
+                contains(firewall_line, "\"pid\":4242") && contains(firewall_line, "{\"field\":\"process\",\"reason\":\"process_exited\"}"),
+            "an exited iptables is reported as exited, not invented");
+}
+
 void test_parse_container_cgroup() {
     const std::string id = "a350fac50ee37dc176158ed8c5be13204c6fb12b56a3cf6d20b9fcb51cce40e2";
     const std::string pod_dashes = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
@@ -1472,6 +1537,7 @@ int main() {
     run("parse_container_cgroup", test_parse_container_cgroup);
     run("parse_dns_query", test_parse_dns_query);
     run("pipeline_emits_dns_queries", test_pipeline_emits_dns_queries);
+    run("pipeline_emits_lsm_and_firewall_events", test_pipeline_emits_lsm_and_firewall_events);
     run("json_escapes_and_replaces_invalid_utf8", test_json_escapes_and_replaces_invalid_utf8);
     run("clock_formats_rfc3339_and_converts_ticks", test_clock_formats_rfc3339_and_converts_ticks);
     run("parse_stat_handles_hostile_comm", test_parse_stat_handles_hostile_comm);

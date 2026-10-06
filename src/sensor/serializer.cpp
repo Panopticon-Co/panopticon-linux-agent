@@ -530,6 +530,85 @@ std::string record_serializer::dns_event(const dns_record& record, const std::ui
     return out.take();
 }
 
+namespace {
+
+// The acting process of an audit-derived event: the full entity, a pid-only stub when it has
+// exited, or nothing when the record names none.
+template <typename WriteProcess>
+void write_audit_actor(json_writer& out, const entity_ptr& actor, const std::uint32_t pid, std::vector<unavailable_field>& unavailable,
+                       WriteProcess&& write_process) {
+    if (actor) {
+        out.key("process");
+        write_process(*actor);
+        out.end_object();
+    } else if (pid != 0U) {
+        out.key("process").begin_object();
+        out.field("pid", pid);
+        out.end_object();
+        unavailable.push_back({"process", unavailable_reason::process_exited});
+    } else {
+        unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+    }
+}
+
+void write_unavailable(json_writer& out, const std::vector<unavailable_field>& unavailable) {
+    out.key("unavailable").begin_array();
+    for (const auto& field : unavailable) {
+        out.begin_object();
+        out.field("field", field.field);
+        out.field("reason", to_string(field.reason));
+        out.end_object();
+    }
+    out.end_array();
+}
+
+}  // namespace
+
+std::string record_serializer::lsm_event(const lsm_record& record, const std::uint64_t seq, const std::uint64_t observed_unix_ns) const {
+    const auto& lsm = record.lsm;
+    json_writer out;
+    begin(out, "event", lsm.policy_change ? "lsm.policy" : "lsm.denial", seq, record.time_unix_ns, observed_unix_ns, record.source);
+    std::vector<unavailable_field> unavailable;
+    write_audit_actor(out, record.actor, lsm.pid, unavailable, [&](const process_entity& entity) { write_process(out, entity); });
+    out.key("lsm").begin_object();
+    out.field("module", lsm.module);
+    out.field("operation", lsm.operation);
+    if (!lsm.policy_change) out.field("outcome", lsm.outcome);
+    if (!lsm.object.empty()) out.field("object", lsm.object);
+    if (!lsm.requested.empty()) out.field("requested", lsm.requested);
+    if (!lsm.denied.empty()) out.field("denied", lsm.denied);
+    if (!lsm.profile.empty()) out.field("profile", lsm.profile);
+    if (!lsm.target_context.empty()) out.field("target_context", lsm.target_context);
+    if (!lsm.object_class.empty()) out.field("object_class", lsm.object_class);
+    if (!lsm.comm.empty()) out.field("comm", lsm.comm);
+    if (lsm.sanitized) out.field("sanitized", true);
+    out.end_object();
+    write_unavailable(out, unavailable);
+    out.end_object();
+    return out.take();
+}
+
+std::string record_serializer::firewall_event(const firewall_record& record, const std::uint64_t seq,
+                                              const std::uint64_t observed_unix_ns) const {
+    const auto& firewall = record.firewall;
+    json_writer out;
+    begin(out, "event", "netfilter.config_change", seq, record.time_unix_ns, observed_unix_ns, record.source);
+    std::vector<unavailable_field> unavailable;
+    write_audit_actor(out, record.actor, firewall.pid, unavailable, [&](const process_entity& entity) { write_process(out, entity); });
+    out.key("netfilter").begin_object();
+    out.field("subsystem", firewall.subsystem);
+    out.field("operation", firewall.operation);
+    out.field("table", firewall.table);
+    out.field("family", firewall.family);
+    out.field("entries", firewall.entries);
+    if (firewall.generation) out.field("generation", *firewall.generation);
+    if (!firewall.comm.empty()) out.field("comm", firewall.comm);
+    out.end_object();
+    write_unavailable(out, unavailable);
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::auth_event(const auth_record& record, const std::uint64_t seq,
                                           const std::uint64_t observed_unix_ns) const {
     const auto& auth = record.auth;

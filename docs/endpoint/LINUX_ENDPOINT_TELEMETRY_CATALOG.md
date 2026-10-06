@@ -235,6 +235,25 @@ attributed to its own process; a validating stub adds `DNSKEY` and `DS` lookups.
 process and question per five seconds (the transaction id is ignored). Not reported: a question
 split across `sendmsg` buffers, DNS over TCP, DoH and DoT, mDNS, responses.
 
+### 4.9 `lsm.denial`, `lsm.policy` and `netfilter.config_change` events as emitted today (ADR 023)
+
+Provenance `{audit_netlink, AUDIT, observed}`. The acting `process` is attached when the audit pid is a
+process the sensor knows, a `{pid}` stub with `process` unavailable when it is gone, and absent for
+the SELinux status records.
+
+`lsm.denial` carries `lsm`: `module`, `operation`, `outcome` (`denied` or `would_deny`), and the
+`object`, `requested`, `denied`, `profile`, `target_context`, `object_class` and `comm` the kernel
+gave. `lsm.policy` carries `module`, `operation` (`profile_load`, `profile_replace`, `profile_remove`,
+`policy_load`, `enforcing`, `permissive`, `enabled`, `disabled`) and, for AppArmor, the profile name
+as `object`; it has no `outcome`. `netfilter.config_change` carries `netfilter`: `subsystem`,
+`operation`, `table`, `family`, `entries`, `generation` (nftables) and `comm`; it says a table
+changed and who changed it, not what the rule is.
+
+Only what the kernel audits is visible: no records on a host with auditing disabled, none for
+AppArmor `AUDIT` rules, none for SELinux decisions that were granted. All strings are bounded and
+printable. Not reported: the ruleset itself, nftables changes made on a host where the audit
+records are suppressed by an audit rule.
+
 ## 5. State records
 
 `state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,

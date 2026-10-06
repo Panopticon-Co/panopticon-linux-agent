@@ -119,6 +119,20 @@ struct dns_record {
     raw_dns_query dns;
 };
 
+// lsm.denial / lsm.policy and netfilter.config_change after the pipeline attached the acting process.
+struct lsm_record {
+    std::uint64_t time_unix_ns{};
+    provenance source;
+    entity_ptr actor;
+    raw_lsm_event lsm;
+};
+struct firewall_record {
+    std::uint64_t time_unix_ns{};
+    provenance source;
+    entity_ptr actor;
+    raw_firewall_change firewall;
+};
+
 // An auth.* event after the pipeline attached the logging process (if it still exists).
 struct auth_record {
     std::uint64_t time_unix_ns{};
@@ -165,6 +179,10 @@ public:
 
     // dns.query (catalog 4.8).
     [[nodiscard]] std::string dns_event(const dns_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+
+    // lsm.denial / lsm.policy and netfilter.config_change (catalog 4.9).
+    [[nodiscard]] std::string lsm_event(const lsm_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+    [[nodiscard]] std::string firewall_event(const firewall_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
 
     // memory.exec_mapping / kernel.bpf_load (catalog 4.6).
     [[nodiscard]] std::string security_event(const security_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;

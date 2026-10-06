@@ -272,6 +272,127 @@ void test_live_kernel_round_trip() {
 
 }  // namespace
 
+std::optional<parsed_audit_security> parse_security(const std::uint16_t type, const std::string& body) {
+    return parse_audit_security_record(type, stamp + body);
+}
+
+const raw_lsm_event& lsm_of(const std::optional<parsed_audit_security>& parsed) {
+    require(parsed.has_value() && std::holds_alternative<raw_lsm_event>(parsed->event), "expected an lsm event");
+    return std::get<raw_lsm_event>(parsed->event);
+}
+
+const raw_firewall_change& firewall_of(const std::optional<parsed_audit_security>& parsed) {
+    require(parsed.has_value() && std::holds_alternative<raw_firewall_change>(parsed->event), "expected a firewall event");
+    return std::get<raw_firewall_change>(parsed->event);
+}
+
+void test_security_record_shapes() {
+    // Captured from Ubuntu 22.04 / 5.15 with a profile that denied a read and a file creation.
+    const auto read = lsm_of(parse_security(audit_avc,
+        "apparmor=\"DENIED\" operation=\"open\" profile=\"panopticon-aa-test\" name=\"/etc/hostname\" pid=6689 comm=\"cat\" requested_mask=\"r\" denied_mask=\"r\" fsuid=0 ouid=0"));
+    require(!read.policy_change && read.module == "apparmor" && read.operation == "open" && read.outcome == "denied" && read.object == "/etc/hostname" &&
+                read.profile == "panopticon-aa-test" && read.pid == 6689U && read.comm == "cat" && read.requested == "r" && read.denied == "r",
+            "apparmor denial");
+    const auto make = lsm_of(parse_security(audit_avc,
+        "apparmor=\"DENIED\" operation=\"mknod\" profile=\"panopticon-aa-test\" name=\"/etc/aa-denied\" pid=6691 comm=\"sh\" requested_mask=\"c\" denied_mask=\"c\" fsuid=0 ouid=0"));
+    require(make.operation == "mknod" && make.requested == "c", "creation denial");
+    const auto complain = lsm_of(parse_security(audit_avc,
+        "apparmor=\"ALLOWED\" operation=\"open\" profile=\"x\" name=\"/etc/shadow\" pid=1 comm=\"cat\" requested_mask=\"r\" denied_mask=\"r\" fsuid=0 ouid=0"));
+    require(complain.outcome == "would_deny", "complain mode is reported as would_deny, not as a block");
+    const auto capability = lsm_of(parse_security(audit_avc,
+        "apparmor=\"DENIED\" operation=\"capable\" profile=\"x\" pid=9 comm=\"ip\" capability=12 capname=\"net_admin\""));
+    require(capability.object == "net_admin", "a capability denial names the capability");
+    const auto load = lsm_of(parse_security(audit_avc,
+        "apparmor=\"STATUS\" operation=\"profile_replace\" profile=\"unconfined\" name=\"panopticon-aa-test\" pid=6645 comm=\"apparmor_parser\""));
+    require(load.policy_change && load.operation == "profile_replace" && load.object == "panopticon-aa-test" && load.pid == 6645U && load.outcome.empty(),
+            "a profile replace is a policy change");
+    require(!parse_security(audit_avc, "apparmor=\"AUDIT\" operation=\"open\" profile=\"x\" name=\"/a\" pid=1 comm=\"c\""), "an explicit audit rule is not a denial");
+    require(!parse_security(audit_avc, "apparmor=\"STATUS\" operation=\"profile_failed\" profile=\"x\" name=\"y\" pid=1 comm=\"c\""), "an unknown status operation");
+    require(lsm_of(parse_security(1502, "apparmor=\"ALLOWED\" operation=\"open\" profile=\"x\" name=\"/a\" pid=2 comm=\"c\" requested_mask=\"r\" denied_mask=\"r\"")).pid == 2U,
+            "the dedicated AppArmor record types are read the same way");
+
+    const auto selinux = lsm_of(parse_security(audit_avc,
+        "avc:  denied  { read write } for  pid=873 comm=\"httpd\" name=\"shadow\" dev=\"dm-0\" ino=1048 scontext=system_u:system_r:httpd_t:s0 "
+        "tcontext=system_u:object_r:shadow_t:s0 tclass=file permissive=0"));
+    require(selinux.module == "selinux" && selinux.operation == "read" && selinux.denied == "read write" && selinux.outcome == "denied" && selinux.object == "shadow" &&
+                selinux.profile == "system_u:system_r:httpd_t:s0" && selinux.target_context == "system_u:object_r:shadow_t:s0" && selinux.object_class == "file" &&
+                selinux.pid == 873U && selinux.comm == "httpd",
+            "selinux denial");
+    const auto permissive = lsm_of(parse_security(audit_avc,
+        "avc:  denied  { map } for  pid=5 comm=\"x\" path=\"/opt/x\" scontext=a:b:c:s0 tcontext=d:e:f:s0 tclass=file permissive=1"));
+    require(permissive.outcome == "would_deny" && permissive.object == "/opt/x", "a permissive denial is would_deny; path is used when there is no name");
+    require(!parse_security(audit_avc, "avc:  granted  { read } for  pid=5 comm=\"x\" scontext=a tcontext=b tclass=file"), "a granted decision is not a denial");
+    require(!parse_security(audit_avc, "avc:  denied  { } for  pid=5 comm=\"x\""), "no permissions");
+
+    const auto enforcing = lsm_of(parse_security(audit_mac_status, "enforcing=1 old_enforcing=0 auid=1000 ses=3 enabled=1 old-enabled=1 lsm=selinux res=1"));
+    require(enforcing.policy_change && enforcing.operation == "enforcing" && enforcing.pid == 0U, "setenforce 1");
+    require(lsm_of(parse_security(audit_mac_status, "enforcing=0 old_enforcing=1 auid=1000 ses=3 enabled=1 old-enabled=1 lsm=selinux res=1")).operation == "permissive", "setenforce 0");
+    require(lsm_of(parse_security(audit_mac_status, "enforcing=0 old_enforcing=0 auid=1000 ses=3 enabled=0 old-enabled=1 lsm=selinux res=1")).operation == "disabled", "disabled");
+    require(!parse_security(audit_mac_status, "enforcing=1 old_enforcing=1 auid=1000 ses=3 enabled=1 old-enabled=1 lsm=selinux res=1"), "a status record that changed nothing");
+    require(!parse_security(audit_mac_status, "enforcing=1 old_enforcing=0 auid=1000 ses=3 enabled=1 old-enabled=1 lsm=selinux res=0"), "a failed change");
+    require(lsm_of(parse_security(audit_mac_policy_load, "auid=1000 ses=3 lsm=selinux res=1")).operation == "policy_load", "policy load");
+
+    // Captured from the same host: docker adding and removing a rule, and a legacy iptables replace.
+    const auto rule = firewall_of(parse_security(audit_netfilter_cfg, "table=raw:48 family=2 entries=1 op=nft_register_rule pid=6434 subj=? comm=\"iptables\""));
+    require(rule.subsystem == "nft" && rule.operation == "nft_register_rule" && rule.table == "raw" && rule.generation == 48U && rule.family == "ipv4" &&
+                rule.entries == 1U && rule.pid == 6434U && rule.comm == "iptables",
+            "nft rule registered");
+    const auto legacy = firewall_of(parse_security(audit_netfilter_cfg, "table=filter family=10 entries=7 op=xt_replace pid=77 subj=? comm=\"ip6tables\""));
+    require(legacy.subsystem == "xtables" && legacy.table == "filter" && !legacy.generation && legacy.family == "ipv6" && legacy.entries == 7U, "xtables replace");
+    require(!parse_security(audit_netfilter_cfg, "table=raw:48 family=2 entries=1 op=Bad-Op pid=1 comm=\"x\""), "an operation that is not an identifier");
+    require(!parse_security(audit_netfilter_cfg, "family=2 entries=1 op=nft_register_rule pid=1"), "no table");
+}
+
+void test_security_values_are_hostile() {
+    // The path and command name come from the denied process. A quote or a space cannot end a value
+    // early, hex is decoded, control bytes and non-ASCII become '?', and the first key wins.
+    const auto hex = lsm_of(parse_security(audit_avc,
+        "apparmor=\"DENIED\" operation=\"open\" profile=\"p\" name=2F746D702F612062 pid=3 comm=\"x\" requested_mask=\"r\" denied_mask=\"r\""));
+    require(hex.object == "/tmp/a b", "a hex name is decoded");
+    const auto control = lsm_of(parse_security(audit_avc,
+        "apparmor=\"DENIED\" operation=\"open\" profile=\"p\" name=2F746D702F0A0AC3A9 pid=3 comm=\"x\" requested_mask=\"r\" denied_mask=\"r\""));
+    require(control.object == "/tmp/????" && control.sanitized, "control and non-ASCII bytes are replaced and flagged");
+    const auto twice = lsm_of(parse_security(audit_avc,
+        "apparmor=\"DENIED\" operation=\"open\" profile=\"p\" name=\"/real\" pid=3 comm=\"x\" name=\"/injected\" requested_mask=\"r\" denied_mask=\"r\""));
+    require(twice.object == "/real", "the first occurrence of a key wins");
+    const auto long_name = lsm_of(parse_security(audit_avc,
+        "apparmor=\"DENIED\" operation=\"open\" profile=\"p\" name=\"" + std::string(5000, 'a') + "\" pid=3 comm=\"x\" requested_mask=\"r\" denied_mask=\"r\""));
+    require(long_name.object.size() == 512U && long_name.sanitized, "an absurdly long name is cut and flagged");
+    require(!parse_security(audit_avc, "apparmor=\"DENIED\" operation=\"o p\" profile=\"p\" name=\"/a\" pid=3 comm=\"x\""), "an operation with a space is refused");
+    const auto pid_text = lsm_of(parse_security(audit_avc,
+        "apparmor=\"DENIED\" operation=\"open\" profile=\"p\" name=\"/a\" pid=99999999999 comm=\"x\" requested_mask=\"r\" denied_mask=\"r\""));
+    require(pid_text.pid == 0U, "a pid that does not fit is not believed");
+}
+
+void test_security_parser_survives_garbage() {
+    std::uint32_t state = 7U;
+    const auto next = [&state] {
+        state = state * 1664525U + 1013904223U;
+        return state >> 8U;
+    };
+    const std::string seeds[]{
+        "apparmor=\"DENIED\" operation=\"open\" profile=\"p\" name=\"/a\" pid=3 comm=\"x\" requested_mask=\"r\" denied_mask=\"r\"",
+        "avc:  denied  { read } for  pid=873 comm=\"httpd\" name=\"shadow\" scontext=a tcontext=b tclass=file permissive=0",
+        "table=raw:48 family=2 entries=1 op=nft_register_rule pid=6434 subj=? comm=\"iptables\"",
+        "enforcing=1 old_enforcing=0 enabled=1 old-enabled=1 lsm=selinux res=1",
+    };
+    constexpr std::uint16_t types[]{audit_avc, audit_mac_status, audit_mac_policy_load, audit_netfilter_cfg, 1503};
+    for (int round = 0; round < 20000; ++round) {
+        std::string body = seeds[next() % 4U];
+        const auto edits = 1U + next() % 4U;
+        for (std::uint32_t edit = 0U; edit < edits && !body.empty(); ++edit) {
+            const auto at = next() % body.size();
+            switch (next() % 3U) {
+            case 0U: body[at] = static_cast<char>(next() % 256U); break;
+            case 1U: body.erase(at, 1U + next() % 8U); break;
+            default: body.insert(at, 1U, static_cast<char>(next() % 256U)); break;
+            }
+        }
+        (void)parse_security(types[next() % 5U], body);
+    }
+    require(!parse_audit_security_record(audit_avc, "").has_value() && !parse_audit_security_record(audit_avc, "audit(").has_value(), "empty and truncated records");
+}
+
 int main() {
     struct named {
         const char* name;
@@ -281,6 +402,9 @@ int main() {
         {"real_record_shapes", test_real_record_shapes},
         {"records_that_are_not_events", test_records_that_are_not_events},
         {"hostile_values_cannot_change_the_event", test_hostile_values_cannot_change_the_event},
+        {"security_record_shapes", test_security_record_shapes},
+        {"security_values_are_hostile", test_security_values_are_hostile},
+        {"security_parser_survives_garbage", test_security_parser_survives_garbage},
         {"datagram_decoder", test_datagram_decoder},
         {"parser_survives_garbage", test_parser_survives_garbage},
         {"user_names_resolve_and_fall_back", test_user_names_resolve_and_fall_back},

@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <variant>
 #include <vector>
 
 namespace panopticon::linux_agent::sensor {
@@ -22,6 +23,12 @@ inline constexpr std::uint16_t audit_user_auth = 1100;
 inline constexpr std::uint16_t audit_user_start = 1105;
 inline constexpr std::uint16_t audit_user_login = 1112;
 inline constexpr std::uint16_t audit_user_cmd = 1123;
+inline constexpr std::uint16_t audit_avc = 1400;               // SELinux and AppArmor decisions
+inline constexpr std::uint16_t audit_mac_policy_load = 1403;   // SELinux policy loaded
+inline constexpr std::uint16_t audit_mac_status = 1404;        // SELinux enforcing / enabled toggled
+inline constexpr std::uint16_t audit_apparmor_audit = 1501;    // 1501..1506: AppArmor record types some kernels use
+inline constexpr std::uint16_t audit_apparmor_error = 1506;
+inline constexpr std::uint16_t audit_netfilter_cfg = 1325;     // packet filter table changed
 
 struct audit_message {
     std::uint16_t type{};
@@ -54,6 +61,22 @@ struct parsed_audit_event {
 // hex-encoded, the tokenizer honours quotes so a quote-free injection cannot end a value early,
 // the first occurrence of a key wins, and every value is made printable and bounded.
 [[nodiscard]] std::optional<parsed_audit_event> parse_audit_record(std::uint16_t type, std::string_view text, const uid_lookup& lookup);
+
+struct parsed_audit_security {
+    std::uint64_t time_unix_ns{};
+    std::variant<raw_lsm_event, raw_firewall_change> event;
+};
+
+// Maps one audit record to a mandatory-access-control or firewall event (ADR 023), or nothing:
+//   AVC / APPARMOR_* with apparmor="DENIED"|"ALLOWED"  -> lsm.denial (ALLOWED is complain mode)
+//   AVC with apparmor="STATUS" profile_load|replace|remove -> lsm.policy
+//   AVC "avc:  denied { ... }"                          -> lsm.denial (permissive=1 is would_deny)
+//   MAC_STATUS / MAC_POLICY_LOAD                        -> lsm.policy when the mode or policy changed
+//   NETFILTER_CFG                                       -> netfilter.config_change
+// The text is hostile in the same way as for authentication records: paths and command names are
+// chosen by the process that was denied. The tokenizer honours quotes, the first key wins, hex
+// values are decoded, and every string is bounded and made printable.
+[[nodiscard]] std::optional<parsed_audit_security> parse_audit_security_record(std::uint16_t type, std::string_view text);
 
 // Resolves a uid to a user name through the system databases, with a bounded cache. Unknown uids
 // become "uid:N".
