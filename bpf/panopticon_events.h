@@ -16,10 +16,12 @@
 #include <cstdint>
 namespace panopticon::linux_agent::sensor::bpf {
 using u8 = std::uint8_t;
+using u16 = std::uint16_t;
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
 #else
 typedef unsigned char u8;
+typedef unsigned short u16;
 typedef unsigned int u32;
 typedef unsigned long long u64;
 #endif
@@ -31,6 +33,10 @@ enum pan_event_kind {
     PAN_EVENT_RENAME = 4,
     PAN_EVENT_CRED = 5,
     PAN_EVENT_PTRACE = 6,
+    PAN_EVENT_NET_CONNECT = 7,
+    PAN_EVENT_NET_ACCEPT = 8,
+    PAN_EVENT_NET_LISTEN = 9,
+    PAN_EVENT_NET_UDP = 10,
 };
 
 /* Bounds. argv is captured into a fixed tail buffer; anything past it sets PAN_FLAG_ARGS_TRUNC. */
@@ -78,6 +84,14 @@ struct pan_event {
 
     u32 args_count; /* exec: number of argv strings captured */
     u32 args_len;   /* exec: bytes used in `args` (NUL-separated) */
+
+    u8 net_family;  /* network: 2 = AF_INET, 10 = AF_INET6 */
+    u8 net_proto;   /* network: 6 = TCP, 17 = UDP */
+    u16 net_sport;  /* network: local port, host order */
+    u16 net_dport;  /* network: remote port, host order; 0 for a listener */
+    u16 net_pad;
+    u8 net_saddr[16]; /* network: local address (IPv4 uses the first 4 bytes) */
+    u8 net_daddr[16]; /* network: remote address */
 
     char comm[PAN_COMM_LEN];      /* task->comm (rename: the new name) */
     char filename[PAN_FILENAME_LEN]; /* exec: bprm->filename */

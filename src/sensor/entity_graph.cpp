@@ -34,6 +34,7 @@ const char* to_string(const network_operation value) noexcept {
     case network_operation::connect: return "connect";
     case network_operation::accept: return "accept";
     case network_operation::listen: return "listen";
+    case network_operation::udp_flow: return "udp_flow";
     }
     return "connect";
 }

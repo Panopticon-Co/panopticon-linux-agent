@@ -107,6 +107,7 @@ enum class network_operation : std::uint8_t {
     connect,  // an outbound connection was seen (TCP connect, connected UDP socket)
     accept,   // an inbound connection was seen on a local listening port
     listen,   // a socket started listening (TCP) or was bound (UDP)
+    udp_flow, // first datagram of a UDP flow from a process to a destination, once per window
 };
 [[nodiscard]] const char* to_string(network_operation value) noexcept;
 

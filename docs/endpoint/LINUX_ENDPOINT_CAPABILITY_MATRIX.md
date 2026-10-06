@@ -117,9 +117,9 @@ limits** · **Perf** impact · **Privacy** implications · **Test** method · **
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Z1 | Outbound TCP connect with process attribution | M | T1071 | `network.connect` | EBPF-FENTRY `tcp_connect` | SOCKDIAG diff + fd scan | fallback misses short connections | low | remote IPs | attack sim | MISSING | PARTIAL |
-| Z2 | Inbound accept | M | T1021, backdoors | `network.accept` | EBPF fexit `inet_csk_accept` | SOCKDIAG diff | – | low | remote IPs | attack sim | MISSING | PARTIAL |
-| Z3 | UDP flows (first datagram per 5-tuple per process) | S | DNS tunnelling, UDP C2 | `network.udp_flow` | EBPF `udp_sendmsg`/`udpv6_sendmsg` + LRU dedup | SOCKDIAG | 60 s dedup window | med | remote IPs | attack sim | MISSING | MISSING |
+| Z1 | Outbound TCP connect with process attribution | M | T1071 | `network.connect` | EBPF-FENTRY `tcp_connect` | SOCKDIAG diff + fd scan | fallback misses short connections | low | remote IPs | attack sim | PARTIAL (eBPF hooks plus sockdiag fallback; no inode) | VERIFIED on Ubuntu 22.04 / 5.15 / x86_64 root; 6.x kernels, aarch64 NOT YET VERIFIED |
+| Z2 | Inbound accept | M | T1021, backdoors | `network.accept` | EBPF fexit `inet_csk_accept` | SOCKDIAG diff | – | low | remote IPs | attack sim | PARTIAL (eBPF hooks plus sockdiag fallback; no inode) | VERIFIED on Ubuntu 22.04 / 5.15 / x86_64 root; 6.x kernels, aarch64 NOT YET VERIFIED |
+| Z3 | UDP flows (first datagram per 5-tuple per process) | S | DNS tunnelling, UDP C2 | `network.udp_flow` | EBPF `udp_sendmsg`/`udpv6_sendmsg` + LRU dedup | SOCKDIAG | 60 s dedup window | med | remote IPs | attack sim | PARTIAL (first datagram per process and destination per 60 s; no DNS names) | VERIFIED on Ubuntu 22.04 / 5.15 / x86_64 root; 6.x kernels, aarch64 NOT YET VERIFIED |
 | Z4 | Close with byte counts | S | T1041 | `network.close` | EBPF `tcp_close` (`bytes_acked/received`) | – | – | low | none | VM | MISSING | MISSING |
 | Z5 | Raw / packet sockets | S | T1040 | `network.raw_socket` | EBPF `security_socket_create` | – | – | low | none | attack sim | MISSING | MISSING |
 | AA1 | Listening sockets (state + listen events) | M | T1205, backdoors | `state.listeners`, `network.listen` | SOCKDIAG + EBPF `security_socket_listen` | PROCFS `/proc/net/*` | – | low | none | VM | PARTIAL | PARTIAL |

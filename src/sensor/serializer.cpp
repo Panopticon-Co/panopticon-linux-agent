@@ -423,7 +423,7 @@ std::string record_serializer::network_event(const network_record& record, const
     out.key("network").begin_object();
     out.field("transport", net.protocol);
     out.field("family", net.family == "inet" ? "ipv4" : "ipv6");
-    out.field("direction", net.operation == network_operation::connect  ? "outbound"
+    out.field("direction", net.operation == network_operation::connect || net.operation == network_operation::udp_flow ? "outbound"
                            : net.operation == network_operation::accept ? "inbound"
                                                                         : "listen");
     out.key("local").begin_object();

@@ -2,6 +2,10 @@
 
 #include "panopticon_events.h"
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -10,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string_view>
+#include <vector>
 
 #if defined(PANOPTICON_HAVE_EBPF)
 #include <bpf/bpf.h>
@@ -33,7 +38,7 @@ struct hook {
     const char* capability;  // catalog capability it provides
     bool core;
 };
-constexpr std::array<hook, 6U> hooks{{
+constexpr std::array<hook, 6U> process_hooks{{
     {"on_fork", "process.fork", true},
     {"on_exec", "process.exec", true},
     {"on_exit", "process.exit", true},
@@ -41,6 +46,26 @@ constexpr std::array<hook, 6U> hooks{{
     {"on_commit_creds", "process.cred_change", false},
     {"on_ptrace", "process.inject", false},
 }};
+// Network hooks run in the calling process, so the actor is exact. Connect is the one that makes
+// the provider worth having; the rest are dropped (and reported) when the kernel cannot host them.
+constexpr std::array<hook, 5U> network_hooks{{
+    {"on_tcp_connect", "network.connect", true},
+    {"on_tcp_accept", "network.accept", false},
+    {"on_tcp_listen", "network.listen", false},
+    {"on_udp_send", "network.udp_flow", false},
+    {"on_udp6_send", "network.udp_flow", false},
+}};
+
+std::vector<hook> hooks_for(const ebpf_role role) {
+    if (role == ebpf_role::network) return {network_hooks.begin(), network_hooks.end()};
+    return {process_hooks.begin(), process_hooks.end()};
+}
+
+std::string address_text(const std::uint8_t family, const std::uint8_t* bytes) {
+    char text[INET6_ADDRSTRLEN]{};
+    if (::inet_ntop(family == 2U ? AF_INET : AF_INET6, bytes, text, sizeof(text)) == nullptr) return {};
+    return text;
+}
 
 // Text of a NUL-terminated string stored in a fixed field of `capacity` bytes, of which only the
 // first `available` are valid.
@@ -119,6 +144,54 @@ std::vector<raw_record> decode_ebpf_process_sample(const void* data, const std::
         records.push_back({time, observed("security_ptrace_access_check"),
                            raw_ptrace{event.pid, event.tid, event.tracer_pid, event.tracer_pid, "ptrace_access"}});
         break;
+    case wire::PAN_EVENT_NET_CONNECT:
+    case wire::PAN_EVENT_NET_ACCEPT:
+    case wire::PAN_EVENT_NET_LISTEN:
+    case wire::PAN_EVENT_NET_UDP: {
+        const bool known_family = event.net_family == 2U || event.net_family == 10U;
+        const bool known_proto = event.net_proto == 6U || event.net_proto == 17U;
+        if (!known_family || !known_proto) {
+            if (malformed != nullptr) *malformed = true;
+            return {};
+        }
+        raw_network_event net;
+        const char* hook_name = "tcp_connect";
+        switch (event.kind) {
+        case wire::PAN_EVENT_NET_ACCEPT:
+            net.operation = network_operation::accept;
+            net.state = "established";
+            hook_name = "inet_csk_accept";
+            break;
+        case wire::PAN_EVENT_NET_LISTEN:
+            net.operation = network_operation::listen;
+            net.state = "listen";
+            hook_name = "inet_listen";
+            break;
+        case wire::PAN_EVENT_NET_UDP:
+            net.operation = network_operation::udp_flow;
+            hook_name = "udp_sendmsg";
+            break;
+        default:
+            net.operation = network_operation::connect;
+            net.state = "syn_sent";
+            break;
+        }
+        net.protocol = event.net_proto == 6U ? "tcp" : "udp";
+        net.family = event.net_family == 2U ? "inet" : "inet6";
+        net.local_address = address_text(event.net_family, event.net_saddr);
+        net.local_port = static_cast<std::uint16_t>(event.net_sport);
+        if (event.kind != wire::PAN_EVENT_NET_LISTEN) {
+            net.remote_address = address_text(event.net_family, event.net_daddr);
+            net.remote_port = static_cast<std::uint16_t>(event.net_dport);
+        }
+        net.uid = event.uid;
+        net.pid = event.pid;
+        net.holders = 1U;
+        // The hook sees the socket before any file descriptor is attached to it.
+        net.unavailable.push_back({"network.socket_inode", unavailable_reason::not_supported_by_provider});
+        records.push_back({time, observed(hook_name), std::move(net)});
+        break;
+    }
     default:
         if (malformed != nullptr) *malformed = true;
         break;
@@ -170,15 +243,17 @@ private:
 
 bool ebpf_process_built() noexcept { return true; }
 
-ebpf_process_provider::ebpf_process_provider(const clock_domain& clock, ebpf_process_options options)
-    : clock_{clock}, options_{std::move(options)} {}
+ebpf_process_provider::ebpf_process_provider(const clock_domain& clock, ebpf_process_options options, const ebpf_role role)
+    : clock_{clock}, options_{std::move(options)}, role_{role}, own_pid_{static_cast<std::uint32_t>(::getpid())} {}
 
 ebpf_process_provider::~ebpf_process_provider() { stop(); }
 
 std::vector<std::string> ebpf_process_provider::capabilities() const {
     if (state_ == "active") return capabilities_;
     std::vector<std::string> all;
-    for (const auto& entry : hooks) all.emplace_back(entry.capability);
+    for (const auto& entry : hooks_for(role_)) {
+        if (std::find(all.begin(), all.end(), entry.capability) == all.end()) all.emplace_back(entry.capability);
+    }
     return all;
 }
 
@@ -225,15 +300,29 @@ result<bool> ebpf_process_provider::start(record_queue& queue) {
         (void)bpf_map__set_max_entries(events_map, options_.ringbuf_bytes);
     }
 
+    // The object holds the programs of every role; this provider loads only its own. The others
+    // would attach a second copy of hooks another provider already serves.
+    const auto active_hooks = hooks_for(role_);
+    {
+        ::bpf_program* program = nullptr;
+        bpf_object__for_each_program(program, object_) {
+            const std::string_view program_name = bpf_program__name(program);
+            const bool ours = std::any_of(active_hooks.begin(), active_hooks.end(), [&](const hook& entry) { return program_name == entry.program; });
+            if (!ours) (void)bpf_program__set_autoload(program, false);
+        }
+    }
+
     // Programs whose hook is absent from this kernel are not loaded: the verifier would reject
     // the whole object otherwise.
-    for (const auto& entry : hooks) {
+    for (const auto& entry : active_hooks) {
         auto* program = bpf_object__find_program_by_name(object_, entry.program);
         if (program == nullptr) return fail(std::string{"embedded eBPF object lacks program "} + entry.program, error_code::corrupt_data);
         const std::string section = bpf_program__section_name(program);
         const auto slash = section.find('/');
         const auto target = section.substr(slash == std::string::npos ? 0U : slash + 1U);
-        const auto attach_type = section.rfind("fentry/", 0U) == 0U ? BPF_TRACE_FENTRY : BPF_TRACE_RAW_TP;
+        const auto attach_type = section.rfind("fentry/", 0U) == 0U   ? BPF_TRACE_FENTRY
+                                 : section.rfind("fexit/", 0U) == 0U ? BPF_TRACE_FEXIT
+                                                                     : BPF_TRACE_RAW_TP;
         if (libbpf_find_vmlinux_btf_id(target.c_str(), attach_type) > 0) continue;
         if (entry.core) {
             return fail("kernel_feature_missing: kernel BTF has no hook " + target + " (required for " + entry.capability + ")");
@@ -247,7 +336,7 @@ result<bool> ebpf_process_provider::start(record_queue& queue) {
         return fail(std::string{code} + std::strerror(-loaded) + " " + summarise(capture.text));
     }
 
-    for (const auto& entry : hooks) {
+    for (const auto& entry : active_hooks) {
         auto* program = bpf_object__find_program_by_name(object_, entry.program);
         if (!bpf_program__autoload(program)) continue;
         auto* link = bpf_program__attach(program);
@@ -260,7 +349,7 @@ result<bool> ebpf_process_provider::start(record_queue& queue) {
             continue;
         }
         links_.push_back(link);
-        capabilities_.emplace_back(entry.capability);
+        if (std::find(capabilities_.begin(), capabilities_.end(), entry.capability) == capabilities_.end()) capabilities_.emplace_back(entry.capability);
     }
 
     if (auto* drops_map = bpf_object__find_map_by_name(object_, "drops"); drops_map != nullptr) drops_map_fd_ = bpf_map__fd(drops_map);
@@ -298,6 +387,9 @@ int ebpf_process_provider::on_sample(const void* data, const std::size_t size) {
     auto records = decode_ebpf_process_sample(data, size, clock_, options_.limits, &malformed);
     if (malformed) ++malformed_;
     for (auto& record : records) {
+        // The sensor's own connections (the uplink to the Manager) are not telemetry: reporting
+        // them would make every delivered batch produce the next record.
+        if (const auto* net = std::get_if<raw_network_event>(&record.payload); net != nullptr && options_.skip_own_network_events && net->pid == own_pid_) continue;
         (void)queue_->push(std::move(record));
         ++events_;
     }
@@ -333,7 +425,7 @@ provider_health ebpf_process_provider::health() const {
         reason = "ring buffer polling failed";
     }
     if (malformed_.load() > 0U) reason += (reason.empty() ? "" : "; ") + std::to_string(malformed_.load()) + " malformed samples";
-    return {"ebpf_process", state, reason, capabilities(), events_.load(), drops_seen_};
+    return {std::string{name()}, state, reason, capabilities(), events_.load(), drops_seen_};
 }
 
 std::uint64_t ebpf_process_provider::take_losses() {
@@ -350,13 +442,15 @@ std::uint64_t ebpf_process_provider::take_losses() {
 
 bool ebpf_process_built() noexcept { return false; }
 
-ebpf_process_provider::ebpf_process_provider(const clock_domain& clock, ebpf_process_options options)
-    : clock_{clock}, options_{std::move(options)} {}
+ebpf_process_provider::ebpf_process_provider(const clock_domain& clock, ebpf_process_options options, const ebpf_role role)
+    : clock_{clock}, options_{std::move(options)}, role_{role}, own_pid_{static_cast<std::uint32_t>(::getpid())} {}
 ebpf_process_provider::~ebpf_process_provider() = default;
 
 std::vector<std::string> ebpf_process_provider::capabilities() const {
     std::vector<std::string> all;
-    for (const auto& entry : hooks) all.emplace_back(entry.capability);
+    for (const auto& entry : hooks_for(role_)) {
+        if (std::find(all.begin(), all.end(), entry.capability) == all.end()) all.emplace_back(entry.capability);
+    }
     return all;
 }
 
@@ -369,7 +463,7 @@ void ebpf_process_provider::stop() {}
 void ebpf_process_provider::run() {}
 int ebpf_process_provider::on_sample(const void*, std::size_t) { return 0; }
 void ebpf_process_provider::release() {}
-provider_health ebpf_process_provider::health() const { return {"ebpf_process", "unavailable", probe(), capabilities(), 0U, 0U}; }
+provider_health ebpf_process_provider::health() const { return {std::string{name()}, "unavailable", probe(), capabilities(), 0U, 0U}; }
 std::uint64_t ebpf_process_provider::take_losses() { return 0U; }
 
 #endif

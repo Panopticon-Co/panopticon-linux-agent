@@ -9,6 +9,7 @@
 #include "vmlinux.h"
 
 #include <bpf/bpf_core_read.h>
+#include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
@@ -250,4 +251,203 @@ int BPF_PROG(on_ptrace, struct task_struct *child, unsigned int mode)
     BPF_CORE_READ_STR_INTO(&e->comm, child, comm);
     submit(e);
     return 0;
+}
+
+// ---- network: connect, accept, listen, UDP flows (ADR 019) ------------------------------------
+//
+// These run in the context of the process that makes the call, so the actor is exact: there is no
+// socket inode to /proc/<pid>/fd match afterwards, and a connection that lives for a millisecond
+// is still seen.
+
+#define PAN_AF_INET 2
+#define PAN_AF_INET6 10
+#define PAN_UDP_FLOW_WINDOW_NS (60ULL * 1000000000ULL)
+
+struct pan_udp_key {
+    u32 tgid;
+    u16 dport;
+    u8 family;
+    u8 pad;
+    u8 daddr[16];
+};
+
+// First datagram per (process, destination) per window; an LRU so a scanner cannot exhaust it.
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 8192);
+    __type(key, struct pan_udp_key);
+    __type(value, u64);
+} udp_seen SEC(".maps");
+
+static __always_inline void net_actor(struct pan_event *e)
+{
+    struct task_struct *t = (struct task_struct *)bpf_get_current_task_btf();
+    e->pid = BPF_CORE_READ(t, tgid);
+    e->tid = BPF_CORE_READ(t, pid);
+    e->ppid = BPF_CORE_READ(t, real_parent, tgid);
+    e->start_boot_ns = leader_start_boot(t);
+    e->uid = (u32)bpf_get_current_uid_gid();
+    BPF_CORE_READ_STR_INTO(&e->comm, t, comm);
+}
+
+// Copies the addresses and ports of a connected or bound socket.
+static __always_inline int net_fill_sock(struct pan_event *e, struct sock *sk, u8 proto)
+{
+    u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
+    if (family != PAN_AF_INET && family != PAN_AF_INET6)
+        return 0;
+    e->net_family = (u8)family;
+    e->net_proto = proto;
+    e->net_sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+    e->net_dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+    if (family == PAN_AF_INET) {
+        u32 local = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+        u32 remote = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+        __builtin_memcpy(e->net_saddr, &local, sizeof(local));
+        __builtin_memcpy(e->net_daddr, &remote, sizeof(remote));
+    } else {
+        struct in6_addr local6 = {};
+        struct in6_addr remote6 = {};
+        BPF_CORE_READ_INTO(&local6, sk, __sk_common.skc_v6_rcv_saddr);
+        BPF_CORE_READ_INTO(&remote6, sk, __sk_common.skc_v6_daddr);
+        __builtin_memcpy(e->net_saddr, &local6, sizeof(local6));
+        __builtin_memcpy(e->net_daddr, &remote6, sizeof(remote6));
+    }
+    return 1;
+}
+
+// tcp_connect() runs when the SYN is about to be sent: the destination and the chosen local port
+// are already set, and every active open (connect(), including non-blocking) reaches it.
+SEC("fentry/tcp_connect")
+int BPF_PROG(on_tcp_connect, struct sock *sk)
+{
+    struct pan_event *e = event_base(PAN_EVENT_NET_CONNECT);
+    if (!e)
+        return 0;
+    if (!net_fill_sock(e, sk, 6))
+        return 0;
+    net_actor(e);
+    submit(e);
+    return 0;
+}
+
+// inet_csk_accept() returns the new connection socket (NULL when nothing was accepted).
+SEC("fexit/inet_csk_accept")
+int BPF_PROG(on_tcp_accept, struct sock *sk, int flags, int *err, bool kern, struct sock *ret)
+{
+    if (!ret)
+        return 0;
+    struct pan_event *e = event_base(PAN_EVENT_NET_ACCEPT);
+    if (!e)
+        return 0;
+    if (!net_fill_sock(e, ret, 6))
+        return 0;
+    net_actor(e);
+    submit(e);
+    return 0;
+}
+
+// A listen() that succeeded: the socket is bound by now, so the port is known.
+SEC("fexit/inet_listen")
+int BPF_PROG(on_tcp_listen, struct socket *sock, int backlog, int ret)
+{
+    if (ret != 0)
+        return 0;
+    struct sock *sk = BPF_CORE_READ(sock, sk);
+    if (!sk)
+        return 0;
+    struct pan_event *e = event_base(PAN_EVENT_NET_LISTEN);
+    if (!e)
+        return 0;
+    if (!net_fill_sock(e, sk, 6))
+        return 0;
+    e->net_dport = 0;
+    net_actor(e);
+    submit(e);
+    return 0;
+}
+
+static __always_inline int udp_flow(struct sock *sk, struct msghdr *msg)
+{
+    struct pan_udp_key key = {};
+    u16 dport = 0;
+    u8 family = 0;
+    u8 daddr[16] = {};
+    void *name = BPF_CORE_READ(msg, msg_name);
+    if (name) {
+        // sendto() with an explicit destination, already copied into kernel memory.
+        u16 sa_family = 0;
+        bpf_probe_read_kernel(&sa_family, sizeof(sa_family), name);
+        if (sa_family == PAN_AF_INET) {
+            struct sockaddr_in sin = {};
+            bpf_probe_read_kernel(&sin, sizeof(sin), name);
+            family = PAN_AF_INET;
+            dport = bpf_ntohs(sin.sin_port);
+            __builtin_memcpy(daddr, &sin.sin_addr, 4);
+        } else if (sa_family == PAN_AF_INET6) {
+            struct sockaddr_in6 sin6 = {};
+            bpf_probe_read_kernel(&sin6, sizeof(sin6), name);
+            family = PAN_AF_INET6;
+            dport = bpf_ntohs(sin6.sin6_port);
+            __builtin_memcpy(daddr, &sin6.sin6_addr, 16);
+        }
+    } else {
+        // A connected UDP socket sends to the address it was connected to.
+        u16 sk_family = BPF_CORE_READ(sk, __sk_common.skc_family);
+        dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+        if (sk_family == PAN_AF_INET) {
+            family = PAN_AF_INET;
+            u32 remote = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+            __builtin_memcpy(daddr, &remote, 4);
+        } else if (sk_family == PAN_AF_INET6) {
+            family = PAN_AF_INET6;
+            struct in6_addr remote6 = {};
+            BPF_CORE_READ_INTO(&remote6, sk, __sk_common.skc_v6_daddr);
+            __builtin_memcpy(daddr, &remote6, 16);
+        }
+    }
+    if (!family || !dport)
+        return 0;
+
+    key.tgid = bpf_get_current_pid_tgid() >> 32;
+    key.dport = dport;
+    key.family = family;
+    __builtin_memcpy(key.daddr, daddr, sizeof(daddr));
+    u64 now = bpf_ktime_get_boot_ns();
+    u64 *last = bpf_map_lookup_elem(&udp_seen, &key);
+    if (last && now - *last < PAN_UDP_FLOW_WINDOW_NS)
+        return 0;
+    bpf_map_update_elem(&udp_seen, &key, &now, BPF_ANY);
+
+    struct pan_event *e = event_base(PAN_EVENT_NET_UDP);
+    if (!e)
+        return 0;
+    e->net_family = family;
+    e->net_proto = 17;
+    e->net_sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+    e->net_dport = dport;
+    __builtin_memcpy(e->net_daddr, daddr, sizeof(daddr));
+    if (family == PAN_AF_INET) {
+        u32 local = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+        __builtin_memcpy(e->net_saddr, &local, sizeof(local));
+    } else {
+        struct in6_addr local6 = {};
+        BPF_CORE_READ_INTO(&local6, sk, __sk_common.skc_v6_rcv_saddr);
+        __builtin_memcpy(e->net_saddr, &local6, sizeof(local6));
+    }
+    net_actor(e);
+    submit(e);
+    return 0;
+}
+
+SEC("fentry/udp_sendmsg")
+int BPF_PROG(on_udp_send, struct sock *sk, struct msghdr *msg, size_t len)
+{
+    return udp_flow(sk, msg);
+}
+
+SEC("fentry/udpv6_sendmsg")
+int BPF_PROG(on_udp6_send, struct sock *sk, struct msghdr *msg, size_t len)
+{
+    return udp_flow(sk, msg);
 }

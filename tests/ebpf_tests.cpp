@@ -11,7 +11,10 @@
 
 #include "panopticon_events.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <pthread.h>
+#include <sys/socket.h>
 #include <spawn.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
@@ -130,6 +133,77 @@ void test_decode_exec_arguments() {
     exec.flags |= wire::PAN_FLAG_ARGS_TRUNC;
     records = decode_ebpf_process_sample(&exec, size, clock, {});
     require(std::get<raw_exec>(records[0].payload).args_truncated, "kernel truncation flag is kept");
+}
+
+void put_address(std::uint8_t (&field)[16], const char* text, const int family) {
+    std::memset(field, 0, sizeof(field));
+    if (::inet_pton(family, text, field) != 1) throw std::runtime_error{"bad test address"};
+}
+
+void test_decode_network() {
+    clock_domain clock;
+    auto connect = base_event(wire::PAN_EVENT_NET_CONNECT);
+    connect.net_family = 2U;
+    connect.net_proto = 6U;
+    connect.net_sport = 41000U;
+    connect.net_dport = 443U;
+    connect.uid = 1000U;
+    put_address(connect.net_saddr, "10.0.2.15", AF_INET);
+    put_address(connect.net_daddr, "198.51.100.7", AF_INET);
+    bool malformed = true;
+    auto records = decode_ebpf_process_sample(&connect, header_size, clock, {}, &malformed);
+    require(!malformed && records.size() == 1U, "connect decodes");
+    const auto& out = std::get<raw_network_event>(records[0].payload);
+    require(out.operation == network_operation::connect && out.protocol == "tcp" && out.family == "inet", "connect shape");
+    require(out.local_address == "10.0.2.15" && out.local_port == 41000U && out.remote_address == "198.51.100.7" && out.remote_port == 443U,
+            "addresses and ports in host order");
+    require(out.pid == 4242U && out.uid == 1000U && out.state == "syn_sent", "the calling process and its uid");
+    require(records[0].source.provider == "ebpf" && records[0].source.mechanism == "tcp_connect" && records[0].source.level == confidence::observed,
+            "provenance names the hook");
+
+    auto listen = base_event(wire::PAN_EVENT_NET_LISTEN);
+    listen.net_family = 10U;
+    listen.net_proto = 6U;
+    listen.net_sport = 8080U;
+    listen.net_dport = 9999U;  // a listener has no remote end, whatever the kernel left in the field
+    put_address(listen.net_saddr, "::", AF_INET6);
+    records = decode_ebpf_process_sample(&listen, header_size, clock, {});
+    require(records.size() == 1U, "listen decodes");
+    const auto& listening = std::get<raw_network_event>(records[0].payload);
+    require(listening.operation == network_operation::listen && listening.family == "inet6" && listening.local_address == "::" &&
+                listening.remote_address.empty() && listening.remote_port == 0U,
+            "a listener reports only its local end");
+
+    auto accept = base_event(wire::PAN_EVENT_NET_ACCEPT);
+    accept.net_family = 2U;
+    accept.net_proto = 6U;
+    accept.net_sport = 22U;
+    accept.net_dport = 50000U;
+    put_address(accept.net_saddr, "10.0.2.15", AF_INET);
+    put_address(accept.net_daddr, "10.0.2.2", AF_INET);
+    records = decode_ebpf_process_sample(&accept, header_size, clock, {});
+    const auto& accepted = std::get<raw_network_event>(records[0].payload);
+    require(accepted.operation == network_operation::accept && accepted.remote_address == "10.0.2.2" && accepted.local_port == 22U, "accept");
+
+    auto udp = base_event(wire::PAN_EVENT_NET_UDP);
+    udp.net_family = 10U;
+    udp.net_proto = 17U;
+    udp.net_dport = 53U;
+    put_address(udp.net_daddr, "2001:db8::53", AF_INET6);
+    records = decode_ebpf_process_sample(&udp, header_size, clock, {});
+    const auto& flow = std::get<raw_network_event>(records[0].payload);
+    require(flow.operation == network_operation::udp_flow && flow.protocol == "udp" && flow.remote_address == "2001:db8::53" && flow.remote_port == 53U,
+            "udp flow to a resolver");
+
+    // A family or protocol the program never produces is a malformed sample, not a guess.
+    auto bad_family = connect;
+    bad_family.net_family = 3U;
+    malformed = false;
+    require(decode_ebpf_process_sample(&bad_family, header_size, clock, {}, &malformed).empty() && malformed, "unknown address family rejected");
+    auto bad_proto = connect;
+    bad_proto.net_proto = 1U;
+    malformed = false;
+    require(decode_ebpf_process_sample(&bad_proto, header_size, clock, {}, &malformed).empty() && malformed, "unknown protocol rejected");
 }
 
 void test_decode_credentials_and_ptrace() {
@@ -287,7 +361,12 @@ std::vector<const raw_record*> forks_of(const records_t& records, const pid_t pi
 // environment cannot run eBPF at all.
 class live_provider {
 public:
-    live_provider() : provider_{clock_}, queue_{65536U} {}
+    static ebpf_process_options make_options() {
+        ebpf_process_options options;
+        options.skip_own_network_events = false;  // the test process is the actor under test
+        return options;
+    }
+    explicit live_provider(const ebpf_role role = ebpf_role::process) : provider_{clock_, make_options(), role}, queue_{65536U} {}
     live_provider(const live_provider&) = delete;
     live_provider& operator=(const live_provider&) = delete;
     ~live_provider() { provider_.stop(); }
@@ -312,6 +391,64 @@ private:
     ebpf_process_provider provider_;
     record_queue queue_;
 };
+
+// A loopback server and client in one process: the kernel hooks must report the listen, the
+// connect, the accept and the first UDP datagram with this process as the actor and the exact
+// ports. A connection that is closed immediately is the case the socket-table poll misses.
+void test_live_network_connect_accept_listen_udp() {
+    live_provider live{ebpf_role::network};
+    if (!live.begin("live_network_connect_accept_listen_udp")) return;
+
+    const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+    require(server >= 0, "socket");
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    require(::bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0 && ::listen(server, 1) == 0, "bind and listen");
+    socklen_t length = sizeof(address);
+    require(::getsockname(server, reinterpret_cast<sockaddr*>(&address), &length) == 0, "getsockname");
+    const auto port = ntohs(address.sin_port);
+
+    const int client = ::socket(AF_INET, SOCK_STREAM, 0);
+    require(::connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0, "connect");
+    const int peer = ::accept(server, nullptr, nullptr);
+    require(peer >= 0, "accept");
+    ::close(peer);
+    ::close(client);
+
+    const int datagram = ::socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in target{};
+    target.sin_family = AF_INET;
+    target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    target.sin_port = htons(static_cast<std::uint16_t>(port + 1U));
+    require(::sendto(datagram, "a", 1U, 0, reinterpret_cast<sockaddr*>(&target), sizeof(target)) == 1, "first datagram");
+    require(::sendto(datagram, "b", 1U, 0, reinterpret_cast<sockaddr*>(&target), sizeof(target)) == 1, "second datagram");
+    ::close(datagram);
+    ::close(server);
+
+    const auto self = static_cast<std::uint32_t>(::getpid());
+    const auto count = [&](const records_t& seen, const network_operation operation, const std::uint16_t wanted) {
+        return select<raw_network_event>(seen, [&](const raw_network_event& e) {
+                   const auto relevant = operation == network_operation::listen || operation == network_operation::accept ? e.local_port : e.remote_port;
+                   return e.pid == self && e.operation == operation && relevant == wanted;
+               }).size();
+    };
+    records_t all;
+    const auto next = static_cast<std::uint16_t>(port + 1U);
+    require(collect(live.queue(), all,
+                    [&](const records_t& seen) {
+                        return count(seen, network_operation::listen, port) >= 1U && count(seen, network_operation::connect, port) >= 1U &&
+                               count(seen, network_operation::accept, port) >= 1U && count(seen, network_operation::udp_flow, next) >= 1U;
+                    }),
+            "listen, connect, accept and udp flow were reported for this process and port");
+    require(count(all, network_operation::udp_flow, next) == 1U, "the second datagram of the same flow is not reported again");
+    const auto connects = select<raw_network_event>(all, [&](const raw_network_event& e) {
+        return e.pid == self && e.operation == network_operation::connect && e.remote_port == port;
+    });
+    require(connects[0]->source.mechanism == "tcp_connect" && std::get<raw_network_event>(connects[0]->payload).remote_address == "127.0.0.1",
+            "connect provenance and destination");
+}
 
 void test_live_lifecycle_and_arguments() {
     live_provider live;
@@ -451,6 +588,7 @@ int main(int argc, char** argv) {
     };
     run("decode_fork_exit_rename", test_decode_fork_exit_rename);
     run("decode_exec_arguments", test_decode_exec_arguments);
+    run("decode_network", test_decode_network);
     run("decode_credentials_and_ptrace", test_decode_credentials_and_ptrace);
     run("decode_rejects_malformed_samples", test_decode_rejects_malformed_samples);
     run("process_providers_share_a_family", test_process_providers_share_a_family);
@@ -461,6 +599,7 @@ int main(int argc, char** argv) {
     run("live_credential_changes", test_live_credential_changes);
     run("live_ptrace_access", test_live_ptrace_access);
     run("live_thread_group_exit_is_one_process_exit", test_live_thread_group_exit_is_one_process_exit);
+    run("live_network_connect_accept_listen_udp", test_live_network_connect_accept_listen_udp);
     std::cout << (failures == 0 ? std::string{"ALL PASSED"} : "FAILURES: " + std::to_string(failures)) << " (skipped " << skipped << ")\n";
     return failures == 0 ? 0 : 1;
 }

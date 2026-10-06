@@ -20,6 +20,7 @@ namespace panopticon::linux_agent::sensor {
 
 struct ebpf_process_options {
     std::uint32_t ringbuf_bytes{4U * 1024U * 1024U};  // power of two, multiple of the page size
+    bool skip_own_network_events{true};  // the sensor own uplink must not produce telemetry about itself
     procfs_limits limits;                              // bounds applied to argv captured in-kernel
 };
 
@@ -37,13 +38,17 @@ struct ebpf_process_options {
 // Process-family provider backed by eBPF (ADR 005, ADR 006): BTF-typed tracepoints and fentry
 // hooks with CO-RE. It supersedes netlink_proc (same `family`) when it loads; otherwise the
 // pipeline falls back to netlink_proc and reports why in health.
+// One BPF object serves two providers so that each family has its own fallback chain: the
+// `process` role is preferred over netlink_proc, the `network` role over sockdiag.
+enum class ebpf_role : std::uint8_t { process, network };
+
 class ebpf_process_provider final : public provider {
 public:
-    ebpf_process_provider(const clock_domain& clock, ebpf_process_options options = {});
+    ebpf_process_provider(const clock_domain& clock, ebpf_process_options options = {}, ebpf_role role = ebpf_role::process);
     ~ebpf_process_provider() override;
 
-    [[nodiscard]] std::string_view name() const noexcept override { return "ebpf_process"; }
-    [[nodiscard]] std::string_view family() const noexcept override { return "process"; }
+    [[nodiscard]] std::string_view name() const noexcept override { return role_ == ebpf_role::network ? "ebpf_network" : "ebpf_process"; }
+    [[nodiscard]] std::string_view family() const noexcept override { return role_ == ebpf_role::network ? "network" : "process"; }
     [[nodiscard]] std::vector<std::string> capabilities() const override;
     [[nodiscard]] std::string probe() override;
     [[nodiscard]] result<bool> start(record_queue& queue) override;
@@ -58,6 +63,8 @@ private:
 
     const clock_domain& clock_;
     ebpf_process_options options_;
+    ebpf_role role_;
+    std::uint32_t own_pid_;
     record_queue* queue_{nullptr};
 
     ::bpf_object* object_{nullptr};
