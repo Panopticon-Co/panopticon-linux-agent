@@ -514,6 +514,14 @@ bool log_tailer::poll(std::vector<std::string>& lines) {
     return true;
 }
 
+// ---- shared helpers --------------------------------------------------------------------------
+
+std::string sanitize_auth_field(const std::string_view text, const std::size_t maximum, raw_auth_event& event) {
+    return clean(text, maximum, event);
+}
+
+bool is_ip_address(const std::string_view text) { return valid_address(text); }
+
 // ---- provider --------------------------------------------------------------------------------
 
 auth_log_provider::auth_log_provider(auth_log_options options) : options_{std::move(options)} {}

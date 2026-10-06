@@ -20,6 +20,12 @@ namespace panopticon::linux_agent::sensor {
 
 inline constexpr std::size_t maximum_auth_line_bytes = 4096U;
 
+// Printable ASCII only and at most `maximum` bytes; anything else becomes '?'. Sets `sanitized`
+// and `truncated` on the event when it changed the text. Shared by every auth source.
+[[nodiscard]] std::string sanitize_auth_field(std::string_view text, std::size_t maximum, raw_auth_event& event);
+// True for a well-formed IPv4 or IPv6 address.
+[[nodiscard]] bool is_ip_address(std::string_view text);
+
 struct parsed_auth_line {
     std::uint64_t time_unix_ns{};
     raw_auth_event event;
