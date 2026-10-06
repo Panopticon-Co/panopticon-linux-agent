@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks what the fake Manager stored against the delivery guarantees of the sensor.
 
-usage: analyze.py <store.ndjson> [--min-seq N] [--allow-gaps] [--json]
+usage: analyze.py <store.ndjson> [--min-seq N] [--require-through N] [--allow-gaps] [--json]
 
 Exit status is non-zero when:
   * one seq was stored with two different payloads (conflict), or
@@ -26,6 +26,9 @@ def main():
     allow_gaps = "--allow-gaps" in sys.argv
     as_json = "--json" in sys.argv
     min_seq = 1
+    require_through = 0
+    if "--require-through" in sys.argv:
+        require_through = int(sys.argv[sys.argv.index("--require-through") + 1])
     if "--min-seq" in sys.argv:
         min_seq = int(sys.argv[sys.argv.index("--min-seq") + 1])
     rows = {}
@@ -86,6 +89,9 @@ def main():
     problems = []
     if conflicts:
         problems.append("conflicting payloads for seq %s" % conflicts[:5])
+    absent = [s for s in range(1, require_through + 1) if s not in rows]
+    if absent:
+        problems.append("%d of the first %d seqs (declared durable before the crash) are absent, first %s" % (len(absent), require_through, absent[:5]))
     accounted = max(wal_loss_total, health_dropped) + other_loss.get("manager_rejected", 0)
     if missing and not allow_gaps and len(missing) > accounted:
         problems.append("%d missing seqs but only %d reported as lost" % (len(missing), accounted))
@@ -94,6 +100,8 @@ def main():
         "first_seq": seqs[0] if seqs else None,
         "last_seq": seqs[-1] if seqs else None,
         "missing": len(missing),
+        "required_through": require_through,
+        "required_absent": len(absent),
         "missing_ranges": ranges[:20],
         "wal_loss_reported": wal_loss_total,
         "health_dropped_max": health_dropped,

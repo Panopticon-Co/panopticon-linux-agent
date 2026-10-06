@@ -3,6 +3,7 @@
 #
 # usage: sudo tests/chaos/run_chaos.sh [scenario ...]        (default: every scenario)
 #   scenarios: baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt
+#   power loss needs a reboot, so it is two runs (see scenario_powerloss_crash)
 #
 # Needs root (eBPF process provider), python3, openssl and a built build/panopticon-sensord.
 # Everything lives under $CHAOS_DIR (default /tmp/chaos). A fake Manager (tests/chaos/fake_manager.py)
@@ -28,6 +29,7 @@ verdict() { # name status detail
 
 setup() {
   pkill -INT -f panopticon-sensord 2>/dev/null; sleep 1; pkill -9 -f panopticon-sensord 2>/dev/null
+  pkill -9 -f fake_manager.py 2>/dev/null
   umount "$W/small" 2>/dev/null
   rm -rf "$W"; mkdir -p "$W"; chmod 755 "$W"
   openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
@@ -274,12 +276,51 @@ scenario_walcorrupt() {
     "stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported) conflicts=$(echo "$out" | jfield conflicts)"
 }
 
+# Power loss, phase 1. Crashes the machine with sysrq-b (no sync, no unmount: the page cache is lost) while the
+# sensor is writing under load and the Manager is refusing, so nothing is acknowledged. The lines "DURABLE n" go
+# to stdout (read them from outside the machine: files here would be subject to the same loss); n is a seq the
+# sensor had already reported durable, so it must survive the reboot.
+#   sudo CHAOS_DIR=/var/tmp/chaos-pl tests/chaos/run_chaos.sh powerloss_crash
+scenario_powerloss_crash() {
+  reset_run; write_conf </dev/null
+  sync  # the harness own files (cert, identity, config) must survive; only the sensor WAL is under test
+  start_manager && start_sensor || return
+  echo http503 >"$W/mode"
+  echo 1 >/proc/sys/kernel/sysrq
+  local run=${CRASH_AFTER:-12}
+  load $((run + 10)) 0
+  local end=$((SECONDS + run))
+  while [ $SECONDS -lt $end ]; do echo "DURABLE $(status_field wal.durable_seq)"; sleep 0.2; done
+  echo "DIRTY_KB $(awk '/^Dirty:/ {print $2}' /proc/meminfo)"
+  echo "CRASHING"
+  echo b >/proc/sysrq-trigger
+  sleep 60
+}
+
+# Power loss, phase 2, after the reboot: the sensor restarts on the surviving WAL, the Manager accepts, and
+# everything up to REQUIRE_SEQ (the last DURABLE value seen from outside) must arrive.
+#   sudo CHAOS_DIR=/var/tmp/chaos-pl REQUIRE_SEQ=n tests/chaos/run_chaos.sh powerloss_verify
+scenario_powerloss_verify() {
+  [ -n "${REQUIRE_SEQ:-}" ] || { say "REQUIRE_SEQ not set"; return; }
+  HOSTID=$(cat /etc/machine-id)
+  rm -f "$W/ctl.sock" "$W/store.ndjson"; echo ok >"$W/mode"
+  say "wal after the crash: $(ls "$W"/wal | tr '\n' ' ')"
+  write_conf </dev/null; start_manager && start_sensor || return
+  wait_drained 90
+  local alive=no; alive && alive=yes
+  local out; out=$(analyze --require-through "$REQUIRE_SEQ"); local rc=$?
+  stop_sensor
+  say "powerloss losses: $(echo "$out" | jfield loss_records)"
+  verdict powerloss "$([ $alive = yes ] && [ $rc = 0 ] && echo PASS || echo FAIL)" \
+    "required_through=$REQUIRE_SEQ required_absent=$(echo "$out" | jfield required_absent) stored=$(echo "$out" | jfield stored) last_seq=$(echo "$out" | jfield last_seq) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported) conflicts=$(echo "$out" | jfield conflicts)"
+}
+
 # ---------------------------------------------------------------- main
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
 [ -x "$SENSORD" ] || { echo "build first: $SENSORD" >&2; exit 2; }
-setup
 SCENARIOS=("$@")
+case " ${SCENARIOS[*]:-} " in *" powerloss_verify "*) ;; *) setup ;; esac
 [ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt)
 for name in "${SCENARIOS[@]}"; do
   say "=== $name"
