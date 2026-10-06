@@ -151,6 +151,7 @@ std::optional<std::pair<std::uint64_t, std::size_t>> parse_stamp(const std::stri
     return std::pair{seconds * ns_per_second + nanoseconds, at};
 }
 
+bool is_login_program(const std::string_view program) { return program == "sshd" || program == "login"; }
 bool is_privilege_program(const std::string_view program) { return program == "sudo" || program == "su" || program == "pkexec"; }
 
 }  // namespace
@@ -253,6 +254,15 @@ std::optional<parsed_audit_event> parse_audit_record(const std::uint16_t type, c
         break;
     }
     case audit_user_start: {
+        if (is_login_program(program) && success) {
+            // Real sshd on Ubuntu 22.04 reports a successful login only as this PAM session, with no
+            // USER_LOGIN; a USER_LOGIN failure is reported through the USER_AUTH failure instead.
+            const auto operation = text_of("op", 64U);
+            if (!operation || *operation != "PAM:session_open" || !account || account->empty()) return std::nullopt;
+            event.kind = auth_kind::login_success;
+            event.user = sanitize_auth_field(*account, maximum_name_bytes, event);
+            break;
+        }
         if (program != "su" || !success || !actor_uid) return std::nullopt;
         const auto operation = text_of("op", 64U);
         if (!operation || *operation != "PAM:session_open") return std::nullopt;
@@ -265,7 +275,7 @@ std::optional<parsed_audit_event> parse_audit_record(const std::uint16_t type, c
     default:
         return std::nullopt;
     }
-    event.method = type == audit_user_cmd || type == audit_user_start ? event.service : std::string{};
+    event.method = type == audit_user_cmd || (type == audit_user_start && event.kind != auth_kind::login_success) ? event.service : std::string{};
     return parsed_audit_event{stamp->first, std::move(event)};
 }
 

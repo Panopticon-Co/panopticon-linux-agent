@@ -86,8 +86,17 @@ void test_records_that_are_not_events() {
             "a successful authentication is not an event; the login or command that follows is");
     require(!parse(audit_user_login, "pid=1 uid=0 auid=4294967295 ses=1 msg='op=login id=1000 exe=\"/usr/sbin/sshd\" res=failed'"),
             "a failed login is reported through the authentication failure");
-    require(!parse(audit_user_start, "pid=1 uid=0 auid=1000 ses=1 msg='op=PAM:session_open acct=\"u\" exe=\"/usr/sbin/sshd\" res=success'"),
-            "only su sessions are reported");
+    require(!parse(audit_user_start, "pid=1 uid=0 auid=1000 ses=1 msg='op=PAM:session_open acct=\"u\" exe=\"/usr/bin/cron\" res=success'"),
+            "only su, sshd and login sessions are reported");
+    require(!parse(audit_user_start, "pid=1 uid=0 auid=1000 ses=1 msg='op=PAM:session_open acct=\"u\" exe=\"/usr/sbin/sshd\" res=failed'"),
+            "a failed session is not a login");
+    require(!parse(audit_user_start, "pid=1 uid=0 auid=1000 ses=1 msg='op=PAM:session_close acct=\"u\" exe=\"/usr/sbin/sshd\" res=success'"),
+            "a session close is not a login");
+    const auto ssh = must_parse(audit_user_start,
+                                "pid=9 uid=0 auid=1000 ses=55 msg='op=PAM:session_open grantors=pam_unix acct=\"vagrant\" exe=\"/usr/sbin/sshd\" "
+                                "hostname=10.0.2.2 addr=10.0.2.2 terminal=ssh res=success'");
+    require(ssh.event.kind == auth_kind::login_success && ssh.event.user == "vagrant" && ssh.event.service == "sshd" && ssh.event.source_address == "10.0.2.2",
+            "an sshd session opening is a login with its source");
     require(!parse(audit_user_auth, "pid=1 uid=0 auid=1000 ses=1 msg='op=PAM:setcred acct=\"u\" exe=\"/usr/sbin/sshd\" res=failed'"), "other PAM operations");
     require(!parse(1300, "pid=1 uid=0 msg='res=success'"), "other record types");
     require(!parse(audit_user_login, "pid=1 uid=0 auid=1000 ses=1 msg='op=login id=1000 exe=\"/usr/sbin/sshd\"'"), "no result");
