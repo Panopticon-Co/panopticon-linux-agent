@@ -18,10 +18,12 @@ never repeat the action.
    strict parse → authorization → durable ledger → exact target verification → execution →
    durable result → `POST .../commands/{id}/accept` and `POST .../command-results` (schema 2) →
    a `response.action` audit record in the WAL.
-2. **Strict parse.** Closed key set, schema "1" only, bounded sizes, aware timestamps. Anything
+2. **Strict parse.** Closed key set, schema "1" or "2", bounded sizes, aware timestamps. Anything
    else is `invalid_command` and is answered, never executed. A 20,000-round mutation fuzz runs in
    the tests.
-3. **Decision order, first failure wins.** `wrong_endpoint`, `expired`, `not_yet_valid`
+3. **Decision order, first failure wins.** `wrong_endpoint`, then for boot-bound commands
+   `boot_unavailable` / `boot_mismatch` (or `boot_binding_required` for an unbound process target
+   when `response_require_boot_binding=true`), then `expired`, `not_yet_valid`
    (30 s skew), `lifetime_exceeded`, `response_disabled`, `unsupported_action`,
    `action_not_permitted`, `rate_limited` (6 changing actions a minute). Only then does the ledger
    record the intent.
@@ -38,6 +40,12 @@ never repeat the action.
    and the sensor itself are protected. There is no PID-only fallback: a mismatch is
    `target_mismatch`. A kernel without pidfd uses a verified `kill()` and says so (`mode:
    pid_fallback`).
+   **Schema 2** (platform ADR 0008) adds the boot scope: the target is exactly
+   `{pid, start_time_ticks, boot_id}`, with ticks a canonical positive uint64 decimal string and
+   `boot_id` = `"boot_" + sha256_hex(kernel boot_id text)` (the 36-character lowercase UUID from
+   `/proc/sys/kernel/random/boot_id`, no newline). The sensor computes its own scope at start; a
+   sensor that cannot read a UUID refuses every boot-bound command (`boot_unavailable`). Schema 2
+   carries process actions only; file and targetless actions are `invalid_target`.
 7. **Actions today.** `KILL_PROCESS` and `COLLECT_PROCESS_INFO` (bounded name, exe, ppid, uid,
    threads). `COLLECT_NETWORK_CONNECTIONS`, `COLLECT_FILE`, `QUARANTINE_FILE`, `ISOLATE_HOST` and
    `RELEASE_HOST_ISOLATION` answer `unsupported_action`. The set of seven is closed; there is no
@@ -55,10 +63,18 @@ never repeat the action.
   process info, start-time mismatch, protected pid, lifetime and unsupported refusals, restart
   without re-execution, Manager lifecycle `SUCCEEDED` / `REJECTED`, and every `response.action`
   record accepted.
+* Schema 2 verified live the same day against a Manager that preserves the command version (a
+  trial merge of the Linux and Windows Manager branches): a scope from another boot was
+  `REJECTED / boot_mismatch`, a bound collect and a bound kill `SUCCEEDED` (process gone), and an
+  unbound schema-1 kill with binding required was `REJECTED / boot_binding_required`; all four
+  `response.action` records were accepted. The Linux Manager branch alone rewrites every command
+  to schema "1" and must be fixed before schema 2 is used with it.
 * A strict clock check is a real operational dependency: a VM clock 27 s behind the Manager
   host produced `not_yet_valid` for every command in the first live run. The gate is kept.
 * **Known gaps.** Commands are authenticated by TLS plus the enrolled identity; there is no
   per-command signature, so a compromised Manager channel can still request any permitted action.
-  Schema "1" has no `boot_id`, so a target is bound to a boot only by start-time ticks. There is no
+  Schema "1" has no `boot_id`; schema 2 closes that for process actions, but binding is required
+  only when `response_require_boot_binding=true` (off by default until Manager issues schema 2 to
+  Linux everywhere). There is no
   nonce beyond the command id and the ledger. Five actions are not implemented. Behaviour under a
   long Manager outage and ledger loss (disk replaced) are untested.
