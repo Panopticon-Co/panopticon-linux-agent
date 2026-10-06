@@ -30,6 +30,22 @@ struct sensor_identity {
 // `SHA-256(sensor_id | boot_id | seq)` truncated to 32 hex (catalog §2).
 [[nodiscard]] std::string compute_record_id(std::string_view sensor_id, std::string_view boot_id, std::uint64_t seq);
 
+// Delivery to the Manager as the uplink reports it; absent when the sensor writes to a file or stdout.
+struct delivery_health {
+    bool configured{false};
+    std::string state;  // idle, delivering, backing_off, unauthorized, rejected
+    std::uint64_t acknowledged_seq{};
+    std::uint64_t batches_sent{};
+    std::uint64_t records_acknowledged{};
+    std::uint64_t retries{};
+    std::uint64_t refusals{};
+    std::uint64_t consecutive_failures{};
+    std::uint64_t records_quarantined{};
+    std::uint64_t quarantine_failures{};
+    std::vector<std::uint64_t> recent_quarantined_seqs;
+    std::string last_error;
+};
+
 struct health_snapshot {
     std::string status;  // healthy, degraded, failed
     std::vector<provider_health> providers;
@@ -38,6 +54,16 @@ struct health_snapshot {
     std::uint64_t cpu_milliseconds{};
     std::uint64_t wal_bytes{};
     std::uint64_t wal_records{};
+    std::uint64_t wal_next_seq{};
+    std::uint64_t wal_durable_seq{};
+    std::uint64_t wal_acknowledged_seq{};
+    std::uint64_t wal_dropped_records{};
+    std::uint64_t records_total{};
+    std::uint64_t events_total{};
+    std::uint64_t loss_records_total{};
+    std::uint64_t sink_errors{};
+    std::uint64_t uptime_ms{};
+    delivery_health delivery;
     std::string kernel_release;
     bool btf{false};
     bool bpf_lsm{false};

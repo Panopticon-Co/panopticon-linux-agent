@@ -147,6 +147,10 @@ void uplink::quarantine(const std::vector<wal_record>& records, const verdict& o
     }
     const std::lock_guard<std::mutex> lock{mutex_};
     metrics_.records_quarantined += outcome.rejected_lines.size();
+    for (const auto line : outcome.rejected_lines) {
+        metrics_.recent_quarantined_seqs.push_back(records[line - 1U].seq);
+        if (metrics_.recent_quarantined_seqs.size() > 16U) metrics_.recent_quarantined_seqs.erase(metrics_.recent_quarantined_seqs.begin());
+    }
     metrics_.quarantine_failures += failures;
     if (!outcome.rejected_reasons.empty()) metrics_.last_error = "quarantined: " + outcome.rejected_reasons.front();
 }

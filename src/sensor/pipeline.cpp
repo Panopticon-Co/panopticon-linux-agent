@@ -386,15 +386,21 @@ health_snapshot sensor_pipeline::health_now() const {
     std::size_t active = 0U;
     std::size_t expected = 0U;
     std::vector<provider_health> reported;
+    std::map<std::string, int> family_seen;
     for (std::size_t index = 0U; index < providers_.size(); ++index) {
         const auto& source = providers_[index];
+        const std::string family{source->family()};
+        // Providers of a family are listed in preference order: the first is the primary mechanism.
+        const auto* tier = family.empty() || family_seen[family]++ == 0 ? "primary" : "fallback";
         if (!standby_[index].empty()) {
             // Not started on purpose: another provider of its family does the same job.
-            reported.push_back({std::string{source->name()}, "standby", "superseded by " + standby_[index], source->capabilities(), 0U, 0U});
+            reported.push_back({std::string{source->name()}, "standby", "superseded by " + standby_[index], source->capabilities(), 0U, 0U, family, tier});
             continue;
         }
         ++expected;
         auto health = source->health();
+        health.family = family;
+        health.tier = tier;
         if (health.state == "active") ++active;
         reported.push_back(std::move(health));
     }
@@ -429,6 +435,22 @@ health_snapshot sensor_pipeline::health_now() const {
     const auto wal = sink_.metrics();
     snapshot.wal_bytes = wal.bytes;
     snapshot.wal_records = wal.next_seq > wal.acknowledged_seq + 1U ? wal.next_seq - 1U - wal.acknowledged_seq : 0U;
+    snapshot.wal_next_seq = wal.next_seq;
+    snapshot.wal_durable_seq = wal.durable_seq;
+    snapshot.wal_acknowledged_seq = wal.acknowledged_seq;
+    snapshot.wal_dropped_records = wal.dropped_records;
+    snapshot.records_total = metrics_.records;
+    snapshot.events_total = metrics_.events;
+    snapshot.loss_records_total = metrics_.loss_records;
+    snapshot.sink_errors = metrics_.sink_errors;
+    snapshot.uptime_ms = started_ns_ == 0U ? 0U : (clock_domain::now_monotonic_ns() - started_ns_) / 1'000'000U;
+    if (delivery_probe_) {
+        snapshot.delivery = delivery_probe_();
+        snapshot.delivery.configured = true;
+        // A transport that cannot deliver, or that threw records away, is a degraded sensor.
+        if (snapshot.delivery.state != "idle" && snapshot.delivery.state != "delivering" && snapshot.status == "healthy") snapshot.status = "degraded";
+        if (snapshot.delivery.records_quarantined > 0U && snapshot.status == "healthy") snapshot.status = "degraded";
+    }
     utsname names{};
     if (::uname(&names) == 0) snapshot.kernel_release = names.release;
     std::error_code ignored;
@@ -591,6 +613,7 @@ result<bool> sensor_pipeline::start() {
     }
     last_reconcile_ns_ = last_health_ns_ = last_state_ns_ = last_resample_ns_ = last_fim_ns_ = now;
     refresh_status(now);
+    started_ns_ = clock_domain::now_monotonic_ns();
     started_ = true;
     return sink_.flush(now, true);
 }
@@ -605,6 +628,18 @@ result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono
     const auto observed = clock_domain::now_unix_ns();
     for (const auto& record : batch_) process_record(record, observed);
     (void)collect_losses(now_ns);
+    if (delivery_probe_) {
+        // The Manager said these records can never be valid. Say so in the stream, with the
+        // sequence numbers, so the gap at the Manager is explained rather than anonymous.
+        const auto delivery = delivery_probe_();
+        if (delivery.records_quarantined > quarantine_reported_) {
+            std::string detail = "sequence numbers";
+            for (const auto seq : delivery.recent_quarantined_seqs) detail += " " + std::to_string(seq);
+            detail += "; " + delivery.last_error;
+            (void)emit_loss({"manager_rejected", delivery.records_quarantined - quarantine_reported_, {}, detail});
+            quarantine_reported_ = delivery.records_quarantined;
+        }
+    }
 
     if (now_ns - last_reconcile_ns_ >= config_.reconcile_interval_seconds * ns_per_second) {
         const auto unix_now = clock_domain::now_unix_ns();

@@ -1080,6 +1080,52 @@ void test_pipeline_hashes_executed_images() {
     }
 }
 
+void test_pipeline_reports_delivery_and_turns_rejections_into_loss() {
+    const auto proc = fresh_directory("deliveryproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = proc;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(std::vector<raw_record>{}, 0U));
+    std::uint64_t quarantined = 0U;
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        pipeline.set_delivery_probe([&quarantined] {
+            delivery_health health;
+            health.state = quarantined == 0U ? "idle" : "rejected";
+            health.acknowledged_seq = 40U;
+            health.retries = 2U;
+            health.records_quarantined = quarantined;
+            if (quarantined > 0U) {
+                health.recent_quarantined_seqs = {68U};
+                health.last_error = "quarantined: schema_invalid";
+            }
+            return health;
+        });
+        value_of(pipeline.start(), "pipeline start");
+        quarantined = 1U;
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "second step does not repeat the loss");
+        require(pipeline.health_now().status == "degraded", "a rejected record makes the sensor degraded");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    const auto health = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, R"("type":"health")"); });
+    require(health != lines.end(), "health record emitted");
+    require(contains(*health, R"("delivery":{"state":"idle","acknowledged_seq":40,)") && contains(*health, R"("wal":{"next_seq":)") &&
+                contains(*health, R"("totals":{"records":)") && contains(*health, R"("tier":"primary")"),
+            "health carries delivery, WAL and totals and provider tier: " + *health);
+    const auto losses = std::count_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, R"("stage":"manager_rejected")"); });
+    require(losses == 1, "the rejection is reported once as a loss record");
+    const auto loss = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, R"("stage":"manager_rejected")"); });
+    require(contains(*loss, R"("count":1)") && contains(*loss, "sequence numbers 68") && contains(*loss, "schema_invalid"), "loss names the sequence and the reason");
+}
+
 void test_pipeline_emits_host_state_parts() {
     const auto proc = fresh_directory("hostproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
@@ -1284,6 +1330,7 @@ int main() {
     run("wal_detects_corruption_and_enforces_quota", test_wal_detects_corruption_and_enforces_quota);
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
+    run("pipeline_reports_delivery_and_turns_rejections_into_loss", test_pipeline_reports_delivery_and_turns_rejections_into_loss);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);
     run("pipeline_enriches_network_events", test_pipeline_enriches_network_events);
     run("pipeline_serializes_auth_events", test_pipeline_serializes_auth_events);

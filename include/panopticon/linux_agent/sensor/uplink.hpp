@@ -61,6 +61,7 @@ struct uplink_metrics {
     std::uint64_t retries{};
     std::uint64_t refusals{};
     std::uint64_t records_quarantined{};
+    std::vector<std::uint64_t> recent_quarantined_seqs;  // the last 16, oldest first
     std::uint64_t quarantine_failures{};  // quarantined records that could not be copied to disk
     std::uint64_t consecutive_failures{};
     std::uint64_t acknowledged_seq{};

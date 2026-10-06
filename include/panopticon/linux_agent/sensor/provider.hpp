@@ -22,6 +22,8 @@ struct provider_health {
     std::vector<std::string> capabilities;
     std::uint64_t events{};
     std::uint64_t drops{};
+    std::string family{};  // empty: the provider has no alternative
+    std::string tier{};    // primary, or fallback when an earlier member of the family is preferred
 };
 
 // FIFO, bounded, multi-producer/single-consumer. Order matters for the entity graph (fork before

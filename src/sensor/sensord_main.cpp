@@ -226,6 +226,26 @@ int main(int argc, char** argv) {
         providers.push_back(std::make_unique<sensor::auth_log_provider>());
     }
     sensor::sensor_pipeline pipeline{config, identity, clock, *sink, std::move(providers)};
+    if (delivery) {
+        auto* uplink_state_source = delivery.get();
+        pipeline.set_delivery_probe([uplink_state_source] {
+            const auto metrics = uplink_state_source->metrics();
+            sensor::delivery_health health;
+            health.configured = true;
+            health.state = sensor::to_string(metrics.state);
+            health.acknowledged_seq = metrics.acknowledged_seq;
+            health.batches_sent = metrics.batches_sent;
+            health.records_acknowledged = metrics.records_acknowledged;
+            health.retries = metrics.retries;
+            health.refusals = metrics.refusals;
+            health.consecutive_failures = metrics.consecutive_failures;
+            health.records_quarantined = metrics.records_quarantined;
+            health.quarantine_failures = metrics.quarantine_failures;
+            health.recent_quarantined_seqs = metrics.recent_quarantined_seqs;
+            health.last_error = metrics.last_error;
+            return health;
+        });
+    }
     if (auto started = pipeline.start(); !succeeded(started)) {
         std::fprintf(stderr, "panopticon-sensord: start: %s\n", std::get<error>(started).message.c_str());
         return 1;

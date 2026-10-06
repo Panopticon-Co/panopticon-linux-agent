@@ -252,6 +252,8 @@ void write_health_body(json_writer& out, const health_snapshot& snapshot) {
         out.field("name", provider.name);
         out.field("state", provider.state);
         out.field("reason", provider.reason);
+        if (!provider.family.empty()) out.field("family", provider.family);
+        if (!provider.tier.empty()) out.field("tier", provider.tier);
         out.key("capabilities").begin_array();
         for (const auto& capability : provider.capabilities) out.value(capability);
         out.end_array();
@@ -268,6 +270,37 @@ void write_health_body(json_writer& out, const health_snapshot& snapshot) {
     out.field("wal_bytes", snapshot.wal_bytes);
     out.field("wal_records", snapshot.wal_records);
     out.end_object();
+    out.key("wal").begin_object();
+    out.field("next_seq", snapshot.wal_next_seq);
+    out.field("durable_seq", snapshot.wal_durable_seq);
+    out.field("acknowledged_seq", snapshot.wal_acknowledged_seq);
+    out.field("dropped_records", snapshot.wal_dropped_records);
+    out.end_object();
+    out.key("totals").begin_object();
+    out.field("records", snapshot.records_total);
+    out.field("events", snapshot.events_total);
+    out.field("loss_records", snapshot.loss_records_total);
+    out.field("sink_errors", snapshot.sink_errors);
+    out.field("uptime_ms", snapshot.uptime_ms);
+    out.end_object();
+    if (snapshot.delivery.configured) {
+        const auto& delivery = snapshot.delivery;
+        out.key("delivery").begin_object();
+        out.field("state", delivery.state);
+        out.field("acknowledged_seq", delivery.acknowledged_seq);
+        out.field("batches_sent", delivery.batches_sent);
+        out.field("records_acknowledged", delivery.records_acknowledged);
+        out.field("retries", delivery.retries);
+        out.field("refusals", delivery.refusals);
+        out.field("consecutive_failures", delivery.consecutive_failures);
+        out.field("records_quarantined", delivery.records_quarantined);
+        out.field("quarantine_failures", delivery.quarantine_failures);
+        out.key("recent_quarantined_seqs").begin_array();
+        for (const auto seq : delivery.recent_quarantined_seqs) out.value(seq);
+        out.end_array();
+        if (!delivery.last_error.empty()) out.field("last_error", delivery.last_error);
+        out.end_object();
+    }
     out.key("kernel").begin_object();
     out.field("release", snapshot.kernel_release);
     out.field("btf", snapshot.btf);
