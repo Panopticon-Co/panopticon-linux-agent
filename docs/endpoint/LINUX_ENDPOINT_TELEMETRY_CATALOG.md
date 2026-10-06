@@ -36,7 +36,7 @@ Implementation state per type is tracked in [IMPLEMENTATION_STATUS.md](IMPLEMENT
 | `host` | object | `id`, `boot_id`, `hostname` |
 | `sensor` | object | `id`, `version`, `policy_version` |
 | `provenance` | object | `provider` (`ebpf`, `netlink_proc`, `procfs`, `fanotify`, `audit`, `journal`, `inventory`, `sensor`), `mechanism` (hook or source), `confidence` |
-| `unavailable` | array | `{field, reason}`; reasons: `not_supported_by_provider`, `process_exited`, `permission_denied`, `truncated`, `budget_exceeded`, `not_applicable`, `kernel_feature_missing` |
+| `unavailable` | array | `{field, reason}`; reasons: `not_supported_by_provider`, `process_exited`, `permission_denied`, `truncated`, `budget_exceeded`, `not_applicable`, `kernel_feature_missing`, `object_gone` (a file or directory no longer existed when it was resolved) |
 | family objects | object | `process`, `parent`, `target`, `file`, `network`, `dns`, `auth`, `account`, `persistence`, `package`, `kernel`, `mount`, `device`, `container`, `state`, `health`, `loss`, `detection`, `evidence`, `response`, `policy`, `tamper` |
 
 ## 3. Shared objects
@@ -139,6 +139,18 @@ before this exec), `previous_name` (`process.rename`), `creds_before` (`process.
 | `tamper.*` | process (actor), `tamper {target, technique}` | ebpf | file events |
 
 Process images: when procfs can no longer be read at exec time (short-lived processes), `process.executable.path` is the string given to `execve` (it may be relative, or a symlink such as `/bin/true`), `kind` is `file`, and the file metadata (`dev`, `inode`, `size`) is absent; `process.name` is its basename. The pre-exec image is never carried over.
+
+### 4.1 `file.*` events as emitted today (fanotify provider)
+
+| Type | Meaning | Notes |
+| --- | --- | --- |
+| `file.create` | entry created (file, directory, symlink) | `file.directory` marks directories |
+| `file.modify` | writable descriptor closed | close-after-write, not each `write()` |
+| `file.delete` | entry removed | no `stat` |
+| `file.rename` | entry moved | `file.old_path` set when both halves were seen; otherwise `unavailable` names the missing side (`file.old_path` or `file.path`) |
+| `file.attrib` | attribute change | chmod, chown, utimes and xattr changes are indistinguishable here; the eBPF provider will split them |
+
+Event body: `process` (actor, resolved through the entity graph; `{pid}` plus `unavailable: process` when it already exited), `file {path, name, directory, old_path?, stat?}` with `stat {mode, uid, gid, size, inode, device, mtime}` from an `lstat` taken after the event (`unavailable: file.stat / object_gone` when the path is gone). Provenance `{fanotify_file, FANOTIFY, observed}`. Events skipped by the rate governor are not individually reported; they appear as one `loss` record with `stage: governor` and an exact `count`.
 
 ## 5. State records
 
