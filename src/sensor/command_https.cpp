@@ -34,6 +34,11 @@ public:
         while (options_.manager_url.size() > 8U && options_.manager_url.back() == '/') options_.manager_url.pop_back();
         base_ = options_.manager_url + "/api/v1/agents/" + options_.identity.agent_id;
     }
+    ~https_command_transport() override {
+        if (handle_ != nullptr) curl_easy_cleanup(handle_);
+    }
+    https_command_transport(const https_command_transport&) = delete;
+    https_command_transport& operator=(const https_command_transport&) = delete;
 
     post_response poll() override { return exchange(false, base_ + "/commands?delivery_mode=durable", {}); }
 
@@ -66,7 +71,11 @@ private:
             result.detail = "cannot initialise libcurl";
             return result;
         }
-        CURL* handle = curl_easy_init();
+        // One handle for the life of the transport: the poll runs every few seconds and each answer adds an accept
+        // and a result, so a handle per request meant a TLS handshake each time. Options are set on every request.
+        const std::lock_guard<std::mutex> lock{mutex_};
+        if (handle_ == nullptr) handle_ = curl_easy_init();
+        CURL* handle = handle_;
         if (handle == nullptr) {
             result.detail = "cannot allocate an HTTPS handle";
             return result;
@@ -92,13 +101,20 @@ private:
         curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, options_.timeout_seconds);
         curl_easy_setopt(handle, CURLOPT_TIMEOUT, options_.timeout_seconds);
         curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(handle, CURLOPT_TCP_KEEPALIVE, 1L);
+        curl_easy_setopt(handle, CURLOPT_TCP_KEEPIDLE, 30L);
+        curl_easy_setopt(handle, CURLOPT_TCP_KEEPINTVL, 15L);
         curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, capture);
         curl_easy_setopt(handle, CURLOPT_WRITEDATA, &buffer);
         const auto code = curl_easy_perform(handle);
         long status = 0;
         curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
         curl_slist_free_all(headers);
-        curl_easy_cleanup(handle);
+        if (code != CURLE_OK) {
+            // A failed transfer may leave the connection in an unknown state: start the next request clean.
+            curl_easy_cleanup(handle_);
+            handle_ = nullptr;
+        }
 
         result.http_status = status;
         if (code != CURLE_OK) {
@@ -121,6 +137,8 @@ private:
 
     https_poster_options options_;
     std::string base_;
+    std::mutex mutex_;
+    CURL* handle_{nullptr};
 };
 
 #else
