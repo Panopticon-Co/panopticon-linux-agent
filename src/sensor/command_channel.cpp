@@ -104,7 +104,8 @@ std::optional<command_action> parse_command_action(const std::string_view text) 
 
 bool command_action_implemented(const command_action action) noexcept {
     return action == command_action::kill_process || action == command_action::collect_process_info ||
-           action == command_action::collect_network_connections;
+           action == command_action::collect_network_connections || action == command_action::collect_file ||
+           action == command_action::quarantine_file;
 }
 
 bool command_action_changes_host(const command_action action) noexcept {
@@ -586,11 +587,23 @@ public:
             case command_action::kill_process: return kill(command, dry_run);
             case command_action::collect_process_info: return collect(command);
             case command_action::collect_network_connections: return collect_connections(command);
+            case command_action::collect_file: return from_file_result(collect_file(command.path, options_.files));
+            case command_action::quarantine_file:
+                return from_file_result(quarantine_file(command.path, command.command_id, dry_run, options_.files));
             default: return {"rejected", "unsupported_action", "this sensor does not carry out that action", {}, 0U, {}};
         }
     }
 
 private:
+    static execution_result from_file_result(const file_action_result& result) {
+        execution_result out;
+        out.outcome = result.outcome;
+        out.reason = result.reason;
+        out.detail = clean(result.detail);
+        out.affected = result.affected;
+        return out;
+    }
+
     execution_result kill(const endpoint_command& command, const bool dry_run) const {
         // The identity is the pid together with the start time. respond_terminate_process takes a
         // pidfd, compares the start time it reads through procfs with the one the Manager named, and

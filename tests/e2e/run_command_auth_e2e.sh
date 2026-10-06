@@ -32,7 +32,7 @@ check() { # name expected actual
 cleanup() {
   [ -n "$SENSOR" ] && kill -INT "$SENSOR" 2>/dev/null
   [ -n "$MGR" ] && kill -9 "$MGR" 2>/dev/null
-  [ -f "$W/victims" ] && xargs -r kill -9 <"$W/victims" 2>/dev/null
+  [ -f "$W/victim.pids" ] && xargs -r kill -9 <"$W/victim.pids" 2>/dev/null
   return 0
 }
 trap cleanup EXIT
@@ -52,7 +52,7 @@ SPARE=${SPARELINE% *}
 echo "$KEY e2e-signing-key" >"$W/keyring"
 echo ok >"$W/mode"; : >"$W/commands.ndjson"; : >"$W/events.ndjson"; echo no >"$W/redeliver"
 
-write_conf() { # keys | unsigned
+write_conf() { # keys | unsigned [enforce | dry_run]
   {
     echo "sensor_id=auth-sensor"
     echo "host_id=$HOSTID"
@@ -69,8 +69,9 @@ write_conf() { # keys | unsigned
     echo "enable_sensitive_file_events=false"
     echo "enable_fim=false"
     echo "enable_hashing=false"
-    echo "response_mode=enforce"
-    echo "response_actions=KILL_PROCESS,COLLECT_PROCESS_INFO"
+    echo "response_mode=${2:-enforce}"
+    echo "response_actions=KILL_PROCESS,COLLECT_PROCESS_INFO,COLLECT_FILE,QUARANTINE_FILE"
+    echo "response_file_roots=$W,/run/cmdvictims"
     echo "response_poll_seconds=1"
     echo "response_max_changes_per_minute=60"
     if [ "$1" = keys ]; then echo "response_signing_keys=$W/keyring"; else echo "response_allow_unsigned=true"; fi
@@ -95,7 +96,7 @@ stop_sensor() { kill -INT "$SENSOR" 2>/dev/null; wait "$SENSOR" 2>/dev/null; SEN
 victim() { # starts a sleeping process, prints "pid ticks"
   sleep 3000 >/dev/null 2>&1 &
   local pid=$!
-  echo "$pid" >>"$W/victims"  # a file, because this runs in a subshell
+  echo "$pid" >>"$W/victim.pids"  # a file, because this runs in a subshell
   echo "$pid $(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$pid/stat")"
 }
 alive() { kill -0 "$1" 2>/dev/null && echo alive || echo gone; }
@@ -160,6 +161,18 @@ PY
     sleep 0.5
   done
   echo "no-result"
+}
+detail_of() { # <id> -> the detail the Manager received for a command
+  python3 - "$W/events.ndjson" "$1" <<'PY'
+import json, sys
+for row in open(sys.argv[1]):
+    try:
+        result = json.loads(row).get("result")
+    except ValueError:
+        continue
+    if result and result.get("command_id") == sys.argv[2]:
+        print(result["detail"])
+PY
 }
 audited() { grep -c "$1" "$W/store.ndjson" 2>/dev/null; true; }
 
@@ -239,7 +252,67 @@ echo no >"$W/redeliver"
 check "restart: no extra result for ok-kill" "$BEFORE" "$(events result ok-kill)"
 check "restart: the survivor of the refused commands is alive" alive "$(alive "$P5")"
 
-# 6. An unsigned-allowed sensor (explicit opt-in) runs unsigned commands, and warns at start.
+# 6. File actions (ADR 026): COLLECT_FILE and QUARANTINE_FILE on real files, signed, through the real channel.
+VICT=$W/victims; XD=/run/cmdvictims
+rm -rf "$XD"; mkdir -p "$VICT" "$XD"
+HELLO=5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
+printf 'hello\n' >"$VICT/sample"; chmod 640 "$VICT/sample"
+fcmd() { mk "$1" "$2" "{\"path\":\"$3\"}" "${@:4}"; }
+fcmd f-collect COLLECT_FILE "$VICT/sample" | sign "$W/signing.key" | enqueue
+R=$(result_of f-collect); check "signed COLLECT_FILE succeeds" "succeeded:ok" "$R"
+check "COLLECT_FILE reports the SHA-256 and mode" yes "$(d=$(detail_of f-collect); case $d in *sha256=$HELLO*mode=0640*|*mode=0640*sha256=$HELLO*) echo yes;; *) echo no;; esac)"
+fcmd f-unsigned QUARANTINE_FILE "$VICT/sample" | enqueue
+check "unsigned QUARANTINE_FILE refused" "rejected:signature_required" "$(result_of f-unsigned)"
+BENIGN=$(fcmd f-tamper COLLECT_FILE "$VICT/sample" | sign "$W/signing.key")
+tamper "$BENIGN" 'd["action"]="QUARANTINE_FILE"' | enqueue
+check "signed COLLECT_FILE turned into QUARANTINE_FILE refused" "rejected:signature_invalid" "$(result_of f-tamper)"
+SIGNED=$(fcmd f-retarget QUARANTINE_FILE "$VICT/sample" | sign "$W/signing.key")
+tamper "$SIGNED" "d['target']['path']='/etc/hostname'" | enqueue
+check "signed quarantine retargeted to another path refused" "rejected:signature_invalid" "$(result_of f-retarget)"
+fcmd f-outside QUARANTINE_FILE /etc/hostname | sign "$W/signing.key" | enqueue
+check "quarantine outside the permitted directories refused" "rejected:outside_roots" "$(result_of f-outside)"
+fcmd f-keyring QUARANTINE_FILE "$W/keyring" | sign "$W/signing.key" | enqueue
+check "the sensor's own keyring is protected" "rejected:target_protected" "$(result_of f-keyring)"
+fcmd f-identity QUARANTINE_FILE "$W/identity.json" | sign "$W/signing.key" | enqueue
+check "the sensor's own identity is protected" "rejected:target_protected" "$(result_of f-identity)"
+ln -s "$VICT/sample" "$VICT/link"; ln -s "$VICT" "$VICT/dirlink"
+fcmd f-link QUARANTINE_FILE "$VICT/link" | sign "$W/signing.key" | enqueue
+check "a symlink is not quarantined" "rejected:not_a_file" "$(result_of f-link)"
+fcmd f-dirlink QUARANTINE_FILE "$VICT/dirlink/sample" | sign "$W/signing.key" | enqueue
+check "a path through a symlinked directory is refused" "rejected:path_symlink" "$(result_of f-dirlink)"
+fcmd f-dotdot QUARANTINE_FILE "$VICT/../victims/sample" | sign "$W/signing.key" | enqueue
+check "a path with .. is refused before anything is opened" "rejected:invalid_target" "$(result_of f-dotdot)"
+check "every refusal left the file in place with its content" "hello" "$(cat "$VICT/sample")"
+
+fcmd f-quarantine QUARANTINE_FILE "$VICT/sample" | sign "$W/signing.key" | enqueue
+check "signed QUARANTINE_FILE succeeds" "succeeded:ok" "$(result_of f-quarantine)"
+check "the original is gone" gone "$([ -e "$VICT/sample" ] && echo present || echo gone)"
+check "the stored copy is the file" "hello" "$(cat "$W/wal.quarantine/f-quarantine.blob" 2>/dev/null)"
+check "the stored copy is read-only and private" "400 700" "$(stat -c %a "$W/wal.quarantine/f-quarantine.blob") $(stat -c %a "$W/wal.quarantine")"
+check "the record names the original path and hash" yes "$(grep -q "$VICT/sample" "$W/wal.quarantine/f-quarantine.json" && grep -q "$HELLO" "$W/wal.quarantine/f-quarantine.json" && echo yes || echo no)"
+# Exactly once: a new file at the same path survives a redelivery of the same signed command, and a restart.
+printf 'second\n' >"$VICT/sample"
+BEFORE=$(events result f-quarantine)
+echo yes >"$W/redeliver"; sleep 6
+stop_sensor; start_sensor; sleep 6
+echo no >"$W/redeliver"
+check "redelivery and restart do not quarantine the new file at the same path" "second" "$(cat "$VICT/sample" 2>/dev/null)"
+check "and produce no second result" "$BEFORE" "$(events result f-quarantine)"
+printf 'across\n' >"$XD/x"
+fcmd f-xdev QUARANTINE_FILE "$XD/x" | sign "$W/signing.key" | enqueue
+check "quarantine across filesystems succeeds" "succeeded:ok" "$(result_of f-xdev)"
+check "it was a copy, then the original was removed" "copied gone across" "$(d=$(detail_of f-xdev); case $d in *copied*) printf copied;; *) printf other;; esac) $([ -e "$XD/x" ] && echo present || echo gone) $(cat "$W/wal.quarantine/f-xdev.blob")"
+check "file actions are audited as response.action records" yes "$([ "$(audited COLLECT_FILE)" -ge 1 ] && [ "$(audited QUARANTINE_FILE)" -ge 1 ] && echo yes || echo no)"
+# A dry-run sensor still collects, and verifies a quarantine without moving anything.
+stop_sensor; write_conf keys dry_run; start_sensor
+fcmd f-dry-collect COLLECT_FILE "$VICT/sample" | sign "$W/signing.key" | enqueue
+check "dry_run still runs COLLECT_FILE" "succeeded:ok" "$(result_of f-dry-collect)"
+fcmd f-dry-q QUARANTINE_FILE "$VICT/sample" | sign "$W/signing.key" | enqueue
+check "dry_run verifies QUARANTINE_FILE and moves nothing" "rejected:dry_run" "$(result_of f-dry-q)"
+check "the file is still there after the dry run" "second" "$(cat "$VICT/sample")"
+stop_sensor; write_conf keys enforce; start_sensor
+
+# 7. An unsigned-allowed sensor (explicit opt-in) runs unsigned commands, and warns at start.
 stop_sensor
 write_conf unsigned
 : >"$W/sensord.log"
@@ -249,7 +322,7 @@ mk unsigned-ok COLLECT_PROCESS_INFO "{\"pid\":$P5,\"start_time_ticks\":$T5}" | e
 R=$(result_of unsigned-ok); check "opted-in unsigned sensor runs an unsigned command" "succeeded" "${R%%:*}"
 stop_sensor
 
-# 7. Fail closed: signing keys configured but the file is unusable at start, so the channel does not run.
+# 8. Fail closed: signing keys configured but the file is unusable at start, so the channel does not run.
 write_conf keys
 echo "garbage" >"$W/keyring"
 : >"$W/sensord.log"

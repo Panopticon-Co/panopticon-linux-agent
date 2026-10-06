@@ -271,7 +271,7 @@ SOCKDIAG+PROCFS, observed}`; the `response.action` record follows and its detail
 `snapshot=response-<command_id>`. Today that is `COLLECT_NETWORK_CONNECTIONS` → `state.connections`
 (§5). `COLLECT_PROCESS_INFO` fits the detail.
 
-Not reported: command contents beyond the target, output of `COLLECT_FILE` (not implemented), and
+Not reported: command contents beyond the target, file contents (`COLLECT_FILE` reports metadata and a SHA-256 in the bounded detail, ADR 026), and
 any command that failed authentication at the TLS layer.
 
 ## 5. State records

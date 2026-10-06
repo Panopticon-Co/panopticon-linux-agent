@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/error.hpp"
 #include "panopticon/linux_agent/sensor/command_auth.hpp"
+#include "panopticon/linux_agent/sensor/file_actions.hpp"
 #include "panopticon/linux_agent/sensor/json_reader.hpp"
 #include "panopticon/linux_agent/sensor/provider.hpp"
 #include "panopticon/linux_agent/sensor/records.hpp"
@@ -205,6 +206,8 @@ struct local_executor_options {
     // COLLECT_NETWORK_CONNECTIONS: sockets reported, and how long the /proc/<pid>/fd owner scan may take.
     std::size_t maximum_connections{4096U};
     std::chrono::milliseconds owner_scan_budget{500};
+    // COLLECT_FILE and QUARANTINE_FILE (ADR 026).
+    file_action_options files;
 };
 [[nodiscard]] std::unique_ptr<command_executor> make_local_executor(local_executor_options options);
 

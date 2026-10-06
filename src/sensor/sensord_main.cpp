@@ -279,6 +279,18 @@ int main(int argc, char** argv) {
             sensor::local_executor_options executor;
             executor.proc_root = config.proc_root;
             executor.host_id = config.host_id;
+            executor.files.roots = config.response_file_roots;
+            executor.files.quarantine_dir = config.response_file_roots.empty()
+                                                ? std::filesystem::path{}
+                                                : (config.response_quarantine_dir.empty() ? std::filesystem::path{config.wal_path.string() + ".quarantine"}
+                                                                                          : config.response_quarantine_dir);
+            // The sensor never quarantines its own configuration, keys, ledger, WAL, identity or CA.
+            const std::vector<std::filesystem::path> own_files{std::filesystem::path{config_path}, config.identity_path, config.ca_bundle,
+                                                                config.response_signing_keys, channel.ledger_path, config.wal_path,
+                                                                std::filesystem::path{config.wal_path.string() + ".commands"}};
+            for (const auto& own : own_files) {
+                if (!own.empty()) executor.files.protected_paths.push_back(own);
+            }
             if (keys_ok) {
                 providers.push_back(std::make_unique<sensor::command_channel_provider>(
                     std::move(channel), sensor::make_https_command_transport(*manager_connection), sensor::make_local_executor(std::move(executor))));

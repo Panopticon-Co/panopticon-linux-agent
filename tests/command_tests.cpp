@@ -375,7 +375,7 @@ void test_processor_checks() {
     refused(w.make("ex0", "KILL_PROCESS", kill_target, 0), "expired");
     refused(w.make("long", "KILL_PROCESS", kill_target, 7 * 86400), "lifetime_exceeded");
     refused(w.make("iso", "ISOLATE_HOST", "{}"), "unsupported_action");
-    refused(w.make("qf", "QUARANTINE_FILE", "{\"path\":\"/tmp/x\"}"), "unsupported_action");
+    refused(w.make("qf", "QUARANTINE_FILE", "{\"path\":\"/tmp/x\"}"), "action_not_permitted");  // implemented, but not on the default allow-list
 
     auto future = w.make("fut");
     future.created_unix = w.clock + 3600;
@@ -1336,6 +1336,22 @@ void test_configuration() {
             "values");
     require(!succeeded(parse_sensor_config(base + "response_mode=yes\n")), "a mode outside the vocabulary");
     require(!succeeded(parse_sensor_config(base + "response_actions=ISOLATE_HOST\n")), "an action the sensor does not implement cannot be listed");
+    require(succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=COLLECT_NETWORK_CONNECTIONS,COLLECT_FILE\n")),
+            "the implemented collections can be listed by name");
+    require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=QUARANTINE_FILE\n")),
+            "QUARANTINE_FILE needs the directories it may act in");
+    require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=COLLECT_FILE\nresponse_file_roots=/tmp\n")),
+            "directories without the action are a contradiction");
+    auto file_config = parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=enforce\nresponse_actions=QUARANTINE_FILE,COLLECT_FILE\nresponse_file_roots=/tmp, /var/tmp\nresponse_quarantine_dir=/var/lib/panopticon/q\n");
+    require(succeeded(file_config) && std::get<sensor_config>(file_config).response_file_roots.size() == 2U &&
+                std::get<sensor_config>(file_config).response_quarantine_dir == "/var/lib/panopticon/q",
+            "quarantine with its roots and store parses");
+    for (const char* bad : {"/", "relative", "/a/../b", "/tmp,/tmp", ""}) {
+        require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=enforce\nresponse_actions=QUARANTINE_FILE\nresponse_file_roots=" + bad + "\n")),
+                "an unsafe root list is refused");
+    }
+    require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=enforce\nresponse_actions=QUARANTINE_FILE\nresponse_file_roots=/tmp\nresponse_quarantine_dir=store\n")),
+            "a relative store path is refused");
     require(!succeeded(parse_sensor_config(base + "response_actions=KILL_PROCESS,KILL_PROCESS\n")), "a duplicate");
     require(!succeeded(parse_sensor_config(base + "response_actions=rm\n")), "an arbitrary name");
     require(!succeeded(parse_sensor_config(base + "response_poll_seconds=0\n")), "a zero interval");

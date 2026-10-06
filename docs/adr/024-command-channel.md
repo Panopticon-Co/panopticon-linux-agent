@@ -47,8 +47,9 @@ never repeat the action.
    sensor that cannot read a UUID refuses every boot-bound command (`boot_unavailable`). Schema 2
    carries process actions only; file and targetless actions are `invalid_target`.
 7. **Actions today.** `KILL_PROCESS`, `COLLECT_PROCESS_INFO` (bounded name, exe, ppid, uid,
-   threads) and `COLLECT_NETWORK_CONNECTIONS` (target `{}`). `COLLECT_FILE`, `QUARANTINE_FILE`,
-   `ISOLATE_HOST` and `RELEASE_HOST_ISOLATION` answer `unsupported_action`. The set of seven is
+   threads) and `COLLECT_NETWORK_CONNECTIONS` (target `{}`), and, since ADR 026, `COLLECT_FILE` and
+   `QUARANTINE_FILE` (descriptor-safe, roots-limited). `ISOLATE_HOST` and `RELEASE_HOST_ISOLATION`
+   answer `unsupported_action`. The set of seven is
    closed; there is no shell action. Collection actions change nothing, so they run in `dry_run`
    too and are not rate limited.
    **Collection output.** A result `detail` is bounded (400 bytes here, 512 in the contract), so a
