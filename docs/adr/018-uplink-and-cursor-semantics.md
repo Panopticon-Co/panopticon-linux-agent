@@ -61,3 +61,14 @@ blocks collection, and cannot be wedged by one bad record or one bad response.
 - Not done: payload compression, certificate pinning beyond a private CA, Manager-initiated
   commands over this channel, a freshness nonce on the route, retention of Linux records at the
   Manager.
+
+## Addendum: delivery states and rejection (S3.3)
+
+A record is OBSERVED, ACCEPTED BY SENSOR, DURABLY COMMITTED (WAL sync), SENT, then ACCEPTED BY
+MANAGER (an acknowledgement that matches the batch). Rejection is a separate path: REJECTED by the
+Manager with a reason and line, QUARANTINED on the sensor under its sequence number, reported as a
+`manager_rejected` loss record in the stream and as `delivery.records_quarantined` and
+`recent_quarantined_seqs` in health (which marks the sensor degraded). A rejection is therefore
+distinguishable from loss in the WAL (`wal_loss`) or the queue. HTTP 200 alone never advances the
+cursor. The Manager exposes the latest health at `GET /api/v2/linux-endpoint/hosts/{host_id}/health`.
+Open: retention of the quarantine file and of Manager-side Linux records.
