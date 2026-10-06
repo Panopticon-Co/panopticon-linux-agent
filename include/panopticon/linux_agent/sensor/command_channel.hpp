@@ -7,6 +7,7 @@
 #include "panopticon/linux_agent/sensor/uplink.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -111,7 +112,8 @@ struct command_poll {
 
 struct command_policy {
     response_mode mode{response_mode::off};
-    std::set<command_action> allowed{command_action::kill_process, command_action::collect_process_info};
+    std::set<command_action> allowed{command_action::kill_process, command_action::collect_process_info,
+                                     command_action::collect_network_connections};
     // A command whose expiry is further away than this was not issued for an incident response;
     // refusing it bounds how long a captured command stays usable.
     std::int64_t maximum_lifetime_seconds{900};
@@ -176,6 +178,7 @@ struct execution_result {
     std::string detail;   // bounded, printable
     std::string mode;     // "pidfd" or "pid_fallback" when a signal path was chosen
     std::uint32_t affected{};
+    std::shared_ptr<const response_evidence> evidence;  // what a collection gathered, emitted as state
 };
 
 // The one place an action touches the host. A test supplies its own; the sensor supplies the local one.
@@ -193,6 +196,9 @@ struct local_executor_options {
     // kill(2) after verification when pidfd is unavailable. Off: the command fails instead, because that
     // path leaves a window in which the pid could be reused (ADR 015).
     bool allow_pid_fallback{false};
+    // COLLECT_NETWORK_CONNECTIONS: sockets reported, and how long the /proc/<pid>/fd owner scan may take.
+    std::size_t maximum_connections{4096U};
+    std::chrono::milliseconds owner_scan_budget{500};
 };
 [[nodiscard]] std::unique_ptr<command_executor> make_local_executor(local_executor_options options);
 
@@ -211,6 +217,7 @@ struct command_outcome {
     std::uint64_t start_ticks{};
     std::string path;
     std::uint32_t affected{};
+    std::shared_ptr<const response_evidence> evidence;
 };
 
 struct command_processor_options {

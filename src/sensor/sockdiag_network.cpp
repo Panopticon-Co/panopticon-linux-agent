@@ -1,6 +1,7 @@
 #include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
 
 #include "panopticon/linux_agent/sensor/clock.hpp"
+#include "panopticon/linux_agent/sensor/json.hpp"
 
 #include <arpa/inet.h>
 #include <linux/inet_diag.h>
@@ -224,7 +225,7 @@ std::string sockdiag_network_provider::probe() {
     return {};
 }
 
-result<std::vector<socket_entry>> sockdiag_network_provider::read_tables() {
+result<std::vector<socket_entry>> read_socket_tables(const std::size_t maximum_entries) {
     const int fd = ::socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
     if (fd < 0) return error{error_code::io_failure, std::string{"NETLINK_SOCK_DIAG: "} + std::strerror(errno)};
     const timeval timeout{2, 0};
@@ -272,7 +273,7 @@ result<std::vector<socket_entry>> sockdiag_network_provider::read_tables() {
                     return error{error_code::corrupt_data, "sock_diag reply was malformed"};
                 }
                 for (auto& entry : decoded.entries) {
-                    if (all.size() < options_.maximum_sockets * 2U) all.push_back(std::move(entry));
+                    if (all.size() < maximum_entries) all.push_back(std::move(entry));
                 }
                 finished = decoded.done;
             }
@@ -280,6 +281,67 @@ result<std::vector<socket_entry>> sockdiag_network_provider::read_tables() {
     }
     ::close(fd);
     return all;
+}
+
+result<std::vector<socket_entry>> sockdiag_network_provider::read_tables() { return read_socket_tables(options_.maximum_sockets * 2U); }
+
+namespace {
+
+std::string socket_state(const socket_entry& socket) {
+    if (socket.protocol == IPPROTO_TCP) return tcp_state_name(socket.state);
+    return socket.remote_port != 0U ? "connected" : "bound";
+}
+
+}  // namespace
+
+std::vector<std::string> connection_state_items(const std::vector<socket_entry>& sockets, const socket_owner_map& owners,
+                                                const std::size_t maximum_items, bool& truncated) {
+    std::vector<const socket_entry*> ordered;
+    ordered.reserve(sockets.size());
+    for (const auto& socket : sockets) ordered.push_back(&socket);
+    std::sort(ordered.begin(), ordered.end(), [](const socket_entry* left, const socket_entry* right) {
+        return std::tie(left->protocol, left->family, left->local_port, left->local_address, left->remote_address, left->remote_port, left->inode) <
+               std::tie(right->protocol, right->family, right->local_port, right->local_address, right->remote_address, right->remote_port, right->inode);
+    });
+    truncated = ordered.size() > maximum_items;
+    if (truncated) ordered.resize(maximum_items);
+    std::vector<std::string> items;
+    items.reserve(ordered.size());
+    for (const auto* socket : ordered) {
+        json_writer out;
+        out.begin_object();
+        out.field("protocol", socket->protocol == IPPROTO_TCP ? "tcp" : "udp");
+        out.field("family", socket->family == AF_INET ? "inet" : "inet6");
+        out.field("state", socket_state(*socket));
+        out.field("local_address", socket->local_address);
+        out.field("local_port", static_cast<std::uint64_t>(socket->local_port));
+        out.field("remote_address", socket->remote_address);
+        out.field("remote_port", static_cast<std::uint64_t>(socket->remote_port));
+        out.field("uid", static_cast<std::uint64_t>(socket->uid));
+        out.field("inode", socket->inode);
+        if (const auto found = socket->inode == 0U ? owners.end() : owners.find(socket->inode); found != owners.end()) {
+            out.field("pid", static_cast<std::uint64_t>(found->second.pid));
+            out.field("holders", static_cast<std::uint64_t>(found->second.holders));
+        } else {
+            out.field_null("pid");
+        }
+        out.end_object();
+        items.push_back(out.take());
+    }
+    return items;
+}
+
+std::string connection_summary(const std::vector<socket_entry>& sockets, const socket_owner_map& owners) {
+    std::size_t listen = 0U, established = 0U, other = 0U, udp = 0U, attributed = 0U;
+    for (const auto& socket : sockets) {
+        if (socket.protocol != IPPROTO_TCP) ++udp;
+        else if (socket.state == 10U) ++listen;  // TCP_LISTEN
+        else if (socket.state == 1U) ++established;  // TCP_ESTABLISHED
+        else ++other;
+        if (socket.inode != 0U && owners.contains(socket.inode)) ++attributed;
+    }
+    return "tcp_listen=" + std::to_string(listen) + " tcp_established=" + std::to_string(established) + " tcp_other=" + std::to_string(other) +
+           " udp=" + std::to_string(udp) + " attributed=" + std::to_string(attributed) + "/" + std::to_string(sockets.size());
 }
 
 result<bool> sockdiag_network_provider::poll_once() {

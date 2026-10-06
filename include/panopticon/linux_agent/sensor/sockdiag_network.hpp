@@ -92,6 +92,18 @@ struct holder_info {
 // inode -> lowest process id holding it, from /proc/<pid>/fd. Bounded by `budget`; sockets it did
 // not reach are simply absent from the result, and `exhausted` says the budget ran out.
 using socket_owner_map = std::unordered_map<std::uint64_t, holder_info>;
+// The kernel's TCP and UDP socket tables, IPv4 and IPv6, over NETLINK_SOCK_DIAG; at most
+// `maximum_entries` sockets are kept.
+[[nodiscard]] result<std::vector<socket_entry>> read_socket_tables(std::size_t maximum_entries);
+
+// One `state.connections` item per socket: protocol, family, state, local and remote end, uid,
+// inode and, when the owner scan found it, the lowest holding pid and the holder count (`pid` is
+// null otherwise). Sorted, so equal tables give equal items; at most `maximum_items`.
+[[nodiscard]] std::vector<std::string> connection_state_items(const std::vector<socket_entry>& sockets, const socket_owner_map& owners,
+                                                              std::size_t maximum_items, bool& truncated);
+// "tcp_listen=N tcp_established=N tcp_other=N udp=N attributed=A/T": the bounded result line.
+[[nodiscard]] std::string connection_summary(const std::vector<socket_entry>& sockets, const socket_owner_map& owners);
+
 [[nodiscard]] socket_owner_map scan_socket_owners(const std::filesystem::path& proc_root, const std::set<std::uint64_t>& wanted,
                                                   std::chrono::milliseconds budget, bool* exhausted = nullptr);
 

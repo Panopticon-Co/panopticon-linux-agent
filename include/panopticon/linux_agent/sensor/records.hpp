@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <variant>
@@ -271,6 +272,16 @@ struct raw_firewall_change {
     std::uint32_t pid{};
 };
 
+// What a collection command gathered beyond its one-line result: emitted as a `state.<object>`
+// snapshot ahead of the command's response.action record, which names it by `snapshot_id`.
+struct response_evidence {
+    std::string object;       // state object, e.g. "connections"
+    std::string snapshot_id;  // "response-<command id>"
+    std::string mechanism;    // e.g. "SOCKDIAG+PROCFS"
+    std::vector<std::string> items;  // each one serialised JSON object
+    std::vector<unavailable_field> unavailable;
+};
+
 // response.action: one Manager command this sensor answered (ADR 024). `pid` and `start_ticks` name the
 // process the command was aimed at, so the pipeline can attach the entity it knows by that identity.
 struct raw_response_action {
@@ -287,6 +298,7 @@ struct raw_response_action {
     std::uint64_t start_ticks{};
     std::string path;
     std::uint32_t affected{};
+    std::shared_ptr<const response_evidence> evidence;  // collection commands only
 };
 
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,

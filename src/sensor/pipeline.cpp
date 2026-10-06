@@ -443,6 +443,27 @@ result<bool> sensor_pipeline::emit_firewall_event(const raw_record& record, cons
 }
 
 result<bool> sensor_pipeline::emit_response_event(const raw_record& record, const raw_response_action& response, const std::uint64_t observed_ns) {
+    if (response.evidence) {
+        // What a collection command gathered, as a state snapshot. It precedes the audit record that
+        // names it, so a reader that has the record has already been sent the evidence.
+        state_snapshot snapshot;
+        snapshot.object = response.evidence->object;
+        snapshot.provider = record.source.provider;
+        snapshot.mechanism = response.evidence->mechanism;
+        snapshot.unavailable = response.evidence->unavailable;
+        snapshot.truncated = std::any_of(snapshot.unavailable.begin(), snapshot.unavailable.end(), [](const unavailable_field& f) { return f.reason == unavailable_reason::truncated; });
+        const auto& items = response.evidence->items;
+        const auto parts = static_cast<std::uint32_t>(std::max<std::size_t>(1U, (items.size() + state_items_per_part - 1U) / state_items_per_part));
+        for (std::uint32_t part = 0U; part < parts; ++part) {
+            const auto first = std::min<std::size_t>(items.size(), static_cast<std::size_t>(part) * state_items_per_part);
+            const auto last = std::min<std::size_t>(items.size(), static_cast<std::size_t>(part + 1U) * state_items_per_part);
+            const std::span<const std::string> slice{items.data() + first, last - first};
+            auto emitted = emit([&](const std::uint64_t seq) {
+                return serializer_.host_state(snapshot, slice, response.evidence->snapshot_id, part + 1U, parts, seq, observed_ns);
+            });
+            if (!succeeded(emitted)) return emitted;
+        }
+    }
     response_record out;
     out.time_unix_ns = record.time_unix_ns;
     out.source = record.source;

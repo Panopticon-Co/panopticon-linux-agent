@@ -57,7 +57,7 @@ struct sensor_config {
     // Manager commands (ADR 024). Off unless the file says otherwise: a sensor that only reports
     // never opens the command channel.
     std::string response_mode{"off"};  // off, dry_run, enforce
-    std::vector<std::string> response_actions{"KILL_PROCESS", "COLLECT_PROCESS_INFO"};
+    std::vector<std::string> response_actions{"KILL_PROCESS", "COLLECT_PROCESS_INFO", "COLLECT_NETWORK_CONNECTIONS"};
     std::uint64_t response_poll_seconds{5U};
     std::uint64_t response_max_lifetime_seconds{900U};
     std::uint64_t response_max_changes_per_minute{6U};

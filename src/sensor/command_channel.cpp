@@ -6,6 +6,7 @@
 #include "panopticon/linux_agent/sensor/clock.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
 #include "panopticon/linux_agent/sensor/process_info.hpp"
+#include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
 
 #include <algorithm>
 #include <array>
@@ -102,7 +103,8 @@ std::optional<command_action> parse_command_action(const std::string_view text) 
 }
 
 bool command_action_implemented(const command_action action) noexcept {
-    return action == command_action::kill_process || action == command_action::collect_process_info;
+    return action == command_action::kill_process || action == command_action::collect_process_info ||
+           action == command_action::collect_network_connections;
 }
 
 bool command_action_changes_host(const command_action action) noexcept {
@@ -563,7 +565,8 @@ public:
         switch (command.action) {
             case command_action::kill_process: return kill(command, dry_run);
             case command_action::collect_process_info: return collect(command);
-            default: return {"rejected", "unsupported_action", "this sensor does not carry out that action", {}, 0U};
+            case command_action::collect_network_connections: return collect_connections(command);
+            default: return {"rejected", "unsupported_action", "this sensor does not carry out that action", {}, 0U, {}};
         }
     }
 
@@ -613,20 +616,48 @@ private:
 
     execution_result collect(const endpoint_command& command) const {
         const auto ticks = read_start_ticks(options_.proc_root, command.pid);
-        if (!ticks) return {"rejected", "target_gone", "no process has that pid now", {}, 0U};
-        if (*ticks != command.start_ticks) return {"rejected", "target_mismatch", "the pid now belongs to a different process", {}, 0U};
+        if (!ticks) return {"rejected", "target_gone", "no process has that pid now", {}, 0U, {}};
+        if (*ticks != command.start_ticks) return {"rejected", "target_mismatch", "the pid now belongs to a different process", {}, 0U, {}};
         procfs_limits limits;
         limits.collect_environment = false;
         const auto info = read_process(options_.proc_root, command.pid, limits);
-        if (!succeeded(info)) return {"rejected", "target_gone", "the process exited while it was read", {}, 0U};
+        if (!succeeded(info)) return {"rejected", "target_gone", "the process exited while it was read", {}, 0U, {}};
         const auto& process = std::get<process_info>(info);
         // The identity was read twice: a process that was replaced in between is not the target.
-        if (process.start_ticks != command.start_ticks) return {"rejected", "target_mismatch", "the pid was reused while it was read", {}, 0U};
+        if (process.start_ticks != command.start_ticks) return {"rejected", "target_mismatch", "the pid was reused while it was read", {}, 0U, {}};
         std::string detail = "name=" + clean(process.comm, 32U) + " exe=" + clean(process.executable.path, 160U) +
                              " ppid=" + std::to_string(process.ppid) + " uid=" + std::to_string(process.creds.uids[1]) +
                              " threads=" + std::to_string(process.threads);
         // The full record (command line, ancestry, hashes) is the `response.action` event itself.
-        return {"succeeded", "ok", clean(detail), {}, 1U};
+        return {"succeeded", "ok", clean(detail), {}, 1U, {}};
+    }
+
+    // Read-only: the socket tables now, each socket attributed to the process holding it where the
+    // owner scan reaches it in its budget. The result line is a count; the table itself goes out as a
+    // `state.connections` snapshot the response.action record names.
+    execution_result collect_connections(const endpoint_command& command) const {
+        auto tables = read_socket_tables(options_.maximum_connections + 1U);
+        if (!succeeded(tables)) return {"failed", "collection_failed", clean(std::get<error>(tables).message), {}, 0U, {}};
+        const auto& sockets = std::get<std::vector<socket_entry>>(tables);
+        std::set<std::uint64_t> wanted;
+        for (const auto& socket : sockets) {
+            if (socket.inode != 0U) wanted.insert(socket.inode);
+        }
+        bool exhausted = false;
+        const auto owners = scan_socket_owners(options_.proc_root, wanted, options_.owner_scan_budget, &exhausted);
+        auto evidence = std::make_shared<response_evidence>();
+        evidence->object = "connections";
+        evidence->snapshot_id = "response-" + command.command_id;
+        evidence->mechanism = "SOCKDIAG+PROCFS";
+        bool truncated = false;
+        evidence->items = connection_state_items(sockets, owners, options_.maximum_connections, truncated);
+        if (truncated) evidence->unavailable.push_back({"connections", unavailable_reason::truncated});
+        if (exhausted) evidence->unavailable.push_back({"connections.pid", unavailable_reason::budget_exceeded});
+        std::string detail = connection_summary(sockets, owners) + " snapshot=" + evidence->snapshot_id;
+        if (truncated) detail += " truncated";
+        execution_result result{"succeeded", "ok", clean(detail), {}, static_cast<std::uint32_t>(evidence->items.size()), {}};
+        result.evidence = std::move(evidence);
+        return result;
     }
 
     local_executor_options options_;
@@ -729,6 +760,7 @@ command_outcome command_processor::handle(const endpoint_command& command) {
     result.affected = done.affected;
     result.dry_run = dry_run;
     result.executed = true;
+    result.evidence = done.evidence;
     (void)ledger_.mark_done(command.command_id, result.outcome, result.reason, result.detail);
     return result;
 }
@@ -799,6 +831,7 @@ raw_response_action response_audit(const command_outcome& outcome) {
     audit.start_ticks = outcome.start_ticks;
     audit.path = outcome.path;
     audit.affected = outcome.affected;
+    audit.evidence = outcome.evidence;
     return audit;
 }
 
@@ -811,7 +844,7 @@ command_channel_provider::command_channel_provider(command_channel_options optio
 command_channel_provider::~command_channel_provider() { stop(); }
 
 std::vector<std::string> command_channel_provider::capabilities() const {
-    return {"response.command", "response.kill_process", "response.collect_process_info"};
+    return {"response.command", "response.kill_process", "response.collect_process_info", "response.collect_network_connections"};
 }
 
 std::string command_channel_provider::probe() {

@@ -1430,6 +1430,59 @@ void test_pipeline_emits_dns_queries() {
     require(contains(queries[1], "{\"field\":\"process\",\"reason\":\"process_exited\"}") && contains(queries[1], "\"pid\":4242"), "an unknown asker is reported, not invented");
 }
 
+void test_pipeline_emits_response_evidence_first() {
+    const auto root = fresh_directory("respproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    auto evidence = std::make_shared<response_evidence>();
+    evidence->object = "connections";
+    evidence->snapshot_id = "response-n1";
+    evidence->mechanism = "SOCKDIAG+PROCFS";
+    for (int index = 0; index < 150; ++index) evidence->items.push_back("{\"local_port\":" + std::to_string(index) + "}");
+    evidence->unavailable.push_back({"connections.pid", unavailable_reason::budget_exceeded});
+    raw_response_action response;
+    response.command_id = "n1";
+    response.correlation_id = "corr-n1";
+    response.action = "COLLECT_NETWORK_CONNECTIONS";
+    response.outcome = "succeeded";
+    response.reason = "ok";
+    response.detail = "tcp_listen=150 snapshot=response-n1";
+    response.executed = true;
+    response.affected = 150U;
+    response.evidence = evidence;
+    std::vector<raw_record> script{raw_record{1'700'000'000'000'000'000ULL, {"command_channel", "MGR-CMD", confidence::observed}, response}};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script, 0U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::vector<std::size_t> parts;
+    std::size_t action = lines.size();
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        if (contains(lines[index], "\"type\":\"state.connections\"")) parts.push_back(index);
+        if (contains(lines[index], "\"type\":\"response.action\"")) action = index;
+    }
+    require(parts.size() == 2U && action < lines.size(), "two state parts and the audit record");
+    require(parts[1] < action, "the evidence is sent before the record that names it");
+    require(contains(lines[parts[0]], "\"snapshot_id\":\"response-n1\"") && contains(lines[parts[0]], "\"part\":1") &&
+                contains(lines[parts[0]], "\"parts\":2") && contains(lines[parts[1]], "\"part\":2"),
+            "one snapshot in two parts");
+    require(contains(lines[parts[0]], "\"provider\":\"command_channel\"") && contains(lines[parts[0]], "\"mechanism\":\"SOCKDIAG+PROCFS\"") &&
+                contains(lines[parts[0]], "{\"field\":\"connections.pid\",\"reason\":\"budget_exceeded\"}"),
+            "provenance and the stated gap: " + lines[parts[0]]);
+    require(contains(lines[action], "\"command_id\":\"n1\"") && contains(lines[action], "snapshot=response-n1"), "the record names it");
+}
+
 void test_pipeline_emits_lsm_and_firewall_events() {
     const auto root = fresh_directory("lsmproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
@@ -1538,6 +1591,7 @@ int main() {
     run("parse_dns_query", test_parse_dns_query);
     run("pipeline_emits_dns_queries", test_pipeline_emits_dns_queries);
     run("pipeline_emits_lsm_and_firewall_events", test_pipeline_emits_lsm_and_firewall_events);
+    run("pipeline_emits_response_evidence_first", test_pipeline_emits_response_evidence_first);
     run("json_escapes_and_replaces_invalid_utf8", test_json_escapes_and_replaces_invalid_utf8);
     run("clock_formats_rfc3339_and_converts_ticks", test_clock_formats_rfc3339_and_converts_ticks);
     run("parse_stat_handles_hostile_comm", test_parse_stat_handles_hostile_comm);

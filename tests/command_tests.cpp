@@ -7,11 +7,17 @@
 #include "panopticon/linux_agent/sensor/json_reader.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 #include "panopticon/linux_agent/sensor/serializer.hpp"
+#include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <exception>
@@ -294,7 +300,7 @@ void test_ledger_bounds_and_compaction() {
 struct fake_executor final : command_executor {
     std::vector<std::string> calls;
     std::vector<bool> dry_runs;
-    execution_result next{"succeeded", "ok", "done", "pidfd", 1U};
+    execution_result next{"succeeded", "ok", "done", "pidfd", 1U, {}};
     std::function<void()> on_execute;
     execution_result execute(const endpoint_command& command, const bool dry_run) override {
         calls.push_back(command.command_id);
@@ -387,7 +393,9 @@ void test_processor_checks() {
 void test_processor_policy() {
     world w{"policy"};
     const auto policy = w.processor->policy();
-    require(policy.allowed.contains(command_action::kill_process) && policy.allowed.contains(command_action::collect_process_info), "default allow-list");
+    require(policy.allowed.contains(command_action::kill_process) && policy.allowed.contains(command_action::collect_process_info) &&
+                policy.allowed.contains(command_action::collect_network_connections),
+            "default allow-list");
     command_processor_options options;
     options.agent_id = "agent-1";
     options.host_id = "host-1";
@@ -400,13 +408,19 @@ void test_processor_policy() {
 
     // dry_run: a changing action is verified (the executor is told), collection still runs.
     world dry{"policy-dry", response_mode::dry_run};
-    dry.executor.next = {"rejected", "dry_run", "verified", "pidfd", 1U};
+    dry.executor.next = {"rejected", "dry_run", "verified", "pidfd", 1U, {}};
     const auto killed = dry.processor->handle(dry.make("d1"));
     require(killed.dry_run && killed.executed && killed.outcome == "rejected" && killed.reason == "dry_run", "kill in dry_run mode");
     require(dry.executor.dry_runs[0], "the executor was told not to change anything");
-    dry.executor.next = {"succeeded", "ok", "name=x", "", 1U};
+    dry.executor.next = {"succeeded", "ok", "name=x", "", 1U, {}};
     const auto info = dry.processor->handle(dry.make("d2", "COLLECT_PROCESS_INFO"));
     require(!info.dry_run && info.outcome == "succeeded" && !dry.executor.dry_runs[1], "collection is read-only and is not suppressed");
+    auto evidence = std::make_shared<response_evidence>();
+    evidence->snapshot_id = "response-d3";
+    dry.executor.next = {"succeeded", "ok", "tcp_listen=1", "", 1U, evidence};
+    const auto connections = dry.processor->handle(dry.make("d3", "COLLECT_NETWORK_CONNECTIONS", "{}"));
+    require(!connections.dry_run && connections.outcome == "succeeded" && !dry.executor.dry_runs[2], "the socket inventory runs in dry_run too");
+    require(connections.evidence == evidence && response_audit(connections).evidence == evidence, "and its evidence reaches the audit record");
 }
 
 void test_processor_rate_limit() {
@@ -592,6 +606,72 @@ void test_local_executor_real_processes() {
 
     const auto none = executor->execute(real_command("f1", command_action::isolate_host, 0, 0), false);
     require(none.reason == "unsupported_action", "an action the sensor lacks is refused by the executor too");
+}
+
+// ---- network connection inventory ------------------------------------------------------------
+
+bool has(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
+
+void test_connection_items() {
+    const socket_entry listener{6U, 2U, 10U, "127.0.0.1", "0.0.0.0", 8080U, 0U, 77U, 1000U};
+    const socket_entry client{6U, 2U, 1U, "10.0.0.5", "203.0.113.9", 40000U, 443U, 78U, 1000U};
+    const socket_entry closing{6U, 10U, 6U, "::1", "::1", 5000U, 6000U, 0U, 0U};  // TIME_WAIT: no owner
+    const socket_entry dns{17U, 2U, 7U, "0.0.0.0", "0.0.0.0", 53U, 0U, 79U, 101U};
+    const socket_owner_map owners{{77U, {321U, 2U}}, {79U, {55U, 1U}}};
+    const std::vector<socket_entry> sockets{client, dns, closing, listener};
+    bool truncated = true;
+    const auto items = connection_state_items(sockets, owners, 16U, truncated);
+    require(!truncated && items.size() == 4U, "one item per socket");
+    require(items[0] == "{\"protocol\":\"tcp\",\"family\":\"inet\",\"state\":\"listen\",\"local_address\":\"127.0.0.1\",\"local_port\":8080,"
+                        "\"remote_address\":\"0.0.0.0\",\"remote_port\":0,\"uid\":1000,\"inode\":77,\"pid\":321,\"holders\":2}",
+            "a listener with its owner");
+    require(has(items[1], "\"state\":\"established\"") && has(items[1], "\"remote_port\":443") && has(items[1], "\"pid\":null"),
+            "a socket the owner scan did not reach has no pid, not a guessed one");
+    require(has(items[2], "\"family\":\"inet6\"") && has(items[2], "\"state\":\"time_wait\"") && has(items[2], "\"pid\":null"), "TIME_WAIT");
+    require(has(items[3], "\"protocol\":\"udp\"") && has(items[3], "\"state\":\"bound\"") && has(items[3], "\"pid\":55"), "a bound UDP socket");
+    for (const auto& item : items) require(parse_json(item, json_limits{}, nullptr).has_value(), "each item is a JSON object");
+    require(connection_state_items({listener, closing, dns, client}, owners, 16U, truncated) == items, "the table's order does not matter");
+    const auto bounded = connection_state_items(sockets, owners, 2U, truncated);
+    require(truncated && bounded.size() == 2U && bounded[0] == items[0], "bounded, and the bound is stated");
+    require(connection_summary(sockets, owners) == "tcp_listen=1 tcp_established=1 tcp_other=1 udp=1 attributed=2/4", "the result line");
+    require(connection_summary({}, {}) == "tcp_listen=0 tcp_established=0 tcp_other=0 udp=0 attributed=0/0", "an empty table");
+}
+
+void test_local_executor_collects_connections() {
+    const int listener = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    require(listener >= 0, "socket");
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t length = sizeof address;
+    require(::bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof address) == 0 && ::listen(listener, 1) == 0, "listen on loopback");
+    require(::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) == 0, "the port");
+    const auto port = std::to_string(ntohs(address.sin_port));
+
+    local_executor_options options;
+    options.host_id = "host-1";
+    options.owner_scan_budget = std::chrono::milliseconds{5000};
+    const auto executor = make_local_executor(options);
+    // A read: dry_run does not suppress it, and nothing about the host changes.
+    const auto collected = executor->execute(real_command("n1", command_action::collect_network_connections, 0, 0), true);
+    require(collected.outcome == "succeeded" && collected.reason == "ok" && collected.evidence != nullptr, "collected");
+    const auto& evidence = *collected.evidence;
+    require(evidence.object == "connections" && evidence.snapshot_id == "response-n1" && evidence.mechanism == "SOCKDIAG+PROCFS", "the snapshot names");
+    require(collected.affected == evidence.items.size() && !evidence.items.empty(), "affected counts the sockets reported");
+    require(has(collected.detail, "tcp_listen=") && has(collected.detail, " snapshot=response-n1") && collected.detail.size() <= 400U, "a bounded result line");
+    const auto ours = std::find_if(evidence.items.begin(), evidence.items.end(), [&](const std::string& item) {
+        return has(item, "\"local_address\":\"127.0.0.1\",\"local_port\":" + port + ",") && has(item, "\"state\":\"listen\"");
+    });
+    require(ours != evidence.items.end(), "our listener is in the table");
+    require(has(*ours, "\"pid\":" + std::to_string(::getpid()) + ","), "and is attributed to this process");
+
+    options.maximum_connections = 1U;
+    const auto bounded = make_local_executor(options)->execute(real_command("n2", command_action::collect_network_connections, 0, 0), false);
+    require(bounded.outcome == "succeeded" && bounded.evidence->items.size() == 1U && bounded.affected == 1U, "bounded");
+    require(!bounded.evidence->unavailable.empty() && bounded.evidence->unavailable.front().field == "connections" &&
+                bounded.evidence->unavailable.front().reason == unavailable_reason::truncated && has(bounded.detail, " truncated"),
+            "and the bound is stated, never silent");
+    ::close(listener);
 }
 
 void test_executor_survives_pid_reuse_race() {
@@ -956,6 +1036,8 @@ int main() {
         {"result_json", test_result_json},
         {"response_record_shape", test_response_record_shape},
         {"local_executor_real_processes", test_local_executor_real_processes},
+        {"connection_items", test_connection_items},
+        {"local_executor_collects_connections", test_local_executor_collects_connections},
         {"executor_survives_pid_reuse_race", test_executor_survives_pid_reuse_race},
         {"channel_round_trip", test_channel_round_trip},
         {"channel_retries_the_result", test_channel_retries_the_result},
