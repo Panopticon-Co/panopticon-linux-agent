@@ -204,7 +204,8 @@ state_snapshot collect_host(const host_state_options& options) {
     const auto cmdline = c.read("proc/cmdline", "host.kernel.cmdline");
     out.field("cmdline", cmdline.has_value() ? redact_kernel_cmdline(trim(*cmdline)) : std::string{});
     const auto tainted = c.read("proc/sys/kernel/tainted", "host.kernel.tainted");
-    const auto taint_value = tainted.has_value() ? parse_integer<std::uint64_t>(trim(*tainted)) : std::nullopt;
+    std::optional<std::uint64_t> taint_value;  // assigned in a branch: the ternary form trips -Wmaybe-uninitialized at -O3
+    if (tainted.has_value()) taint_value = parse_integer<std::uint64_t>(trim(*tainted));
     out.key("tainted").begin_object();
     if (taint_value.has_value()) {
         out.field("value", *taint_value);
