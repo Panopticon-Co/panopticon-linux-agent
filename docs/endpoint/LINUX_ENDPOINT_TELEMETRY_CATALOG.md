@@ -149,6 +149,36 @@ Process images: when procfs can no longer be read at exec time (short-lived proc
 `state {object, snapshot_id, part, parts, items[]}` so large snapshots split cleanly. Emitted at
 start, on a schedule, and on `QUERY_STATE` commands.
 
+**Implemented (S4):** `state.processes` (procfs reconciler) and the inventory objects `state.host`,
+`state.posture`, `state.users`, `state.groups`, `state.interfaces`, `state.mounts` and
+`state.modules`, emitted at start and every `state_interval_seconds` (default 3600, 100 items per
+part). Inventory records carry provenance `{provider "inventory", mechanism, confidence observed}`
+and list every field that could not be collected in `unavailable[]` (`{field, reason}`, on part 1
+of a snapshot); an unreadable value is `null` or absent, never guessed. Collectors read a
+filesystem root, bound every file (4 MiB) and every list (8192 items, excess flagged with a
+`<object>.items` `truncated` entry), skip malformed lines and never follow a FIFO or device.
+
+| Object | Item fields |
+| --- | --- |
+| `host` (1 item) | `hostname`; `os {id, id_like, name, pretty_name, version_id, version_codename}`; `kernel {release, version, cmdline, tainted {value, flags[]}}`; `boot {boot_id, boot_time_unix, uptime_seconds}`; `hardware {cpu_count, cpu_model, memory_total_kb, virtualization {hypervisor, sys_vendor, product_name}}`; `machine_id_sha256` |
+| `posture` (1 item) | `lockdown`, `secure_boot` (`enabled`, `disabled`, `not_efi`, or null), `lsm[]`, `selinux`, `apparmor`, `sysctl {kernel/kptr_restrict, ..., net/ipv4/ip_forward}` (15 keys; integer, text or null) |
+| `users` | `name, uid, gid, home, shell, login_shell, system_account, uid0_non_root, password_state` (`set`, `locked`, `empty` or null) |
+| `groups` | `name, gid, members[]` |
+| `interfaces` | `name, mac, operstate, mtu, arphrd_type, addresses[{family, address, prefix}]` (addresses only from the live host) |
+| `mounts` | `mount_id, parent_id, device, root, mount_point, fs_type, source, options[], super_options[], nosuid, noexec, nodev, read_only` |
+| `modules` | `name, size, refcount, state, used_by[]` |
+
+Privacy: the machine-id leaves the host only as a salted SHA-256 prefix; password hashes are
+reduced to `password_state`; DMI serial numbers and the product uuid are not collected; kernel
+command-line parameters whose name contains `pass`, `secret`, `token` or `key` are redacted.
+
+**Control socket.** `panopticon-sensord --control-socket PATH` serves one request line per
+connection (at most 256 bytes, 2 s deadline) and replies with one JSON line,
+`{"ok":true,"result":...}` or `{"ok":false,"error":"..."}`. Commands: `status` (health body),
+`coverage` (capability to provider), `state list` and `state <object>` (collected on demand:
+`{object, provider, mechanism, truncated, items[], unavailable[]}`). `panopticon-ctl [--socket
+PATH] <command>` is the client (default `/run/panopticon/sensord.sock`).
+
 ## 6. Health, loss and policy
 
 * `health`: `health {status, providers[{name, state, reason, capabilities[], events, drops}],

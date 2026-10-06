@@ -10,6 +10,7 @@ how each protection is tested.
 | --- | --- | --- | --- |
 | Manager ↔ sensor | Manager signing key, pinned CA | Network | TLS 1.2+ with CA pinning; enrolled ECDSA P-256 identity; signed commands with expiry, nonce and replay ledger **[built]** |
 | Sensor ↔ helpers | `panopticon-sensord` | Any other local process | AF_UNIX SEQPACKET in a root-only directory; `SO_PEERCRED` check; helpers re-validate every request; fixed opcode sets |
+| Sensor ↔ local operator | `panopticon-sensord` | Any other local process | Read-only control socket, mode 0600, `SO_PEERCRED` check before the request is read (root or the daemon's own uid), 256-byte request line, 2 s deadline, no command changes state **[built]** |
 | Sensor ↔ kernel | eBPF objects embedded in the packaged binary | Other BPF users | Sensor programs/maps are not pinned by default |
 | Sensor ↔ host data | Kernel-sourced records | User-space–generated logs | Provenance marks journald/syslog-derived data as `user_space_reported` |
 | Policy | Manager-signed policy | Local edits | Signature + monotonically increasing version; downgrade rejected |
@@ -39,6 +40,7 @@ maps; systemd units; the rollback copy.
 | T13 | Identity key theft | 0600 root key file; never logged | Root can read |
 | T14 | Update abuse / downgrade | Signed packages; monotonic versions; rollback only to the copy kept by the package | Signing-key compromise |
 | T15 | Response executor misuse | No network; typed requests from the sensor only; refuses protected targets (pid 1, kernel threads, sensor, helpers) | – |
+| T17 | Local abuse of the control socket (unprivileged client, stalled or oversized request, symlink or file at the socket path) | 0600 socket created under a restrictive umask; peer credentials checked first; bounded line and deadline; a non-socket at the path is never replaced; status is served from a cache so the control thread never touches live pipeline state **[built]** | A slow client can delay other control clients by up to the 2 s deadline (collection is unaffected) |
 | T16 | Information exposure via telemetry | Command-line redaction; environment allowlist; file content only on explicit evidence commands | Unknown secret formats in command lines |
 
 ## 4. What root can defeat
@@ -59,6 +61,7 @@ including this one. The position, consistent with the industry:
 | --- | --- | --- |
 | Command lines | collected, pattern-redacted (`--password=`, `token=`, credentials in URLs) | policy redaction list |
 | Environment | allowlisted keys only (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `PATH`, `SSH_CONNECTION`, `SUDO_USER`) | policy |
+| Host inventory secrets | machine-id as a salted digest; password hashes reduced to a state; DMI serial and uuid not collected; secret-looking kernel cmdline values redacted **[built]** | – |
 | File contents | never, except explicit evidence commands | audit trail |
 | DNS names, remote IPs | collected | policy can disable DNS |
 | Memory | never by default; bounded capture only on explicit command | audit trail |
