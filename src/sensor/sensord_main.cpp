@@ -179,25 +179,23 @@ int main(int argc, char** argv) {
     if (!to_stdout && !config.manager_url.empty()) {
         auto enrolled = panopticon::linux_agent::load_enrolled_identity(config.identity_path);
         if (!succeeded(enrolled)) {
-            std::fprintf(stderr, "panopticon-sensord: delivery disabled: %s
-", std::get<error>(enrolled).message.c_str());
+            std::fprintf(stderr, "panopticon-sensord: delivery disabled: %s\n", std::get<error>(enrolled).message.c_str());
         } else if (std::get<panopticon::linux_agent::enrolled_identity>(enrolled).host_id != config.host_id) {
-            std::fprintf(stderr, "panopticon-sensord: delivery disabled: the enrolled host id differs from host_id
-");
+            std::fprintf(stderr, "panopticon-sensord: delivery disabled: the enrolled host id differs from host_id\n");
         } else if (!sensor::https_poster_built()) {
-            std::fprintf(stderr, "panopticon-sensord: delivery disabled: this build has no libcurl
-");
+            std::fprintf(stderr, "panopticon-sensord: delivery disabled: this build has no libcurl\n");
         } else {
             sensor::https_poster_options poster_options;
             poster_options.manager_url = config.manager_url;
             poster_options.identity = std::get<panopticon::linux_agent::enrolled_identity>(enrolled);
             poster_options.ca_bundle = config.ca_bundle;
             poster = sensor::make_https_poster(std::move(poster_options));
-            delivery = std::make_unique<sensor::uplink>(static_cast<sensor::wal_sink&>(*sink).log(), *poster, sensor::uplink_options{});
+            sensor::uplink_options uplink_options;
+            uplink_options.quarantine_path = config.wal_path.string() + ".rejected.ndjson";
+            delivery = std::make_unique<sensor::uplink>(static_cast<sensor::wal_sink&>(*sink).log(), *poster, uplink_options);
             delivery_runner = std::make_unique<sensor::uplink_runner>(*delivery);
             delivery_runner->start();
-            std::fprintf(stderr, "panopticon-sensord: delivering to %s
-", config.manager_url.c_str());
+            std::fprintf(stderr, "panopticon-sensord: delivering to %s\n", config.manager_url.c_str());
         }
     }
 
@@ -256,12 +254,12 @@ int main(int argc, char** argv) {
     if (delivery_runner) {
         delivery_runner->stop();
         const auto uplink_metrics = delivery->metrics();
-        std::fprintf(stderr, "panopticon-sensord: uplink %s; batches=%llu acknowledged=%llu through seq %llu retries=%llu refusals=%llu%s%s
-",
+        std::fprintf(stderr, "panopticon-sensord: uplink %s; batches=%llu acknowledged=%llu through seq %llu retries=%llu refusals=%llu quarantined=%llu%s%s\n",
                      sensor::to_string(uplink_metrics.state), static_cast<unsigned long long>(uplink_metrics.batches_sent),
                      static_cast<unsigned long long>(uplink_metrics.records_acknowledged),
                      static_cast<unsigned long long>(uplink_metrics.acknowledged_seq), static_cast<unsigned long long>(uplink_metrics.retries),
-                     static_cast<unsigned long long>(uplink_metrics.refusals), uplink_metrics.last_error.empty() ? "" : "; last error: ",
+                     static_cast<unsigned long long>(uplink_metrics.refusals),
+                     static_cast<unsigned long long>(uplink_metrics.records_quarantined), uplink_metrics.last_error.empty() ? "" : "; last error: ",
                      uplink_metrics.last_error.c_str());
     }
     const auto& metrics = pipeline.metrics();

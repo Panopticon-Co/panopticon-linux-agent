@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <filesystem>
 
 namespace panopticon::linux_agent::sensor {
 
@@ -46,8 +48,8 @@ std::uint64_t uplink::fail(const std::uint64_t now_ns, const uplink_state state,
     return delay;
 }
 
-bool uplink::response_matches(const post_response& response, const std::string& batch_id, const std::size_t sent,
-                              std::string& why) const {
+uplink::verdict uplink::check_response(const post_response& response, const std::string& batch_id, const std::size_t sent) const {
+    verdict outcome;
     json_limits limits;
     limits.maximum_bytes = 256U * 1024U;
     limits.maximum_depth = 8U;
@@ -55,13 +57,13 @@ bool uplink::response_matches(const post_response& response, const std::string& 
     std::string parse_error;
     const auto document = parse_json(response.body, limits, &parse_error);
     if (!document || !document->is_object()) {
-        why = "acknowledgement is not a JSON object: " + parse_error;
-        return false;
+        outcome.why = "acknowledgement is not a JSON object: " + parse_error;
+        return outcome;
     }
     const auto* echoed = document->find("batch_id");
     if (echoed == nullptr || echoed->as_string() != std::optional<std::string_view>{batch_id}) {
-        why = "acknowledgement is for a different batch";
-        return false;
+        outcome.why = "acknowledgement is for a different batch";
+        return outcome;
     }
     const auto received = document->find("received");
     const auto accepted = document->find("accepted");
@@ -69,22 +71,84 @@ bool uplink::response_matches(const post_response& response, const std::string& 
     const auto rejected = document->find("rejected");
     if (received == nullptr || accepted == nullptr || duplicates == nullptr || rejected == nullptr ||
         !received->as_unsigned() || !accepted->as_unsigned() || !duplicates->as_unsigned() || !rejected->is_array()) {
-        why = "acknowledgement lacks received, accepted, duplicates or rejected";
-        return false;
+        outcome.why = "acknowledgement lacks received, accepted, duplicates or rejected";
+        return outcome;
     }
-    if (!rejected->items().empty()) {
-        why = "the Manager rejected " + std::to_string(rejected->items().size()) + " record(s)";
-        const auto* reason = rejected->items().front().find("reason");
-        const auto* detail = rejected->items().front().find("detail");
-        if (reason != nullptr && reason->as_string()) why += ": " + std::string{*reason->as_string()};
-        if (detail != nullptr && detail->as_string()) why += " (" + std::string{detail->as_string()->substr(0U, 200U)} + ")";
-        return false;
+    // Every record sent must be accounted for exactly once: stored, already stored, or rejected
+    // at a named position. Anything else is not an acknowledgement.
+    std::vector<bool> seen(sent + 1U, false);
+    for (const auto& entry : rejected->items()) {
+        const auto* line = entry.find("line");
+        const auto* reason = entry.find("reason");
+        const auto* detail = entry.find("detail");
+        const auto position = line == nullptr ? std::nullopt : line->as_unsigned();
+        if (!position || *position < 1U || *position > sent || seen[*position]) {
+            outcome.why = "the Manager rejected a record without naming a valid line";
+            outcome.rejected_lines.clear();
+            outcome.rejected_reasons.clear();
+            return outcome;
+        }
+        seen[*position] = true;
+        outcome.rejected_lines.push_back(static_cast<std::size_t>(*position));
+        std::string text = reason != nullptr && reason->as_string() ? std::string{*reason->as_string()} : std::string{"rejected"};
+        if (detail != nullptr && detail->as_string()) text += " (" + std::string{detail->as_string()->substr(0U, 200U)} + ")";
+        outcome.rejected_reasons.push_back(std::move(text));
     }
-    if (*received->as_unsigned() != sent || *accepted->as_unsigned() + *duplicates->as_unsigned() != sent) {
-        why = "acknowledgement does not account for every record sent";
-        return false;
+    if (*received->as_unsigned() != sent || *accepted->as_unsigned() + *duplicates->as_unsigned() + outcome.rejected_lines.size() != sent) {
+        outcome.why = "acknowledgement does not account for every record sent";
+        if (!outcome.rejected_reasons.empty()) outcome.why += "; the Manager reported: " + outcome.rejected_reasons.front();
+        outcome.rejected_lines.clear();
+        outcome.rejected_reasons.clear();
+        return outcome;
     }
-    return true;
+    outcome.accepted = true;
+    return outcome;
+}
+
+namespace {
+
+std::string json_escaped(const std::string_view text) {
+    std::string out;
+    for (const unsigned char c : text) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += static_cast<char>(c);
+        } else if (c < 0x20U) {
+            char buffer[8];
+            std::snprintf(buffer, sizeof buffer, "\\u%04x", c);
+            out += buffer;
+        } else {
+            out += static_cast<char>(c);
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+void uplink::quarantine(const std::vector<wal_record>& records, const verdict& outcome) {
+    std::uint64_t failures = 0U;
+    for (std::size_t index = 0U; index < outcome.rejected_lines.size(); ++index) {
+        const auto& record = records[outcome.rejected_lines[index] - 1U];
+        bool written = false;
+        if (!options_.quarantine_path.empty()) {
+            std::error_code ignored;
+            const auto size = std::filesystem::exists(options_.quarantine_path, ignored) ? std::filesystem::file_size(options_.quarantine_path, ignored) : 0U;
+            if (size + record.payload.size() + 512U <= options_.quarantine_limit_bytes) {
+                if (std::FILE* file = std::fopen(options_.quarantine_path.c_str(), "ae"); file != nullptr) {
+                    const auto line = "{\"seq\":" + std::to_string(record.seq) + ",\"reason\":\"" + json_escaped(outcome.rejected_reasons[index]) +
+                                      "\",\"record\":\"" + json_escaped(record.payload) + "\"}\n";
+                    written = std::fwrite(line.data(), 1U, line.size(), file) == line.size();
+                    written = std::fclose(file) == 0 && written;
+                }
+            }
+        }
+        if (!written && !options_.quarantine_path.empty()) ++failures;
+    }
+    const std::lock_guard<std::mutex> lock{mutex_};
+    metrics_.records_quarantined += outcome.rejected_lines.size();
+    metrics_.quarantine_failures += failures;
+    if (!outcome.rejected_reasons.empty()) metrics_.last_error = "quarantined: " + outcome.rejected_reasons.front();
 }
 
 std::uint64_t uplink::step(const std::uint64_t now_ns) {
@@ -136,14 +200,15 @@ std::uint64_t uplink::step(const std::uint64_t now_ns) {
             break;
     }
 
-    std::string why;
-    if (!response_matches(response, batch_id, records.size(), why)) {
+    auto verdict = check_response(response, batch_id, records.size());
+    if (!verdict.accepted) {
         {
             const std::lock_guard<std::mutex> lock{mutex_};
             ++metrics_.refusals;
         }
-        return fail(now_ns, uplink_state::rejected, std::move(why));
+        return fail(now_ns, uplink_state::rejected, std::move(verdict.why));
     }
+    if (!verdict.rejected_lines.empty()) quarantine(records, verdict);
     if (auto acknowledged = log_.acknowledge(last); !succeeded(acknowledged)) {
         return fail(now_ns, uplink_state::backing_off, "cannot record the acknowledgement in the write-ahead log");
     }
@@ -153,9 +218,9 @@ std::uint64_t uplink::step(const std::uint64_t now_ns) {
     const std::lock_guard<std::mutex> lock{mutex_};
     metrics_.state = uplink_state::idle;
     metrics_.consecutive_failures = 0U;
-    metrics_.records_acknowledged += records.size();
+    metrics_.records_acknowledged += records.size() - verdict.rejected_lines.size();
     metrics_.acknowledged_seq = last;
-    metrics_.last_error.clear();
+    if (verdict.rejected_lines.empty()) metrics_.last_error.clear();
     return 0U;
 }
 

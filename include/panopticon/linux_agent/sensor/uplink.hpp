@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace panopticon::linux_agent::sensor {
 
@@ -43,6 +44,11 @@ struct uplink_options {
     std::uint64_t idle_poll_ns{500'000'000ULL};
     std::uint64_t initial_backoff_ns{1'000'000'000ULL};
     std::uint64_t maximum_backoff_ns{60'000'000'000ULL};
+    // Records the Manager rejects one by one (it answers that this exact record can never be valid)
+    // are written here, counted, and skipped so that one bad record cannot stop delivery of
+    // everything behind it. Empty: they are counted and skipped without a copy.
+    std::filesystem::path quarantine_path;
+    std::uint64_t quarantine_limit_bytes{4ULL * 1024U * 1024U};
 };
 
 enum class uplink_state { idle, delivering, backing_off, unauthorized, rejected };
@@ -54,6 +60,8 @@ struct uplink_metrics {
     std::uint64_t records_acknowledged{};
     std::uint64_t retries{};
     std::uint64_t refusals{};
+    std::uint64_t records_quarantined{};
+    std::uint64_t quarantine_failures{};  // quarantined records that could not be copied to disk
     std::uint64_t consecutive_failures{};
     std::uint64_t acknowledged_seq{};
     std::string last_error;
@@ -74,8 +82,14 @@ public:
 
 private:
     [[nodiscard]] std::uint64_t fail(std::uint64_t now_ns, uplink_state state, std::string error);
-    [[nodiscard]] bool response_matches(const post_response& response, const std::string& batch_id, std::size_t sent,
-                                        std::string& why) const;
+    struct verdict {
+        bool accepted{false};
+        std::vector<std::size_t> rejected_lines;  // 1-based positions inside the batch
+        std::vector<std::string> rejected_reasons;
+        std::string why;
+    };
+    [[nodiscard]] verdict check_response(const post_response& response, const std::string& batch_id, std::size_t sent) const;
+    void quarantine(const std::vector<wal_record>& records, const verdict& outcome);
 
     write_ahead_log& log_;
     record_poster& poster_;

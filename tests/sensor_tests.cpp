@@ -815,6 +815,8 @@ void test_pipeline_enriches_network_events() {
     require(contains(listen, "\"direction\":\"listen\"") && !contains(listen, "\"remote\":") &&
                 contains(listen, "{\"field\":\"process\",\"reason\":\"process_exited\"}"),
             "a listener has no remote end and an unattributed owner is reported");
+    require(!contains(listen, "\"process\":{}") && !contains(listen, "\"process\":{\"pid\""),
+            "an owner that was never known leaves the process member out instead of emitting an empty object");
     const auto accept = find("network.accept");
     require(contains(accept, "\"direction\":\"inbound\"") && contains(accept, "{\"field\":\"process\",\"reason\":\"process_exited\"}") &&
                 contains(accept, "\"pid\":4242"),

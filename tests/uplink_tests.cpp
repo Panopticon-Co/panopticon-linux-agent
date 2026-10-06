@@ -8,6 +8,8 @@
 #include <deque>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -209,6 +211,38 @@ void test_an_answer_that_does_not_match_is_never_an_acknowledgement() {
     fs::remove_all(directory);
 }
 
+void test_a_record_the_manager_rejects_is_quarantined_and_skipped() {
+    const auto directory = fresh_directory("poison");
+    auto log = open_log(directory);
+    fill(*log, 1U, 4U);
+    const auto quarantine_file = directory.string() + ".rejected.ndjson";
+    fs::remove(quarantine_file);
+    scripted_poster poster;
+    poster.script = {answer(ack_body("wal-1-4", 4U, 3U, 0U, R"([{"line":2,"record_id":"x","reason":"schema_invalid","detail":"/process: bad"}])"))};
+    uplink_options options;
+    options.quarantine_path = quarantine_file;
+    uplink delivery{*log, poster, options};
+    require(delivery.step(1U) == 0U, "the batch is acknowledged");
+    require(log->metrics().acknowledged_seq == 4U, "the cursor moves past the rejected record");
+    const auto metrics = delivery.metrics();
+    require(metrics.records_quarantined == 1U && metrics.records_acknowledged == 3U && metrics.quarantine_failures == 0U, "counted, not hidden");
+    require(metrics.last_error.find("schema_invalid") != std::string::npos, "the reason stays visible");
+    std::ifstream copy{quarantine_file};
+    const std::string saved{std::istreambuf_iterator<char>{copy}, std::istreambuf_iterator<char>{}};
+    require(saved.find(R"("seq":2,)") != std::string::npos && saved.find("schema_invalid") != std::string::npos &&
+                saved.find(R"({\"seq\":2})") != std::string::npos && line_count(saved) == 1U,
+            "the rejected record is kept verbatim for inspection");
+    // A rejection that names a line outside the batch, or the same line twice, is not trusted.
+    fill(*log, 5U, 6U);
+    poster.script = {answer(ack_body("wal-5-6", 2U, 0U, 0U, R"([{"line":3,"reason":"x"},{"line":1,"reason":"x"}])")),
+                     answer(ack_body("wal-5-6", 2U, 0U, 0U, R"([{"line":1,"reason":"x"},{"line":1,"reason":"x"}])"))};
+    (void)delivery.step(2U * second);
+    (void)delivery.step(4U * second);
+    require(log->metrics().acknowledged_seq == 4U && delivery.metrics().state == uplink_state::rejected, "inconsistent rejections are refused");
+    fs::remove(quarantine_file);
+    fs::remove_all(directory);
+}
+
 void test_authentication_failure_waits_long_and_does_not_acknowledge() {
     const auto directory = fresh_directory("auth");
     auto log = open_log(directory);
@@ -349,6 +383,7 @@ int main() {
         {"unsynced_records_are_not_sent", test_unsynced_records_are_not_sent},
         {"failures_keep_the_cursor_and_back_off", test_failures_keep_the_cursor_and_back_off},
         {"an_answer_that_does_not_match_is_never_an_acknowledgement", test_an_answer_that_does_not_match_is_never_an_acknowledgement},
+        {"a_record_the_manager_rejects_is_quarantined_and_skipped", test_a_record_the_manager_rejects_is_quarantined_and_skipped},
         {"authentication_failure_waits_long_and_does_not_acknowledge", test_authentication_failure_waits_long_and_does_not_acknowledge},
         {"too_large_batches_shrink_and_recover", test_too_large_batches_shrink_and_recover},
         {"a_lost_answer_means_the_batch_is_sent_again_and_deduplicated", test_a_lost_answer_means_the_batch_is_sent_again_and_deduplicated},

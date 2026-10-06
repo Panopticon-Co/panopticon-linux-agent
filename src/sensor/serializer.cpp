@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/event.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 
@@ -327,10 +328,15 @@ std::string record_serializer::file_event(const file_record& record, const std::
         write_process(out, *record.actor);
         out.end_object();
     } else {
-        out.key("process").begin_object();
-        out.field("pid", record.pid);
-        out.end_object();
-        unavailable.push_back({"process", unavailable_reason::process_exited});
+        // A process stub needs a pid; without one the member is omitted and reported as unavailable.
+        if (record.pid != 0U) {
+            out.key("process").begin_object();
+            out.field("pid", record.pid);
+            out.end_object();
+            unavailable.push_back({"process", unavailable_reason::process_exited});
+        } else if (std::none_of(unavailable.begin(), unavailable.end(), [](const unavailable_field& item) { return item.field == "process"; })) {
+            unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+        }
     }
     out.key("file").begin_object();
     out.field("path", record.path);
@@ -372,10 +378,14 @@ std::string record_serializer::network_event(const network_record& record, const
         write_process(out, *record.actor);
         out.end_object();
     } else {
-        out.key("process").begin_object();
-        if (net.pid != 0U) out.field("pid", net.pid);
-        out.end_object();
-        if (net.pid != 0U) unavailable.push_back({"process", unavailable_reason::process_exited});
+        if (net.pid != 0U) {
+            out.key("process").begin_object();
+            out.field("pid", net.pid);
+            out.end_object();
+            unavailable.push_back({"process", unavailable_reason::process_exited});
+        } else if (std::none_of(unavailable.begin(), unavailable.end(), [](const unavailable_field& item) { return item.field == "process"; })) {
+            unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+        }
     }
     out.key("network").begin_object();
     out.field("transport", net.protocol);
@@ -429,11 +439,14 @@ std::string record_serializer::auth_event(const auth_record& record, const std::
         write_process(out, *record.actor);
         out.end_object();
     } else {
-        out.key("process").begin_object();
-        if (auth.pid != 0U) out.field("pid", auth.pid);
-        out.end_object();
-        if (auth.pid != 0U) unavailable.push_back({"process", unavailable_reason::process_exited});
-        else unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+        if (auth.pid != 0U) {
+            out.key("process").begin_object();
+            out.field("pid", auth.pid);
+            out.end_object();
+            unavailable.push_back({"process", unavailable_reason::process_exited});
+        } else if (std::none_of(unavailable.begin(), unavailable.end(), [](const unavailable_field& item) { return item.field == "process"; })) {
+            unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+        }
     }
     out.key("auth").begin_object();
     out.field("service", auth.service);
