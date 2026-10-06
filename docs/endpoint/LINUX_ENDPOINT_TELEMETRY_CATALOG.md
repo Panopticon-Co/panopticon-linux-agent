@@ -182,7 +182,7 @@ Provenance `{sockdiag_network, SOCKDIAG, reconstructed}`: sockets are found by p
 | `auth.failure` | a failed login | as above, `outcome` failure, `invalid_user` when the account does not exist |
 | `auth.privilege` | `sudo`, `su` or `pkexec`, success or failure | `auth` (`service`, `outcome`, `user`, `target_user`, `tty`, `working_directory`, `command`) |
 
-SSH has no separate type: it is `auth.login` or `auth.failure` with `service` `sshd`. Fields that were made printable or cut carry `sanitized` and `truncated`. Provenance `{auth_log, AUTHLOG, user_space_reported}`: the record is what a program chose to log, read from `/var/log/auth.log` or `/var/log/secure` with syslog delay. sudo logs no pid, so its `process` is empty with `unavailable: not_supported_by_provider`. `auth.logout`, session ids and audit-sourced events are not provided.
+SSH has no separate type: it is `auth.login` or `auth.failure` with `service` `sshd`. Fields that were made printable or cut carry `sanitized` and `truncated`. Two mechanisms serve the family, in preference order (ADR 013, ADR 012). Primary `{audit_netlink, AUDIT, observed}`: kernel audit records (`USER_LOGIN`, `USER_AUTH` failure, `USER_CMD`, `su` `USER_START`); `process` is the live sender with its ancestry, the actor is the audit uid, and `method` is the program for sudo and su. Fallback `{auth_log, AUTHLOG, user_space_reported}`: what a program chose to log, read from `/var/log/auth.log` or `/var/log/secure` with syslog delay; it is on standby while the audit provider runs. sudo logs no pid, so its `process` is empty with `unavailable: not_supported_by_provider`. `auth.logout`, session ids and audit-sourced events are not provided.
 
 ## 5. State records
 
