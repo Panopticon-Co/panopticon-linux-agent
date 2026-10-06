@@ -226,6 +226,10 @@ int main(int argc, char** argv) {
         providers.push_back(std::make_unique<sensor::ebpf_process_provider>(clock, sensor::ebpf_process_options{}, sensor::ebpf_role::network));
     }
     if (config.enable_network_events) providers.push_back(std::make_unique<sensor::sockdiag_network_provider>());
+    // Executable memory and eBPF loads exist only as kernel hooks; there is no fallback to report.
+    if (config.enable_security_events && config.enable_ebpf && !no_ebpf) {
+        providers.push_back(std::make_unique<sensor::ebpf_process_provider>(clock, sensor::ebpf_process_options{}, sensor::ebpf_role::security));
+    }
     if (config.enable_kernel_events) providers.push_back(std::make_unique<sensor::kernel_change_provider>());
     if (config.enable_auth_events) {
         // One family, two mechanisms: the kernel audit group is preferred, the log is the fallback.

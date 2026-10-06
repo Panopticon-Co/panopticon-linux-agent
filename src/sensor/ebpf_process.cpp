@@ -56,8 +56,17 @@ constexpr std::array<hook, 5U> network_hooks{{
     {"on_udp6_send", "network.udp_flow", false},
 }};
 
+// Hooks on the kernel's LSM call sites. The mmap hook is the one that makes the provider worth
+// having; the others are dropped (and reported) when the kernel cannot host them.
+constexpr std::array<hook, 3U> security_hooks{{
+    {"on_mmap_exec", "memory.exec_mapping", true},
+    {"on_mprotect_exec", "memory.exec_mapping", false},
+    {"on_bpf_syscall", "kernel.bpf_load", false},
+}};
+
 std::vector<hook> hooks_for(const ebpf_role role) {
     if (role == ebpf_role::network) return {network_hooks.begin(), network_hooks.end()};
+    if (role == ebpf_role::security) return {security_hooks.begin(), security_hooks.end()};
     return {process_hooks.begin(), process_hooks.end()};
 }
 
@@ -82,6 +91,13 @@ std::optional<std::uint64_t> ticks_from_boot_ns(const std::uint64_t boot_ns, con
 }
 
 provenance observed(const char* hook_name) { return {"ebpf", hook_name, confidence::observed}; }
+
+// enum bpf_prog_type, as of Linux 6.x. A value this table does not know is reported as its number.
+constexpr std::array<const char*, 33U> bpf_program_types{
+    "unspec", "socket_filter", "kprobe", "sched_cls", "sched_act", "tracepoint", "xdp", "perf_event", "cgroup_skb",
+    "cgroup_sock", "lwt_in", "lwt_out", "lwt_xmit", "sock_ops", "sk_skb", "cgroup_device", "sk_msg", "raw_tracepoint",
+    "cgroup_sock_addr", "lwt_seg6local", "lirc_mode2", "sk_reuseport", "flow_dissector", "cgroup_sysctl",
+    "raw_tracepoint_writable", "cgroup_sockopt", "tracing", "struct_ops", "ext", "lsm", "sk_lookup", "syscall", "netfilter"};
 
 }  // namespace
 
@@ -190,6 +206,44 @@ std::vector<raw_record> decode_ebpf_process_sample(const void* data, const std::
         // The hook sees the socket before any file descriptor is attached to it.
         net.unavailable.push_back({"network.socket_inode", unavailable_reason::not_supported_by_provider});
         records.push_back({time, observed(hook_name), std::move(net)});
+        break;
+    }
+    case wire::PAN_EVENT_MEM_MAP:
+    case wire::PAN_EVENT_MEM_PROTECT: {
+        if (event.mem_backing != wire::PAN_MEM_ANON && event.mem_backing != wire::PAN_MEM_MEMFD && event.mem_backing != wire::PAN_MEM_FILE) {
+            if (malformed != nullptr) *malformed = true;
+            return {};
+        }
+        raw_security_event memory;
+        memory.kind = security_kind::memory_exec_mapping;
+        memory.pid = event.pid;
+        const bool mapping = event.kind == wire::PAN_EVENT_MEM_MAP;
+        memory.operation = mapping ? "mmap" : "mprotect";
+        memory.backing = event.mem_backing == wire::PAN_MEM_ANON ? "anonymous" : event.mem_backing == wire::PAN_MEM_MEMFD ? "memfd" : "file";
+        memory.write_exec = event.mem_write != 0U;
+        memory.address = event.mem_addr;
+        memory.length = event.mem_length;
+        records.push_back({time, observed(mapping ? "security_mmap_file" : "security_file_mprotect"), std::move(memory)});
+        break;
+    }
+    case wire::PAN_EVENT_BPF: {
+        const char* command = event.bpf_cmd == 5U ? "prog_load" : event.bpf_cmd == 8U ? "prog_attach"
+                              : event.bpf_cmd == 17U ? "raw_tracepoint_open" : event.bpf_cmd == 28U ? "link_create" : nullptr;
+        if (command == nullptr) {
+            if (malformed != nullptr) *malformed = true;
+            return {};
+        }
+        raw_security_event load;
+        load.kind = security_kind::bpf_load;
+        load.pid = event.pid;
+        load.command = command;
+        if (event.bpf_cmd == 5U) {
+            load.program_type = event.bpf_type < bpf_program_types.size() ? bpf_program_types[event.bpf_type] : "type_" + std::to_string(event.bpf_type);
+        } else if (event.bpf_cmd == 8U || event.bpf_cmd == 28U) {
+            load.attach_type = event.bpf_type;
+        }
+        load.name = std::string{bounded_string(event.obj_name, wire::PAN_COMM_LEN, wire::PAN_COMM_LEN)};
+        records.push_back({time, observed("security_bpf"), std::move(load)});
         break;
     }
     default:
@@ -390,6 +444,8 @@ int ebpf_process_provider::on_sample(const void* data, const std::size_t size) {
         // The sensor's own connections (the uplink to the Manager) are not telemetry: reporting
         // them would make every delivered batch produce the next record.
         if (const auto* net = std::get_if<raw_network_event>(&record.payload); net != nullptr && options_.skip_own_network_events && net->pid == own_pid_) continue;
+        // The sensor loads its own BPF programs; reporting that would be noise about itself.
+        if (const auto* load = std::get_if<raw_security_event>(&record.payload); load != nullptr && options_.skip_own_network_events && load->pid == own_pid_) continue;
         (void)queue_->push(std::move(record));
         ++events_;
     }

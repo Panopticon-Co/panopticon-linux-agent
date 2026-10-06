@@ -194,6 +194,23 @@ SSH has no separate type: it is `auth.login` or `auth.failure` with `service` `s
 
 There is no acting process: `process` is omitted and `unavailable` carries `{process, not_supported_by_provider}`. Provenance `{kernel_change, PROCFS, reconstructed}`: found by comparing snapshots taken every second, so a change that came and went between two polls is not seen, and the event time is the observation time. The first snapshot is the starting state. `kernel.bpf_load`, `device.*` and hidden-module cross-view are not provided.
 
+### 4.6 `memory.exec_mapping` and `kernel.bpf_load` events as emitted today (ADR 020)
+
+Provenance `{ebpf, security_mmap_file | security_file_mprotect | security_bpf, observed}`. Each
+carries the requesting `process` (full entity, or a `{pid}` stub with `process` unavailable when it
+had exited) and one body.
+
+- `memory`: `operation` (`mmap` | `mprotect`), `backing` (`anonymous` | `memfd` | `file`),
+  `write_exec`, and for `mprotect` the `address` and `length` of the mapping touched. For `mmap` the
+  address is not known at the hook and `memory.range` is listed as unavailable.
+- `bpf`: `command` (`prog_load` | `prog_attach` | `raw_tracepoint_open` | `link_create`),
+  `program_type` (`prog_load`), `attach_type` (attach, link), `name`.
+
+These are requests seen before the kernel acts, deduplicated per process, operation and backing
+over five seconds. File-backed mappings, read-only mprotects of file mappings and eBPF map creation
+are not reported. JIT runtimes (browsers, JVM, Node, .NET) legitimately produce `memory.*` records,
+so a rule needs the process identity and an allowlist, not the event alone.
+
 ## 5. State records
 
 `state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,

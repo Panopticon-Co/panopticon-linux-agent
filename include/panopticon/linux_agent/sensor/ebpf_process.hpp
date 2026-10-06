@@ -40,15 +40,19 @@ struct ebpf_process_options {
 // pipeline falls back to netlink_proc and reports why in health.
 // One BPF object serves two providers so that each family has its own fallback chain: the
 // `process` role is preferred over netlink_proc, the `network` role over sockdiag.
-enum class ebpf_role : std::uint8_t { process, network };
+enum class ebpf_role : std::uint8_t { process, network, security };
 
 class ebpf_process_provider final : public provider {
 public:
     ebpf_process_provider(const clock_domain& clock, ebpf_process_options options = {}, ebpf_role role = ebpf_role::process);
     ~ebpf_process_provider() override;
 
-    [[nodiscard]] std::string_view name() const noexcept override { return role_ == ebpf_role::network ? "ebpf_network" : "ebpf_process"; }
-    [[nodiscard]] std::string_view family() const noexcept override { return role_ == ebpf_role::network ? "network" : "process"; }
+    [[nodiscard]] std::string_view name() const noexcept override {
+        return role_ == ebpf_role::network ? "ebpf_network" : role_ == ebpf_role::security ? "ebpf_security" : "ebpf_process";
+    }
+    [[nodiscard]] std::string_view family() const noexcept override {
+        return role_ == ebpf_role::network ? "network" : role_ == ebpf_role::security ? "security" : "process";
+    }
     [[nodiscard]] std::vector<std::string> capabilities() const override;
     [[nodiscard]] std::string probe() override;
     [[nodiscard]] result<bool> start(record_queue& queue) override;

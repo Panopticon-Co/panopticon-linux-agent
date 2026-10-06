@@ -42,6 +42,7 @@ struct sensor_config {
     bool enable_network_events{true};  // false: no socket telemetry (sock_diag)
     bool enable_auth_events{true};     // false: no authentication telemetry (audit group, auth log)
     bool enable_kernel_events{true};   // false: no kernel module and mount change events
+    bool enable_security_events{true}; // false: no executable-memory and eBPF-load telemetry
     std::vector<std::string> file_include;  // empty: the built-in persistence/credential/binary/staging set
     std::vector<std::string> file_exclude;  // added to the built-in exclusions
     // File-integrity monitoring of the persistence catalog. Off in the struct so embedders and
@@ -156,6 +157,7 @@ private:
     result<bool> emit_network_event(const raw_record& record, const raw_network_event& network, std::uint64_t observed_ns);
     result<bool> emit_auth_event(const raw_record& record, const raw_auth_event& auth, std::uint64_t observed_ns);
     result<bool> emit_kernel_event(const raw_record& record, const raw_kernel_event& kernel, std::uint64_t observed_ns);
+    result<bool> emit_security_event(const raw_record& record, const raw_security_event& security, std::uint64_t observed_ns);
     result<bool> emit_loss(loss_report report);
     result<bool> emit_health(std::uint64_t now_ns);
     result<bool> emit_process_state(std::uint64_t now_ns);

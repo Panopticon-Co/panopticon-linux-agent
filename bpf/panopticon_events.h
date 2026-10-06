@@ -37,6 +37,15 @@ enum pan_event_kind {
     PAN_EVENT_NET_ACCEPT = 8,
     PAN_EVENT_NET_LISTEN = 9,
     PAN_EVENT_NET_UDP = 10,
+    PAN_EVENT_MEM_MAP = 11,     /* anonymous or memfd mapping requested with PROT_EXEC */
+    PAN_EVENT_MEM_PROTECT = 12, /* mprotect() made a non-executable mapping executable */
+    PAN_EVENT_BPF = 13,         /* bpf() syscall that loads or attaches a program */
+};
+
+enum pan_mem_backing {
+    PAN_MEM_ANON = 1,
+    PAN_MEM_MEMFD = 2,
+    PAN_MEM_FILE = 3,
 };
 
 /* Bounds. argv is captured into a fixed tail buffer; anything past it sets PAN_FLAG_ARGS_TRUNC. */
@@ -92,6 +101,15 @@ struct pan_event {
     u16 net_pad;
     u8 net_saddr[16]; /* network: local address (IPv4 uses the first 4 bytes) */
     u8 net_daddr[16]; /* network: remote address */
+
+    u64 mem_addr;   /* memory: vma start (mprotect); 0 for mmap, which has no address at the hook */
+    u64 mem_length; /* memory: vma length (mprotect); 0 for mmap */
+    u32 bpf_cmd;    /* bpf: BPF_* command */
+    u32 bpf_type;   /* bpf: program type (PROG_LOAD) or attach type (PROG_ATTACH, LINK_CREATE) */
+    u8 mem_backing; /* memory: pan_mem_backing */
+    u8 mem_write;   /* memory: the mapping is writable as well as executable */
+    u8 sec_pad[6];
+    char obj_name[PAN_COMM_LEN]; /* bpf: program name (PROG_LOAD) or tracepoint name (RAW_TRACEPOINT_OPEN) */
 
     char comm[PAN_COMM_LEN];      /* task->comm (rename: the new name) */
     char filename[PAN_FILENAME_LEN]; /* exec: bprm->filename */

@@ -526,6 +526,55 @@ std::string record_serializer::auth_event(const auth_record& record, const std::
     return out.take();
 }
 
+std::string record_serializer::security_event(const security_record& record, const std::uint64_t seq,
+                                              const std::uint64_t observed_unix_ns) const {
+    const auto& item = record.security;
+    const bool memory = item.kind == security_kind::memory_exec_mapping;
+    json_writer out;
+    begin(out, "event", memory ? "memory.exec_mapping" : "kernel.bpf_load", seq, record.time_unix_ns, observed_unix_ns, record.source);
+    std::vector<unavailable_field> unavailable;
+    if (record.actor) {
+        out.key("process");
+        write_process(out, *record.actor);
+        out.end_object();
+    } else {
+        out.key("process").begin_object();
+        out.field("pid", item.pid);
+        out.end_object();
+        unavailable.push_back({"process", unavailable_reason::process_exited});
+    }
+    if (memory) {
+        out.key("memory").begin_object();
+        out.field("operation", item.operation);
+        out.field("backing", item.backing);
+        out.field("write_exec", item.write_exec);
+        if (item.length != 0U) {
+            out.field("address", item.address);
+            out.field("length", item.length);
+        } else {
+            unavailable.push_back({"memory.range", unavailable_reason::not_supported_by_provider});
+        }
+        out.end_object();
+    } else {
+        out.key("bpf").begin_object();
+        out.field("command", item.command);
+        if (!item.program_type.empty()) out.field("program_type", item.program_type);
+        if (item.attach_type.has_value()) out.field("attach_type", *item.attach_type);
+        if (!item.name.empty()) out.field("name", item.name);
+        out.end_object();
+    }
+    out.key("unavailable").begin_array();
+    for (const auto& field : unavailable) {
+        out.begin_object();
+        out.field("field", field.field);
+        out.field("reason", to_string(field.reason));
+        out.end_object();
+    }
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::kernel_event(const kernel_record& record, const std::uint64_t seq,
                                             const std::uint64_t observed_unix_ns) const {
     const auto& item = record.kernel;

@@ -179,7 +179,8 @@ std::vector<process_event> entity_graph::apply(const raw_record& record) {
             else if constexpr (std::is_same_v<payload_type, raw_ptrace>) return on_ptrace(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_comm_change>) return on_comm(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_file_event> || std::is_same_v<payload_type, raw_network_event> ||
-                               std::is_same_v<payload_type, raw_auth_event> || std::is_same_v<payload_type, raw_kernel_event>) {
+                               std::is_same_v<payload_type, raw_auth_event> || std::is_same_v<payload_type, raw_kernel_event> ||
+                               std::is_same_v<payload_type, raw_security_event>) {
                 return {};  // not a process change
             } else return on_session(record, payload);
         },

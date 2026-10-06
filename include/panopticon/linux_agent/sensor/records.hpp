@@ -186,8 +186,32 @@ struct raw_kernel_event {
     std::vector<std::string> super_options;
 };
 
+enum class security_kind : std::uint8_t {
+    memory_exec_mapping,  // memory that no file on disk backs was made executable
+    bpf_load,             // a process loaded or attached an eBPF program
+};
+
+// A request a process made to the kernel that matters for code execution. The kernel reports it
+// before acting, so it says what was asked, not that it succeeded.
+struct raw_security_event {
+    security_kind kind{security_kind::memory_exec_mapping};
+    std::uint32_t pid{};
+    // memory_exec_mapping
+    std::string operation;  // mmap, mprotect
+    std::string backing;    // anonymous, memfd
+    bool write_exec{false}; // the mapping is writable as well as executable
+    std::uint64_t address{};  // mprotect: start of the mapping the call touched; 0 for mmap
+    std::uint64_t length{};
+    // bpf_load
+    std::string command;       // prog_load, prog_attach, raw_tracepoint_open, link_create
+    std::string program_type;  // prog_load: kprobe, tracing, lsm, xdp, ...
+    std::optional<std::uint32_t> attach_type;
+    std::string name;          // program name (prog_load) or tracepoint name (raw_tracepoint_open)
+};
+
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
-                                 raw_session_change, raw_file_event, raw_network_event, raw_auth_event, raw_kernel_event>;
+                                 raw_session_change, raw_file_event, raw_network_event, raw_auth_event, raw_kernel_event,
+                                 raw_security_event>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

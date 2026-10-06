@@ -11,9 +11,11 @@
 
 #include "panopticon_events.h"
 
+#include <fcntl.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <spawn.h>
 #include <sys/prctl.h>
@@ -204,6 +206,70 @@ void test_decode_network() {
     bad_proto.net_proto = 1U;
     malformed = false;
     require(decode_ebpf_process_sample(&bad_proto, header_size, clock, {}, &malformed).empty() && malformed, "unknown protocol rejected");
+}
+
+void test_decode_security() {
+    clock_domain clock;
+    auto map = base_event(wire::PAN_EVENT_MEM_MAP);
+    map.mem_backing = wire::PAN_MEM_ANON;
+    map.mem_write = 1U;
+    bool malformed = true;
+    auto records = decode_ebpf_process_sample(&map, header_size, clock, {}, &malformed);
+    require(!malformed && records.size() == 1U, "anonymous exec mapping decodes");
+    const auto& anonymous = std::get<raw_security_event>(records[0].payload);
+    require(anonymous.kind == security_kind::memory_exec_mapping && anonymous.operation == "mmap" && anonymous.backing == "anonymous" &&
+                anonymous.write_exec && anonymous.pid == 4242U && anonymous.length == 0U,
+            "mmap shape: no address at the hook, writable and executable");
+    require(records[0].source.provider == "ebpf" && records[0].source.mechanism == "security_mmap_file" && records[0].source.level == confidence::observed,
+            "provenance names the hook");
+
+    auto protect = base_event(wire::PAN_EVENT_MEM_PROTECT);
+    protect.mem_backing = wire::PAN_MEM_MEMFD;
+    protect.mem_addr = 0x7f0000001000ULL;
+    protect.mem_length = 8192U;
+    records = decode_ebpf_process_sample(&protect, header_size, clock, {}, &malformed);
+    const auto& protected_memory = std::get<raw_security_event>(records[0].payload);
+    require(protected_memory.operation == "mprotect" && protected_memory.backing == "memfd" && !protected_memory.write_exec &&
+                protected_memory.address == 0x7f0000001000ULL && protected_memory.length == 8192U,
+            "mprotect carries the mapping it touched");
+
+    auto bad_backing = map;
+    bad_backing.mem_backing = 9U;
+    malformed = false;
+    require(decode_ebpf_process_sample(&bad_backing, header_size, clock, {}, &malformed).empty() && malformed, "unknown backing rejected");
+
+    auto load = base_event(wire::PAN_EVENT_BPF);
+    load.bpf_cmd = 5U;
+    load.bpf_type = 2U;
+    std::strncpy(load.obj_name, "rootkit_hook", sizeof(load.obj_name) - 1U);
+    records = decode_ebpf_process_sample(&load, header_size, clock, {}, &malformed);
+    const auto& program = std::get<raw_security_event>(records[0].payload);
+    require(program.kind == security_kind::bpf_load && program.command == "prog_load" && program.program_type == "kprobe" &&
+                program.name == "rootkit_hook" && !program.attach_type.has_value(),
+            "prog_load names the program type and name");
+
+    auto unknown_type = load;
+    unknown_type.bpf_type = 99U;
+    records = decode_ebpf_process_sample(&unknown_type, header_size, clock, {}, &malformed);
+    require(std::get<raw_security_event>(records[0].payload).program_type == "type_99", "a program type this build does not know keeps its number");
+
+    auto attach = base_event(wire::PAN_EVENT_BPF);
+    attach.bpf_cmd = 28U;
+    attach.bpf_type = 24U;
+    records = decode_ebpf_process_sample(&attach, header_size, clock, {}, &malformed);
+    const auto& link = std::get<raw_security_event>(records[0].payload);
+    require(link.command == "link_create" && link.attach_type == 24U && link.program_type.empty(), "link_create reports the attach type only");
+
+    auto tracepoint = base_event(wire::PAN_EVENT_BPF);
+    tracepoint.bpf_cmd = 17U;
+    std::memset(tracepoint.obj_name, 'x', sizeof(tracepoint.obj_name));  // unterminated: bounded by its field
+    records = decode_ebpf_process_sample(&tracepoint, header_size, clock, {}, &malformed);
+    require(records.size() == 1U && std::get<raw_security_event>(records[0].payload).name.size() == wire::PAN_COMM_LEN, "tracepoint name is bounded by its field");
+
+    auto bad_command = base_event(wire::PAN_EVENT_BPF);
+    bad_command.bpf_cmd = 0U;
+    malformed = false;
+    require(decode_ebpf_process_sample(&bad_command, header_size, clock, {}, &malformed).empty() && malformed, "a command the program never reports is rejected");
 }
 
 void test_decode_credentials_and_ptrace() {
@@ -450,6 +516,96 @@ void test_live_network_connect_accept_listen_udp() {
             "connect provenance and destination");
 }
 
+// The test process asks the kernel for each thing the security hooks report and nothing else, so
+// the records are exactly what it did: an anonymous RWX mapping, a mapping made executable later,
+// an executable memfd mapping and a real bpf(PROG_LOAD). A file-backed executable mapping (every
+// shared library) must not be reported.
+void test_live_executable_memory_and_bpf() {
+    live_provider live{ebpf_role::security};
+    if (!live.begin("live_executable_memory_and_bpf")) return;
+
+    void* rwx = ::mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(rwx != MAP_FAILED, "anonymous rwx mapping");
+    void* again = ::mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(again != MAP_FAILED, "second anonymous rwx mapping");
+
+    void* staged = ::mmap(nullptr, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(staged != MAP_FAILED && ::mprotect(staged, 8192, PROT_READ | PROT_EXEC) == 0, "mapping made executable");
+
+    const int memory_file = static_cast<int>(::syscall(SYS_memfd_create, "panopticon-test", 0U));
+    require(memory_file >= 0 && ::ftruncate(memory_file, 4096) == 0, "memfd");
+    void* from_memfd = ::mmap(nullptr, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, memory_file, 0);
+    require(from_memfd != MAP_FAILED, "executable memfd mapping");
+
+    const int self_file = ::open("/proc/self/exe", O_RDONLY);
+    void* image = ::mmap(nullptr, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, self_file, 0);
+    require(image != MAP_FAILED, "file-backed executable mapping");
+
+    struct instruction {
+        std::uint8_t code;
+        std::uint8_t registers;
+        std::int16_t offset;
+        std::int32_t immediate;
+    };
+    const instruction program[2] = {{0xB7, 0, 0, 0}, {0x95, 0, 0, 0}};  // r0 = 0; exit
+    static const char license[] = "GPL";
+    struct {
+        std::uint32_t prog_type, insn_cnt;
+        std::uint64_t insns, license;
+        std::uint32_t log_level, log_size;
+        std::uint64_t log_buf;
+        std::uint32_t kern_version, prog_flags;
+        char prog_name[16];
+    } attribute;
+    std::memset(&attribute, 0, sizeof(attribute));
+    attribute.prog_type = 1U;  // socket filter
+    attribute.insn_cnt = 2U;
+    attribute.insns = reinterpret_cast<std::uint64_t>(program);
+    attribute.license = reinterpret_cast<std::uint64_t>(license);
+    std::strncpy(attribute.prog_name, "pan_test", sizeof(attribute.prog_name) - 1U);
+    const int loaded = static_cast<int>(::syscall(SYS_bpf, 5, &attribute, sizeof(attribute)));
+    require(loaded >= 0, "bpf(PROG_LOAD) succeeds as root");
+    ::close(loaded);
+
+    const auto self = static_cast<std::uint32_t>(::getpid());
+    const auto mine = [&](const records_t& seen, const std::string& operation, const std::string& backing) {
+        return select<raw_security_event>(seen, [&](const raw_security_event& e) {
+            return e.pid == self && e.kind == security_kind::memory_exec_mapping && e.operation == operation && e.backing == backing;
+        });
+    };
+    const auto loads = [&](const records_t& seen) {
+        return select<raw_security_event>(seen, [&](const raw_security_event& e) {
+            return e.pid == self && e.kind == security_kind::bpf_load && e.command == "prog_load" && e.name == "pan_test";
+        });
+    };
+    records_t all;
+    require(collect(live.queue(), all,
+                    [&](const records_t& seen) {
+                        return !mine(seen, "mmap", "anonymous").empty() && !mine(seen, "mprotect", "anonymous").empty() &&
+                               !mine(seen, "mmap", "memfd").empty() && !loads(seen).empty();
+                    }),
+            "anonymous mmap, mprotect, memfd mmap and bpf load were reported for this process");
+
+    const auto anonymous = mine(all, "mmap", "anonymous");
+    require(anonymous.size() == 1U, "two identical mappings in the window are one report");
+    require(std::get<raw_security_event>(anonymous[0]->payload).write_exec, "an rwx mapping is flagged writable and executable");
+    const auto protects = mine(all, "mprotect", "anonymous");
+    const auto& protection = std::get<raw_security_event>(protects[0]->payload);
+    require(protection.address == reinterpret_cast<std::uint64_t>(staged) && protection.length == 8192U && !protection.write_exec,
+            "mprotect reports the exact mapping that became executable");
+    require(mine(all, "mmap", "file").empty(), "a file-backed executable mapping is never reported");
+    const auto program_load = std::get<raw_security_event>(loads(all)[0]->payload);
+    require(program_load.program_type == "socket_filter", "the program type is named");
+
+    ::munmap(rwx, 4096);
+    ::munmap(again, 4096);
+    ::munmap(staged, 8192);
+    ::munmap(from_memfd, 4096);
+    ::munmap(image, 4096);
+    ::close(memory_file);
+    ::close(self_file);
+}
+
 void test_live_lifecycle_and_arguments() {
     live_provider live;
     if (!live.begin("live lifecycle")) return;
@@ -589,6 +745,7 @@ int main(int argc, char** argv) {
     run("decode_fork_exit_rename", test_decode_fork_exit_rename);
     run("decode_exec_arguments", test_decode_exec_arguments);
     run("decode_network", test_decode_network);
+    run("decode_security", test_decode_security);
     run("decode_credentials_and_ptrace", test_decode_credentials_and_ptrace);
     run("decode_rejects_malformed_samples", test_decode_rejects_malformed_samples);
     run("process_providers_share_a_family", test_process_providers_share_a_family);
@@ -600,6 +757,7 @@ int main(int argc, char** argv) {
     run("live_ptrace_access", test_live_ptrace_access);
     run("live_thread_group_exit_is_one_process_exit", test_live_thread_group_exit_is_one_process_exit);
     run("live_network_connect_accept_listen_udp", test_live_network_connect_accept_listen_udp);
+    run("live_executable_memory_and_bpf", test_live_executable_memory_and_bpf);
     std::cout << (failures == 0 ? std::string{"ALL PASSED"} : "FAILURES: " + std::to_string(failures)) << " (skipped " << skipped << ")\n";
     return failures == 0 ? 0 : 1;
 }

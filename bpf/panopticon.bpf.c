@@ -451,3 +451,129 @@ int BPF_PROG(on_udp6_send, struct sock *sk, struct msghdr *msg, size_t len)
 {
     return udp_flow(sk, msg);
 }
+
+
+// ---- memory and kernel-security hooks (ADR 020) --------------------------------------------
+//
+// Both hooks are LSM-framework call sites, so they run in the process that made the request and
+// the actor is exact. They fire before the kernel acts: the event is a request, not proof that the
+// mapping exists (a later LSM may still refuse it).
+#define PAN_PROT_WRITE 2
+#define PAN_PROT_EXEC 4
+#define PAN_VM_EXEC 4
+#define PAN_MEM_WINDOW_NS 5000000000ULL
+
+struct pan_mem_key {
+    u32 tgid;
+    u8 kind;
+    u8 backing;
+    u8 write;
+    u8 pad;
+};
+
+// One event per (process, operation, backing, writable) per window: a JIT mapping thousands of
+// code pages is one fact, not thousands. An LRU so a hostile process cannot exhaust it.
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 8192);
+    __type(key, struct pan_mem_key);
+    __type(value, u64);
+} mem_seen SEC(".maps");
+
+// memfd files are shmem files whose dentry is named "memfd:<name>".
+static __always_inline u8 file_backing(struct file *file)
+{
+    if (!file)
+        return PAN_MEM_ANON;
+    const unsigned char *name = BPF_CORE_READ(file, f_path.dentry, d_name.name);
+    char prefix[8] = {};
+    if (name)
+        bpf_probe_read_kernel_str(prefix, sizeof(prefix), name);
+    if (prefix[0] == 'm' && prefix[1] == 'e' && prefix[2] == 'm' && prefix[3] == 'f' && prefix[4] == 'd' && prefix[5] == ':')
+        return PAN_MEM_MEMFD;
+    return PAN_MEM_FILE;
+}
+
+static __always_inline int mem_event(u32 kind, u8 backing, u64 prot, u64 start, u64 length)
+{
+    struct pan_mem_key key = {};
+    key.tgid = bpf_get_current_pid_tgid() >> 32;
+    key.kind = (u8)kind;
+    key.backing = backing;
+    key.write = (prot & PAN_PROT_WRITE) ? 1 : 0;
+    u64 now = bpf_ktime_get_boot_ns();
+    u64 *last = bpf_map_lookup_elem(&mem_seen, &key);
+    if (last && now - *last < PAN_MEM_WINDOW_NS)
+        return 0;
+    bpf_map_update_elem(&mem_seen, &key, &now, BPF_ANY);
+
+    struct pan_event *e = event_base(kind);
+    if (!e)
+        return 0;
+    e->mem_backing = backing;
+    e->mem_write = key.write;
+    e->mem_addr = start;
+    e->mem_length = length;
+    net_actor(e);
+    submit(e);
+    return 0;
+}
+
+// A mapping requested executable that no file on disk backs: anonymous memory or a memfd. File
+// mappings are ordinary libraries and programs and are not reported here.
+SEC("fentry/security_mmap_file")
+int BPF_PROG(on_mmap_exec, struct file *file, unsigned long prot, unsigned long flags)
+{
+    if (!(prot & PAN_PROT_EXEC))
+        return 0;
+    u8 backing = file_backing(file);
+    if (backing == PAN_MEM_FILE)
+        return 0;
+    return mem_event(PAN_EVENT_MEM_MAP, backing, prot, 0, 0);
+}
+
+// mprotect() turning a mapping executable: the second half of "write the code, then run it".
+// A file mapping is reported only when it is also writable.
+SEC("fentry/security_file_mprotect")
+int BPF_PROG(on_mprotect_exec, struct vm_area_struct *vma, unsigned long reqprot, unsigned long prot)
+{
+    if (!(prot & PAN_PROT_EXEC))
+        return 0;
+    if (BPF_CORE_READ(vma, vm_flags) & PAN_VM_EXEC)
+        return 0;
+    struct file *file = BPF_CORE_READ(vma, vm_file);
+    u8 backing = file_backing(file);
+    if (backing == PAN_MEM_FILE && !(prot & PAN_PROT_WRITE))
+        return 0;
+    u64 start = BPF_CORE_READ(vma, vm_start);
+    u64 end = BPF_CORE_READ(vma, vm_end);
+    return mem_event(PAN_EVENT_MEM_PROTECT, backing, prot, start, end > start ? end - start : 0);
+}
+
+// bpf(2) commands that put code into the kernel or connect it to something: PROG_LOAD,
+// PROG_ATTACH, RAW_TRACEPOINT_OPEN and LINK_CREATE. Creating maps is routine and is not reported.
+SEC("fentry/security_bpf")
+int BPF_PROG(on_bpf_syscall, int cmd, union bpf_attr *attr, unsigned int size)
+{
+    if (cmd != 5 && cmd != 8 && cmd != 17 && cmd != 28)
+        return 0;
+    struct pan_event *e = event_base(PAN_EVENT_BPF);
+    if (!e)
+        return 0;
+    e->bpf_cmd = (u32)cmd;
+    if (cmd == 5) {
+        e->bpf_type = BPF_CORE_READ(attr, prog_type);
+        BPF_CORE_READ_STR_INTO(&e->obj_name, attr, prog_name);
+    } else if (cmd == 8) {
+        e->bpf_type = BPF_CORE_READ(attr, attach_type);
+    } else if (cmd == 28) {
+        e->bpf_type = BPF_CORE_READ(attr, link_create.attach_type);
+    } else {
+        const char *tracepoint = (const char *)BPF_CORE_READ(attr, raw_tracepoint.name);
+        if (tracepoint)
+            bpf_probe_read_user_str(&e->obj_name, sizeof(e->obj_name), tracepoint);
+    }
+    net_actor(e);
+    submit(e);
+    return 0;
+}

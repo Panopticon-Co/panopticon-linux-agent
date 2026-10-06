@@ -119,6 +119,14 @@ struct auth_record {
     raw_auth_event auth;
 };
 
+// A memory.* or kernel.bpf_* event after the pipeline attached the requesting process.
+struct security_record {
+    std::uint64_t time_unix_ns{};
+    provenance source;
+    entity_ptr actor;  // null when the process had exited by the time the record was handled
+    raw_security_event security;
+};
+
 // A kernel.* or mount.* event. There is no acting process.
 struct kernel_record {
     std::uint64_t time_unix_ns{};
@@ -146,6 +154,9 @@ public:
 
     // network.connect / network.accept / network.listen (catalog §4.3).
     [[nodiscard]] std::string network_event(const network_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+
+    // memory.exec_mapping / kernel.bpf_load (catalog 4.6).
+    [[nodiscard]] std::string security_event(const security_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
 
     // auth.login / auth.failure / auth.privilege (catalog 4.4).
     [[nodiscard]] std::string auth_event(const auth_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
