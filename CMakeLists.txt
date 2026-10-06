@@ -85,6 +85,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/netlink_proc.cpp
         src/sensor/ebpf_process.cpp
         src/sensor/host_state.cpp
+        src/sensor/control.cpp
         src/sensor/pipeline.cpp
     )
     target_include_directories(panopticon-sensor-core PUBLIC include)
@@ -107,6 +108,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(panopticon-sensord PRIVATE panopticon-sensor-core)
     install(TARGETS panopticon-sensord RUNTIME DESTINATION bin)
 
+    add_executable(panopticon-ctl src/sensor/ctl_main.cpp)
+    target_compile_options(panopticon-ctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_link_libraries(panopticon-ctl PRIVATE panopticon-sensor-core)
+    install(TARGETS panopticon-ctl RUNTIME DESTINATION bin)
+
     if(BUILD_TESTING)
         add_executable(panopticon-sensor-tests tests/sensor_tests.cpp)
         target_compile_options(panopticon-sensor-tests PRIVATE -Wall -Wextra -Werror)
@@ -121,10 +127,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(panopticon-ebpf-tests PRIVATE panopticon-sensor-core)
         add_test(NAME panopticon-ebpf-tests COMMAND panopticon-ebpf-tests)
 
-    add_executable(panopticon-state-tests tests/state_tests.cpp)
-    target_compile_options(panopticon-state-tests PRIVATE -Wall -Wextra -Werror)
-    target_link_libraries(panopticon-state-tests PRIVATE panopticon-sensor-core)
-    add_test(NAME panopticon-state-tests COMMAND panopticon-state-tests)
+        add_executable(panopticon-state-tests tests/state_tests.cpp)
+        target_compile_options(panopticon-state-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(panopticon-state-tests PRIVATE panopticon-sensor-core)
+        add_test(NAME panopticon-state-tests COMMAND panopticon-state-tests)
+
+        # The control tests also exercise the panopticon-ctl binary through its path.
+        add_executable(panopticon-control-tests tests/control_tests.cpp)
+        target_compile_options(panopticon-control-tests PRIVATE -Wall -Wextra -Werror)
+        target_compile_definitions(panopticon-control-tests PRIVATE PANOPTICON_CTL_PATH="$<TARGET_FILE:panopticon-ctl>")
+        target_link_libraries(panopticon-control-tests PRIVATE panopticon-sensor-core)
+        add_dependencies(panopticon-control-tests panopticon-ctl)
+        add_test(NAME panopticon-control-tests COMMAND panopticon-control-tests)
     endif()
 endif()
 

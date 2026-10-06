@@ -56,6 +56,10 @@ public:
 
     [[nodiscard]] std::string event(const process_event& event, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
     [[nodiscard]] std::string health(const health_snapshot& snapshot, std::uint64_t seq, std::uint64_t now_unix_ns) const;
+    // The health object without a record envelope: the body of the control-socket `status` reply.
+    [[nodiscard]] static std::string status_json(const health_snapshot& snapshot);
+    // Just the capability -> provider map (null = uncovered).
+    [[nodiscard]] static std::string coverage_json(const health_snapshot& snapshot);
     [[nodiscard]] std::string loss(const loss_report& report, std::uint64_t seq, std::uint64_t now_unix_ns) const;
     // state.processes snapshot part (catalog §5).
     [[nodiscard]] std::string process_state(const std::vector<entity_ptr>& items, std::string_view snapshot_id,

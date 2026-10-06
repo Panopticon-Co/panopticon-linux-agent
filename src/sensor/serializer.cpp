@@ -220,11 +220,19 @@ std::string record_serializer::event(const process_event& event, const std::uint
     return out.take();
 }
 
-std::string record_serializer::health(const health_snapshot& snapshot, const std::uint64_t seq,
-                                      const std::uint64_t now_unix_ns) const {
-    json_writer out;
-    begin(out, "health", "health", seq, now_unix_ns, now_unix_ns, {"sensor", "self", confidence::observed});
-    out.key("health").begin_object();
+namespace {
+
+void write_coverage(json_writer& out, const health_snapshot& snapshot) {
+    out.begin_object();
+    for (const auto& [capability, provider] : snapshot.coverage) {
+        if (provider.empty()) out.field_null(capability);
+        else out.field(capability, provider);
+    }
+    out.end_object();
+}
+
+void write_health_body(json_writer& out, const health_snapshot& snapshot) {
+    out.begin_object();
     out.field("status", snapshot.status);
     out.key("providers").begin_array();
     for (const auto& provider : snapshot.providers) {
@@ -240,12 +248,8 @@ std::string record_serializer::health(const health_snapshot& snapshot, const std
         out.end_object();
     }
     out.end_array();
-    out.key("coverage").begin_object();
-    for (const auto& [capability, provider] : snapshot.coverage) {
-        if (provider.empty()) out.field_null(capability);
-        else out.field(capability, provider);
-    }
-    out.end_object();
+    out.key("coverage");
+    write_coverage(out, snapshot);
     out.key("resources").begin_object();
     out.field("rss_bytes", snapshot.rss_bytes);
     out.field("cpu_milliseconds", snapshot.cpu_milliseconds);
@@ -259,8 +263,30 @@ std::string record_serializer::health(const health_snapshot& snapshot, const std
     out.field("ringbuf", snapshot.ringbuf);
     out.end_object();
     out.end_object();
+}
+
+}  // namespace
+
+std::string record_serializer::health(const health_snapshot& snapshot, const std::uint64_t seq,
+                                      const std::uint64_t now_unix_ns) const {
+    json_writer out;
+    begin(out, "health", "health", seq, now_unix_ns, now_unix_ns, {"sensor", "self", confidence::observed});
+    out.key("health");
+    write_health_body(out, snapshot);
     out.key("unavailable").begin_array().end_array();
     out.end_object();
+    return out.take();
+}
+
+std::string record_serializer::coverage_json(const health_snapshot& snapshot) {
+    json_writer out;
+    write_coverage(out, snapshot);
+    return out.take();
+}
+
+std::string record_serializer::status_json(const health_snapshot& snapshot) {
+    json_writer out;
+    write_health_body(out, snapshot);
     return out.take();
 }
 

@@ -4,8 +4,10 @@
 //   panopticon-sensord --stdout [--duration SECONDS]     development: NDJSON on stdout, no WAL
 //   panopticon-sensord --probe                           print provider availability and exit
 //   panopticon-sensord ... --no-ebpf                     skip the eBPF provider (fallback testing)
+//   panopticon-sensord ... --control-socket PATH         serve status/coverage/state on a 0600 unix socket
 
 #include "panopticon/linux_agent/host.hpp"
+#include "panopticon/linux_agent/sensor/control.hpp"
 #include "panopticon/linux_agent/sensor/ebpf_process.hpp"
 #include "panopticon/linux_agent/sensor/netlink_proc.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
@@ -46,7 +48,7 @@ void install_signal_handlers() {
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: panopticon-sensord (--config PATH | --stdout) [--duration SECONDS] [--proc-root PATH] [--wal PATH] [--no-ebpf]\n"
+                 "usage: panopticon-sensord (--config PATH | --stdout) [--duration SECONDS] [--proc-root PATH] [--wal PATH] [--no-ebpf] [--control-socket PATH]\n"
                  "       panopticon-sensord --probe\n");
     return 2;
 }
@@ -64,6 +66,7 @@ int main(int argc, char** argv) {
     std::string config_path;
     std::string proc_root;
     std::string wal_path;
+    std::string control_socket;
     bool to_stdout = false;
     bool probe_only = false;
     bool no_ebpf = false;
@@ -89,6 +92,10 @@ int main(int argc, char** argv) {
             const auto* value = next();
             if (value == nullptr) return usage();
             proc_root = value;
+        } else if (argument == "--control-socket") {
+            const auto* value = next();
+            if (value == nullptr) return usage();
+            control_socket = value;
         } else if (argument == "--wal") {
             const auto* value = next();
             if (value == nullptr) return usage();
@@ -174,8 +181,22 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "panopticon-sensord: provider %s %s%s%s\n", provider.name.c_str(), provider.state.c_str(),
                      provider.reason.empty() ? "" : ": ", provider.reason.c_str());
     }
+    std::unique_ptr<sensor::control_server> control;
+    if (!control_socket.empty()) {
+        sensor::control_sources sources;
+        sources.status = [&pipeline] { return pipeline.status_json(); };
+        sources.coverage = [&pipeline] { return pipeline.coverage_json(); };
+        sources.state_options.root = config.host_root;
+        control = std::make_unique<sensor::control_server>(control_socket, sensor::make_control_handler(std::move(sources)));
+        if (auto bound = control->start(); !succeeded(bound)) {
+            // Control is a convenience: collection continues without it.
+            std::fprintf(stderr, "panopticon-sensord: control socket disabled: %s\n", std::get<error>(bound).message.c_str());
+            control.reset();
+        }
+    }
     const auto deadline = duration_seconds == 0U ? 0U : sensor::clock_domain::now_monotonic_ns() + duration_seconds * 1'000'000'000ULL;
     const auto finished = pipeline.run(stop_requested, deadline);
+    if (control) control->stop();
     pipeline.shutdown();
     const auto& metrics = pipeline.metrics();
     std::fprintf(stderr, "panopticon-sensord: stopped; records=%llu events=%llu losses=%llu sink_errors=%llu\n",

@@ -253,6 +253,26 @@ health_snapshot sensor_pipeline::health_now() const {
     return snapshot;
 }
 
+std::string sensor_pipeline::status_json() const {
+    const std::lock_guard lock{status_mutex_};
+    return status_cache_;
+}
+
+std::string sensor_pipeline::coverage_json() const {
+    const std::lock_guard lock{status_mutex_};
+    return coverage_cache_;
+}
+
+void sensor_pipeline::refresh_status(const std::uint64_t now_ns) {
+    const auto snapshot = health_now();
+    auto json = record_serializer::status_json(snapshot);
+    auto coverage = record_serializer::coverage_json(snapshot);
+    const std::lock_guard lock{status_mutex_};
+    status_cache_ = std::move(json);
+    coverage_cache_ = std::move(coverage);
+    last_status_ns_ = now_ns;
+}
+
 result<bool> sensor_pipeline::emit_health(const std::uint64_t now_ns) {
     const auto snapshot = health_now();
     return emit([&](const std::uint64_t seq) { return serializer_.health(snapshot, seq, now_ns); });
@@ -355,6 +375,7 @@ result<bool> sensor_pipeline::start() {
     (void)emit_process_state(unix_now);
     (void)emit_host_state(unix_now);
     last_reconcile_ns_ = last_health_ns_ = last_state_ns_ = last_resample_ns_ = now;
+    refresh_status(now);
     started_ = true;
     return sink_.flush(now, true);
 }
@@ -387,6 +408,7 @@ result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono
         (void)emit_host_state(unix_now);
         last_state_ns_ = now_ns;
     }
+    if (now_ns - last_status_ns_ >= ns_per_second) refresh_status(now_ns);
     return sink_.flush(now_ns, false);
 }
 

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -112,8 +113,14 @@ public:
     [[nodiscard]] const pipeline_metrics& metrics() const noexcept { return metrics_; }
     [[nodiscard]] const entity_graph& graph() const noexcept { return graph_; }
     [[nodiscard]] health_snapshot health_now() const;
+    // Health as JSON, cached by the pipeline thread (refreshed at most once a second), so other
+    // threads such as the control socket never touch live pipeline state.
+    [[nodiscard]] std::string status_json() const;
+    [[nodiscard]] std::string coverage_json() const;
 
 private:
+    void refresh_status(std::uint64_t now_ns);
+
     result<bool> emit(const std::function<std::string(std::uint64_t)>& serialise);
     result<bool> emit_events(const std::vector<process_event>& events, std::uint64_t observed_ns);
     result<bool> emit_loss(loss_report report);
@@ -137,6 +144,10 @@ private:
     std::uint64_t last_state_ns_{};
     std::uint64_t last_resample_ns_{};
     std::uint64_t snapshots_{};
+    mutable std::mutex status_mutex_;
+    std::string status_cache_{"{}"};
+    std::string coverage_cache_{"{}"};
+    std::uint64_t last_status_ns_{};
     bool started_{false};
 };
 
