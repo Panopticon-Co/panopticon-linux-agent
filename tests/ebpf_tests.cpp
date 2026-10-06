@@ -15,7 +15,9 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <spawn.h>
 #include <sys/prctl.h>
@@ -35,6 +37,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern char** environ;
@@ -606,6 +609,69 @@ void test_live_executable_memory_and_bpf() {
     ::close(self_file);
 }
 
+std::uint64_t namespace_inode(const char* path) {
+    struct stat status {};
+    if (::stat(path, &status) != 0) throw std::runtime_error{std::string{"stat failed: "} + path};
+    return status.st_ino;
+}
+
+// A thread leaves its UTS and IPC namespaces; the process and every other thread stay. The hook must
+// report the thread that did it, the exact inode numbers before and after (read from procfs by the
+// test as ground truth), and no change in the namespaces nothing touched.
+void test_live_namespace_change() {
+    live_provider live{ebpf_role::security};
+    if (!live.begin("live_namespace_change")) return;
+
+    std::uint32_t thread_id = 0U;
+    std::uint64_t uts_before = 0U, uts_after = 0U, ipc_before = 0U, ipc_after = 0U, net_before = 0U;
+    bool unshared = false;
+    std::thread worker{[&] {
+        thread_id = static_cast<std::uint32_t>(::syscall(SYS_gettid));
+        uts_before = namespace_inode("/proc/thread-self/ns/uts");
+        ipc_before = namespace_inode("/proc/thread-self/ns/ipc");
+        net_before = namespace_inode("/proc/thread-self/ns/net");
+        unshared = ::unshare(CLONE_NEWUTS | CLONE_NEWIPC) == 0;
+        uts_after = namespace_inode("/proc/thread-self/ns/uts");
+        ipc_after = namespace_inode("/proc/thread-self/ns/ipc");
+    }};
+    worker.join();
+    require(unshared, "unshare(CLONE_NEWUTS|CLONE_NEWIPC) as root");
+    require(uts_after != uts_before && ipc_after != ipc_before, "procfs shows the new namespaces");
+
+    const auto self = static_cast<std::uint32_t>(::getpid());
+    records_t all;
+    require(collect(live.queue(), all,
+                    [&](const records_t& seen) {
+                        return !select<raw_namespace_change>(seen, [&](const raw_namespace_change& e) { return e.tgid == self && e.tid == thread_id; }).empty();
+                    }),
+            "the namespace change was reported for the thread that made it");
+    const auto changes = select<raw_namespace_change>(all, [&](const raw_namespace_change& e) { return e.tgid == self && e.tid == thread_id; });
+    require(changes.size() == 1U, "one change for one unshare");
+    const auto& change = std::get<raw_namespace_change>(changes[0]->payload);
+    require(change.before[3] == uts_before && change.after[3] == uts_after, "uts inode numbers match procfs exactly");
+    require(change.before[4] == ipc_before && change.after[4] == ipc_after, "ipc inode numbers match procfs exactly");
+    require(change.before[2] == net_before && change.after[2] == net_before, "the network namespace did not move");
+    require(change.before[0] == change.after[0] && change.before[5] == change.after[5], "mount and cgroup namespaces did not move");
+    require(changes[0]->source.mechanism == "switch_task_namespaces", "provenance names the hook");
+}
+
+void test_decode_namespace_change() {
+    clock_domain clock;
+    auto event = base_event(wire::PAN_EVENT_NS_CHANGE);
+    for (std::uint32_t index = 0U; index < 6U; ++index) {
+        event.ns_old[index] = 4026531800U + index;
+        event.ns_new[index] = 4026531800U + index;
+    }
+    event.ns_new[0] = 4026532500U;
+    event.ns_new[2] = 4026532600U;
+    auto records = decode_ebpf_process_sample(&event, header_size, clock, {});
+    require(records.size() == 1U, "namespace change decodes");
+    const auto& change = std::get<raw_namespace_change>(records[0].payload);
+    require(change.tgid == 4242U && change.before[0] == 4026531800U && change.after[0] == 4026532500U && change.after[2] == 4026532600U &&
+                change.before[1] == change.after[1],
+            "before and after slots are kept in order");
+}
+
 void test_live_lifecycle_and_arguments() {
     live_provider live;
     if (!live.begin("live lifecycle")) return;
@@ -746,6 +812,7 @@ int main(int argc, char** argv) {
     run("decode_exec_arguments", test_decode_exec_arguments);
     run("decode_network", test_decode_network);
     run("decode_security", test_decode_security);
+    run("decode_namespace_change", test_decode_namespace_change);
     run("decode_credentials_and_ptrace", test_decode_credentials_and_ptrace);
     run("decode_rejects_malformed_samples", test_decode_rejects_malformed_samples);
     run("process_providers_share_a_family", test_process_providers_share_a_family);
@@ -758,6 +825,7 @@ int main(int argc, char** argv) {
     run("live_thread_group_exit_is_one_process_exit", test_live_thread_group_exit_is_one_process_exit);
     run("live_network_connect_accept_listen_udp", test_live_network_connect_accept_listen_udp);
     run("live_executable_memory_and_bpf", test_live_executable_memory_and_bpf);
+    run("live_namespace_change", test_live_namespace_change);
     std::cout << (failures == 0 ? std::string{"ALL PASSED"} : "FAILURES: " + std::to_string(failures)) << " (skipped " << skipped << ")\n";
     return failures == 0 ? 0 : 1;
 }

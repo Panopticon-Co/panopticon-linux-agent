@@ -40,6 +40,7 @@ enum pan_event_kind {
     PAN_EVENT_MEM_MAP = 11,     /* anonymous or memfd mapping requested with PROT_EXEC */
     PAN_EVENT_MEM_PROTECT = 12, /* mprotect() made a non-executable mapping executable */
     PAN_EVENT_BPF = 13,         /* bpf() syscall that loads or attaches a program */
+    PAN_EVENT_NS_CHANGE = 14,   /* setns() or unshare() moved a task into other namespaces */
 };
 
 enum pan_mem_backing {
@@ -110,6 +111,8 @@ struct pan_event {
     u8 mem_write;   /* memory: the mapping is writable as well as executable */
     u8 sec_pad[6];
     char obj_name[PAN_COMM_LEN]; /* bpf: program name (PROG_LOAD) or tracepoint name (RAW_TRACEPOINT_OPEN) */
+    u32 ns_old[6]; /* ns change: inode numbers before: mnt, pid_for_children, net, uts, ipc, cgroup */
+    u32 ns_new[6]; /* ns change: inode numbers after, same order */
 
     char comm[PAN_COMM_LEN];      /* task->comm (rename: the new name) */
     char filename[PAN_FILENAME_LEN]; /* exec: bprm->filename */

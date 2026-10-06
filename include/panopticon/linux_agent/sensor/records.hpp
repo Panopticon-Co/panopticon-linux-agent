@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/sensor/process_info.hpp"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -186,6 +187,19 @@ struct raw_kernel_event {
     std::vector<std::string> super_options;
 };
 
+// Order of the namespace slots in raw_namespace_change. The pid slot is the namespace the task's
+// children will be born in: unshare(CLONE_NEWPID) changes it, not the task's own pid namespace.
+inline constexpr std::array<const char*, 6> nsproxy_names{"mnt", "pid_for_children", "net", "uts", "ipc", "cgroup"};
+
+// A task moved into other namespaces with setns(2) or unshare(2). `tid` is the task that did it;
+// it is the process leader only when the whole process was moved.
+struct raw_namespace_change {
+    std::uint32_t tgid{};
+    std::uint32_t tid{};
+    std::array<std::uint32_t, 6> before{};
+    std::array<std::uint32_t, 6> after{};
+};
+
 enum class security_kind : std::uint8_t {
     memory_exec_mapping,  // memory that no file on disk backs was made executable
     bpf_load,             // a process loaded or attached an eBPF program
@@ -211,7 +225,7 @@ struct raw_security_event {
 
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
                                  raw_session_change, raw_file_event, raw_network_event, raw_auth_event, raw_kernel_event,
-                                 raw_security_event>;
+                                 raw_security_event, raw_namespace_change>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

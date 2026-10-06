@@ -36,6 +36,19 @@ struct ancestor_ref {
     std::string executable;
 };
 
+// One namespace a task moved out of (process.ns_change).
+struct namespace_move {
+    std::string name;
+    std::uint64_t from{};
+    std::uint64_t to{};
+};
+
+struct namespace_change_body {
+    bool whole_process{true};  // false: only one thread moved; the process entity keeps its namespaces
+    std::uint32_t thread_id{};
+    std::vector<namespace_move> moves;
+};
+
 struct process_event {
     std::string type;  // catalog §4: process.fork/exec/exit/discovered/cred_change/inject/rename
     std::uint64_t time_unix_ns{};
@@ -49,6 +62,7 @@ struct process_event {
     std::optional<std::string> previous_name;        // process.rename
     std::optional<process_credentials> creds_before; // process.cred_change
     std::optional<std::string> technique;            // process.inject
+    std::optional<namespace_change_body> ns_change;  // process.ns_change
     std::vector<unavailable_field> unavailable;      // event-level, in addition to process ones
     // Filled in by the pipeline (not the graph) for exec and discovery events: the hash of the
     // executed image when it was already known, or status "pending" when it is being computed.
@@ -114,6 +128,7 @@ private:
     std::vector<process_event> on_credentials(const raw_record& record, const raw_credential_change& change);
     std::vector<process_event> on_ptrace(const raw_record& record, const raw_ptrace& trace);
     std::vector<process_event> on_comm(const raw_record& record, const raw_comm_change& change);
+    std::vector<process_event> on_namespaces(const raw_record& record, const raw_namespace_change& change);
     std::vector<process_event> on_session(const raw_record& record, const raw_session_change& change);
 
     entity_graph_options options_;

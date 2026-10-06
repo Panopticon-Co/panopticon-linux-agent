@@ -222,6 +222,22 @@ std::string record_serializer::event(const process_event& event, const std::uint
     if (event.previous_executable.has_value()) out.field("previous_executable", *event.previous_executable);
     if (event.previous_name.has_value()) out.field("previous_name", *event.previous_name);
     if (event.technique.has_value()) out.field("technique", *event.technique);
+    if (event.ns_change.has_value()) {
+        const auto& change = *event.ns_change;
+        out.key("ns_change").begin_object();
+        out.field("scope", change.whole_process ? "process" : "thread");
+        out.field("thread_id", change.thread_id);
+        out.key("changes").begin_array();
+        for (const auto& move : change.moves) {
+            out.begin_object();
+            out.field("ns", move.name);
+            out.field("from", move.from);
+            out.field("to", move.to);
+            out.end_object();
+        }
+        out.end_array();
+        out.end_object();
+    }
     if (event.creds_before.has_value()) {
         const auto& creds = *event.creds_before;
         out.key("creds_before").begin_object();

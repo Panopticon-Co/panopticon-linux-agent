@@ -577,3 +577,46 @@ int BPF_PROG(on_bpf_syscall, int cmd, union bpf_attr *attr, unsigned int size)
     submit(e);
     return 0;
 }
+
+
+// ---- namespace changes (ADR 021) -----------------------------------------------------------
+//
+// setns(2) and unshare(2) both end in switch_task_namespaces(). It runs in the calling task, so
+// the actor is exact. The hook compares the task's current nsproxy with the one about to replace
+// it and reports only a real change. Exit also calls it, with no new nsproxy, and is ignored.
+// User namespaces live in the credentials, not in the nsproxy, and are not reported here.
+static __always_inline void ns_inums(struct nsproxy *proxy, u32 *out)
+{
+    out[0] = BPF_CORE_READ(proxy, mnt_ns, ns.inum);
+    out[1] = BPF_CORE_READ(proxy, pid_ns_for_children, ns.inum);
+    out[2] = BPF_CORE_READ(proxy, net_ns, ns.inum);
+    out[3] = BPF_CORE_READ(proxy, uts_ns, ns.inum);
+    out[4] = BPF_CORE_READ(proxy, ipc_ns, ns.inum);
+    out[5] = BPF_CORE_READ(proxy, cgroup_ns, ns.inum);
+}
+
+SEC("fentry/switch_task_namespaces")
+int BPF_PROG(on_ns_switch, struct task_struct *tsk, struct nsproxy *new_proxy)
+{
+    if (!new_proxy)
+        return 0;
+    struct nsproxy *old_proxy = BPF_CORE_READ(tsk, nsproxy);
+    if (!old_proxy || old_proxy == new_proxy)
+        return 0;
+    struct pan_event *e = event_base(PAN_EVENT_NS_CHANGE);
+    if (!e)
+        return 0;
+    ns_inums(old_proxy, e->ns_old);
+    ns_inums(new_proxy, e->ns_new);
+    int changed = 0;
+#pragma unroll
+    for (int i = 0; i < 6; i++) {
+        if (e->ns_old[i] != e->ns_new[i])
+            changed = 1;
+    }
+    if (!changed)
+        return 0;
+    net_actor(e);
+    submit(e);
+    return 0;
+}

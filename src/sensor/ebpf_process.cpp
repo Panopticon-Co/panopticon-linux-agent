@@ -58,10 +58,11 @@ constexpr std::array<hook, 5U> network_hooks{{
 
 // Hooks on the kernel's LSM call sites. The mmap hook is the one that makes the provider worth
 // having; the others are dropped (and reported) when the kernel cannot host them.
-constexpr std::array<hook, 3U> security_hooks{{
+constexpr std::array<hook, 4U> security_hooks{{
     {"on_mmap_exec", "memory.exec_mapping", true},
     {"on_mprotect_exec", "memory.exec_mapping", false},
     {"on_bpf_syscall", "kernel.bpf_load", false},
+    {"on_ns_switch", "process.ns_change", false},
 }};
 
 std::vector<hook> hooks_for(const ebpf_role role) {
@@ -244,6 +245,17 @@ std::vector<raw_record> decode_ebpf_process_sample(const void* data, const std::
         }
         load.name = std::string{bounded_string(event.obj_name, wire::PAN_COMM_LEN, wire::PAN_COMM_LEN)};
         records.push_back({time, observed("security_bpf"), std::move(load)});
+        break;
+    }
+    case wire::PAN_EVENT_NS_CHANGE: {
+        raw_namespace_change change;
+        change.tgid = event.pid;
+        change.tid = event.tid;
+        for (std::size_t index = 0U; index < change.before.size(); ++index) {
+            change.before[index] = event.ns_old[index];
+            change.after[index] = event.ns_new[index];
+        }
+        records.push_back({time, observed("switch_task_namespaces"), change});
         break;
     }
     default:

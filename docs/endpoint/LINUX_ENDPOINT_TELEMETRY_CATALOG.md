@@ -211,6 +211,17 @@ over five seconds. File-backed mappings, read-only mprotects of file mappings an
 are not reported. JIT runtimes (browsers, JVM, Node, .NET) legitimately produce `memory.*` records,
 so a rule needs the process identity and an allowlist, not the event alone.
 
+### 4.7 `process.ns_change` events as emitted today (ADR 021)
+
+Provenance `{ebpf, switch_task_namespaces, observed}`. The acting `process` (full entity) and an
+`ns_change` body: `scope` (`process` | `thread`), `thread_id`, and `changes[]` of `{ns, from, to}`
+for each of `mnt`, `pid_for_children`, `net`, `uts`, `ipc`, `cgroup` that actually changed.
+`unavailable` always lists `ns_change.user`.
+
+A call that changes nothing is not reported. `nsenter` with several flags is one record per
+namespace type. Container runtimes and daemons that bind a thread to a container network namespace
+produce these records routinely; a rule needs the process identity, not the event alone.
+
 ## 5. State records
 
 `state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,

@@ -178,6 +178,7 @@ std::vector<process_event> entity_graph::apply(const raw_record& record) {
             else if constexpr (std::is_same_v<payload_type, raw_credential_change>) return on_credentials(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_ptrace>) return on_ptrace(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_comm_change>) return on_comm(record, payload);
+            else if constexpr (std::is_same_v<payload_type, raw_namespace_change>) return on_namespaces(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_file_event> || std::is_same_v<payload_type, raw_network_event> ||
                                std::is_same_v<payload_type, raw_auth_event> || std::is_same_v<payload_type, raw_kernel_event> ||
                                std::is_same_v<payload_type, raw_security_event>) {
@@ -370,6 +371,35 @@ std::vector<process_event> entity_graph::on_comm(const raw_record& record, const
     store(updated);
     auto event = make_event("process.rename", record, updated);
     event.previous_name = prior->info.comm;
+    return {std::move(event)};
+}
+
+std::vector<process_event> entity_graph::on_namespaces(const raw_record& record, const raw_namespace_change& change) {
+    const auto prior = lookup_or_load(change.tgid, record.time_unix_ns);
+    if (!prior) return {};
+    const bool whole_process = change.tid == change.tgid;
+    entity_ptr subject = prior;
+    if (whole_process) {
+        // Slots of process_info::namespaces for mnt, (pid_for_children: not a slot), net, uts, ipc, cgroup.
+        constexpr std::array<int, 6> slot{0, -1, 2, 4, 5, 6};
+        auto updated = std::make_shared<process_entity>(*prior);
+        for (std::size_t index = 0U; index < slot.size(); ++index) {
+            if (slot[index] >= 0 && change.after[index] != 0U) updated->info.namespaces[static_cast<std::size_t>(slot[index])] = change.after[index];
+        }
+        store(updated);
+        subject = updated;
+    }
+    namespace_change_body body;
+    body.whole_process = whole_process;
+    body.thread_id = change.tid;
+    for (std::size_t index = 0U; index < change.before.size(); ++index) {
+        if (change.before[index] != change.after[index]) body.moves.push_back({nsproxy_names[index], change.before[index], change.after[index]});
+    }
+    if (body.moves.empty()) return {};
+    auto event = make_event("process.ns_change", record, subject);
+    event.ns_change = std::move(body);
+    // A user namespace is part of the credentials, not the namespace proxy this hook compares.
+    event.unavailable.push_back({"ns_change.user", unavailable_reason::not_supported_by_provider});
     return {std::move(event)};
 }
 
