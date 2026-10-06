@@ -174,6 +174,16 @@ Event body: `process` (actor, resolved through the entity graph; `{pid}` plus `u
 
 Provenance `{sockdiag_network, SOCKDIAG, reconstructed}`: sockets are found by polling the kernel tables every 500 ms and the owner by matching the inode to `/proc/<pid>/fd`, so a connection that closed between polls is not seen and one whose process exited has no owner. Event time is the observation time. `network.close`, `network.udp_flow`, `network.raw_socket` and byte counters are not provided.
 
+### 4.4 `auth.*` events as emitted today (S7.1, ADR 012)
+
+| Type | Meaning | Body |
+| --- | --- | --- |
+| `auth.login` | a successful login: sshd (`publickey`, `password`, ...) or a console login | `process` (`pid` as logged, `unavailable: process_exited`), `auth` (`service`, `method`, `outcome` success, `user`, `source {ip, port}`, `key {type, fingerprint}` for public keys, `tty`) |
+| `auth.failure` | a failed login | as above, `outcome` failure, `invalid_user` when the account does not exist |
+| `auth.privilege` | `sudo`, `su` or `pkexec`, success or failure | `auth` (`service`, `outcome`, `user`, `target_user`, `tty`, `working_directory`, `command`) |
+
+SSH has no separate type: it is `auth.login` or `auth.failure` with `service` `sshd`. Fields that were made printable or cut carry `sanitized` and `truncated`. Provenance `{auth_log, AUTHLOG, user_space_reported}`: the record is what a program chose to log, read from `/var/log/auth.log` or `/var/log/secure` with syslog delay. sudo logs no pid, so its `process` is empty with `unavailable: not_supported_by_provider`. `auth.logout`, session ids and audit-sourced events are not provided.
+
 ## 5. State records
 
 `state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,
