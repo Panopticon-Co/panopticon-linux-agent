@@ -2,11 +2,13 @@
 
 #include "panopticon/linux_agent/sensor/clock.hpp"
 #include "panopticon/linux_agent/sensor/entity_graph.hpp"
+#include "panopticon/linux_agent/sensor/host_state.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
 #include "panopticon/linux_agent/sensor/provider.hpp"
 
 #include <cstdint>
 #include <map>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,6 +61,12 @@ public:
     [[nodiscard]] std::string process_state(const std::vector<entity_ptr>& items, std::string_view snapshot_id,
                                             std::uint32_t part, std::uint32_t parts, std::uint64_t seq,
                                             std::uint64_t now_unix_ns) const;
+
+    // state.<object> snapshot part for host-state inventory objects (catalog §5). `items` are
+    // already-serialised JSON objects; `unavailable` is carried on part 1 only.
+    [[nodiscard]] std::string host_state(const state_snapshot& snapshot, std::span<const std::string> items,
+                                         std::string_view snapshot_id, std::uint32_t part, std::uint32_t parts,
+                                         std::uint64_t seq, std::uint64_t now_unix_ns) const;
 
     void set_policy_version(std::string version) { identity_.policy_version = std::move(version); }
     [[nodiscard]] const sensor_identity& identity() const noexcept { return identity_; }

@@ -687,6 +687,48 @@ void test_pipeline_end_to_end_with_scripted_provider() {
     require(!contains(*exec, "hunter2"), "secret environment never serialised");
 }
 
+void test_pipeline_emits_host_state_parts() {
+    const auto proc = fresh_directory("hostproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(proc);
+    const auto host = fresh_directory("hostroot");
+    write_file(host / "proc/sys/kernel/hostname", "fakehost\n");
+    std::string passwd;
+    for (int i = 0; i < 300; ++i) passwd += "user" + std::to_string(i) + ":x:" + std::to_string(2000 + i) + ":100::/home/u:/bin/sh\n";
+    write_file(host / "etc/passwd", passwd);
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = proc;
+    config.host_root = host;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, {}};
+        value_of(pipeline.start(), "pipeline start");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "seq stays contiguous with state records");
+    }
+    const auto count = [&](const std::string_view needle) {
+        return std::count_if(lines.begin(), lines.end(), [&](const std::string& line) { return contains(line, needle); });
+    };
+    for (const char* object : {"host", "posture", "users", "groups", "interfaces", "mounts", "modules"}) {
+        require(count(std::string{"\"type\":\"state."} + object + "\"") >= 1, std::string{"state."} + object + " emitted");
+    }
+    // 300 accounts at 100 items per part is three parts; unavailable[] rides on part 1 only.
+    require(count("\"type\":\"state.users\"") == 3, "users snapshot split into three parts");
+    const auto first = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"type\":\"state.users\""); });
+    require(first != lines.end() && contains(*first, "\"part\":1,\"parts\":3") && contains(*first, "\"provider\":\"inventory\"") &&
+                contains(*first, "\"object\":\"users\"") && contains(*first, "\"name\":\"user0\""),
+            "first users part: " + *first);
+    const auto host_line = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"type\":\"state.host\""); });
+    require(host_line != lines.end() && contains(*host_line, "\"hostname\":\"fakehost\""), "host state reads the fake root");
+    require(contains(*host_line, "\"unavailable\":[{\"field\":"), "unreadable fields are listed with reasons");
+}
+
 // A provider that belongs to a family and can be told to fail, for the fallback chain.
 class family_provider final : public provider {
 public:
@@ -817,6 +859,7 @@ int main() {
     run("wal_append_read_ack_and_recover", test_wal_append_read_ack_and_recover);
     run("wal_detects_corruption_and_enforces_quota", test_wal_detects_corruption_and_enforces_quota);
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
+    run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("provider_family_prefers_first_and_falls_back", test_provider_family_prefers_first_and_falls_back);
     run("sensor_config_is_strict", test_sensor_config_is_strict);
     run("record_queue_counts_drops_and_keeps_order", test_record_queue_counts_drops_and_keeps_order);

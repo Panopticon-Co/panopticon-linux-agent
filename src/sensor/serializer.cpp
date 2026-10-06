@@ -302,4 +302,34 @@ std::string record_serializer::process_state(const std::vector<entity_ptr>& item
     return out.take();
 }
 
+std::string record_serializer::host_state(const state_snapshot& snapshot, const std::span<const std::string> items,
+                                          const std::string_view snapshot_id, const std::uint32_t part,
+                                          const std::uint32_t parts, const std::uint64_t seq,
+                                          const std::uint64_t now_unix_ns) const {
+    json_writer out;
+    begin(out, "state", "state." + snapshot.object, seq, now_unix_ns, now_unix_ns,
+          {snapshot.provider, snapshot.mechanism, confidence::observed});
+    out.key("state").begin_object();
+    out.field("object", snapshot.object);
+    out.field("snapshot_id", snapshot_id);
+    out.field("part", part);
+    out.field("parts", parts);
+    out.key("items").begin_array();
+    for (const auto& item : items) out.raw(item);
+    out.end_array();
+    out.end_object();
+    out.key("unavailable").begin_array();
+    if (part == 1U) {
+        for (const auto& field : snapshot.unavailable) {
+            out.begin_object();
+            out.field("field", field.field);
+            out.field("reason", to_string(field.reason));
+            out.end_object();
+        }
+    }
+    out.end_array();
+    out.end_object();
+    return out.take();
+}
+
 }  // namespace panopticon::linux_agent::sensor

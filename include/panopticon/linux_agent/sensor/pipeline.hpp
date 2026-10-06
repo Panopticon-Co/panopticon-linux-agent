@@ -35,6 +35,7 @@ struct sensor_config {
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};
     std::filesystem::path proc_root{"/proc"};
+    std::filesystem::path host_root{"/"};  // prefix for host-state inventory; tests point it at a fake tree
 };
 
 // Strict key=value parser: unknown keys, duplicates and out-of-range values are errors.
@@ -118,6 +119,7 @@ private:
     result<bool> emit_loss(loss_report report);
     result<bool> emit_health(std::uint64_t now_ns);
     result<bool> emit_process_state(std::uint64_t now_ns);
+    result<bool> emit_host_state(std::uint64_t now_ns);
     result<bool> collect_losses(std::uint64_t now_ns);
 
     sensor_config config_;

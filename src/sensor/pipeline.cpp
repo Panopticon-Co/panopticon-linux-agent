@@ -275,6 +275,29 @@ result<bool> sensor_pipeline::emit_process_state(const std::uint64_t now_ns) {
     return outcome;
 }
 
+result<bool> sensor_pipeline::emit_host_state(const std::uint64_t now_ns) {
+    host_state_options options;
+    options.root = config_.host_root;
+    result<bool> outcome = true;
+    for (const auto object : state_objects()) {
+        const auto collected = collect_state(object, options);
+        if (!collected.has_value()) continue;
+        const auto& items = collected->items;
+        const auto parts = static_cast<std::uint32_t>(std::max<std::size_t>(1U, (items.size() + state_items_per_part - 1U) / state_items_per_part));
+        const auto snapshot_id = serializer_.identity().sensor_id + "-" + std::string{object} + "-" + std::to_string(++snapshots_);
+        for (std::uint32_t part = 0U; part < parts; ++part) {
+            const auto first = std::min(items.size(), part * state_items_per_part);
+            const auto last = std::min(items.size(), (part + 1U) * state_items_per_part);
+            const std::span<const std::string> slice{items.data() + first, last - first};
+            auto emitted = emit([&](const std::uint64_t seq) {
+                return serializer_.host_state(*collected, slice, snapshot_id, part + 1U, parts, seq, now_ns);
+            });
+            if (!succeeded(emitted)) outcome = emitted;
+        }
+    }
+    return outcome;
+}
+
 result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
     bool reconcile_now = false;
     if (const auto dropped = queue_.take_dropped(); dropped > 0U) {
@@ -330,6 +353,7 @@ result<bool> sensor_pipeline::start() {
     (void)collect_losses(now);  // recovery losses from the WAL
     (void)emit_health(unix_now);
     (void)emit_process_state(unix_now);
+    (void)emit_host_state(unix_now);
     last_reconcile_ns_ = last_health_ns_ = last_state_ns_ = last_resample_ns_ = now;
     started_ = true;
     return sink_.flush(now, true);
@@ -358,7 +382,9 @@ result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono
         last_health_ns_ = now_ns;
     }
     if (now_ns - last_state_ns_ >= config_.state_interval_seconds * ns_per_second) {
-        (void)emit_process_state(clock_domain::now_unix_ns());
+        const auto unix_now = clock_domain::now_unix_ns();
+        (void)emit_process_state(unix_now);
+        (void)emit_host_state(unix_now);
         last_state_ns_ = now_ns;
     }
     return sink_.flush(now_ns, false);
