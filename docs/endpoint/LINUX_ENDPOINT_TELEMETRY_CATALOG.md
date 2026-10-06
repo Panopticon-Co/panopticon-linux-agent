@@ -164,6 +164,16 @@ Event body: `process` (actor, resolved through the entity graph; `{pid}` plus `u
 
 **`state.persistence` item:** `category` (systemd_unit, cron, shell_profile, ssh, ld_preload, init_script, privilege, pam, account, system_config, udev_rule, autostart, kernel_module, login_hook, package_hook), `path`, `kind` (file, symlink, other), `uid`, `gid`, `mode` (07777), `size`, `mtime`, `hash_status` (computed, too_large, unreadable, not_applicable), and when known `sha256`, `target`, `exec` (systemd: program of the first `ExecStart`), `entries` (cron, `ld.so.preload`: active lines), `key_count`, `forced_commands`, `key_digests[]` (`authorized_keys`), `nopasswd` (sudoers lines granting NOPASSWD). File content, key material and key comments are never emitted.
 
+### 4.3 `network.*` events as emitted today (S6.1, ADR 011)
+
+| Type | Meaning | Body |
+| --- | --- | --- |
+| `network.connect` | a new outbound TCP or connected UDP socket | `process` (owner, or `unavailable: process`), `network` (section 3.3: `transport`, `family` ipv4/ipv6, `direction`, `local {ip, port}`, `remote {ip, port}`, `tags[]`, `state`, `socket_inode`, `uid`, `holders` when more than one process holds the socket) |
+| `network.accept` | a new connection to a local listening port (TCP) | as above, `direction` inbound |
+| `network.listen` | a socket started listening, or a UDP socket was bound | as above without `remote`, `direction` listen |
+
+Provenance `{sockdiag_network, SOCKDIAG, reconstructed}`: sockets are found by polling the kernel tables every 500 ms and the owner by matching the inode to `/proc/<pid>/fd`, so a connection that closed between polls is not seen and one whose process exited has no owner. Event time is the observation time. `network.close`, `network.udp_flow`, `network.raw_socket` and byte counters are not provided.
+
 ## 5. State records
 
 `state.host`, `state.posture`, `state.processes`, `state.users`, `state.groups`,
