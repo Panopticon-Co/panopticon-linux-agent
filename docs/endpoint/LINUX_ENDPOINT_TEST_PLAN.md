@@ -69,9 +69,12 @@ process provider runs, so the load is the load the script generates (fork, exec,
 | `rejected` | Manager rejects one line of a batch, 3 times | records quarantined, gap equals the `manager_rejected` loss |
 | `diskfull` | WAL on a 2 MiB tmpfs that fills, then is grown | sensor alive and degraded, no crash, refused records reported as one `wal` loss with reason `write_failed` |
 | `clock` | wall clock stepped +2 days, then -1 day, then back, NTP off | sensor alive, contiguous, event `time` re-based (few records far from `observed_time`) |
+| `powerloss_crash` + `powerloss_verify` | `sysrq-b` (no sync, page cache lost) under load with the Manager refusing; then restart on the surviving WAL | every seq that the sensor had reported durable, read from outside the machine before the crash, arrives; nothing conflicts |
 | `walcorrupt` | 64 random bytes written into the middle of an unacknowledged WAL segment | recovery reports the lost range, no sequence number reused, no conflict |
 
-Not covered yet: power loss with a real page-cache drop (`sysrq-b`), memory pressure, ring-buffer
+Power loss is a guest crash of a VirtualBox VM: it loses the guest page cache and tests the sensor fsync discipline, but it does not reorder or tear writes at the disk, and the host cache survives. Run it with `tests/chaos/run_chaos.sh powerloss_crash` (output read from outside the VM), reboot, then `REQUIRE_SEQ=n tests/chaos/run_chaos.sh powerloss_verify`.
+
+Not covered yet: disk-level torn writes and a real host power cut, memory pressure, ring-buffer
 overflow, forced provider failure, a long real outage with the real Manager, a full disk under the
 state directory rather than the WAL.
 
