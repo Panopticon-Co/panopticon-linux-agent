@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
+#include "panopticon/linux_agent/sensor/persistence.hpp"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -693,9 +694,29 @@ std::string redact_kernel_cmdline(const std::string_view cmdline) {
 }
 
 const std::vector<std::string_view>& state_objects() {
-    static const std::vector<std::string_view> objects{"host", "posture", "users", "groups", "interfaces", "mounts", "modules"};
+    static const std::vector<std::string_view> objects{"host", "posture", "users", "groups", "interfaces", "mounts", "modules", "persistence"};
     return objects;
 }
+
+namespace {
+
+state_snapshot collect_persistence(const host_state_options& options) {
+    persistence_options scan_options;
+    scan_options.root = options.root;
+    scan_options.maximum_items = options.maximum_items;
+    persistence_catalog catalog{scan_options};
+    auto scan = catalog.scan();
+    state_snapshot snapshot;
+    snapshot.object = "persistence";
+    snapshot.mechanism = "FSSCAN";
+    snapshot.truncated = scan.truncated;
+    snapshot.unavailable = std::move(scan.unavailable);
+    snapshot.items.reserve(scan.items.size());
+    for (const auto& item : scan.items) snapshot.items.push_back(persistence_item_json(item));
+    return snapshot;
+}
+
+}  // namespace
 
 std::optional<state_snapshot> collect_state(const std::string_view object, const host_state_options& options) {
     if (object == "host") return collect_host(options);
@@ -705,6 +726,7 @@ std::optional<state_snapshot> collect_state(const std::string_view object, const
     if (object == "interfaces") return collect_interfaces(options);
     if (object == "mounts") return collect_mounts(options);
     if (object == "modules") return collect_modules(options);
+    if (object == "persistence") return collect_persistence(options);
     return std::nullopt;
 }
 
