@@ -204,3 +204,67 @@ What the numbers do and do not say:
 - Records spooled to the WAL without a Manager reach the WAL quota in this test (the quota drops the oldest
   segments and says so: `quota: seq a-b`); `loss_records` in `status` counted none from the kernel or the pipeline.
 - Not measured: more than one heavy workload at once, other kernels or hardware, p99 added latency per call.
+
+## 7. Network storm: where the sensor saturates and whether the loss is reported (S13.9)
+
+`tests/perf/run_netstorm.sh` drives a rate-controlled loopback TCP storm (`tests/perf/netstorm.py`: connect, 100 bytes
+each way, close; every connection is four network events: connect, accept and the two closes) against a real
+`panopticon-sensord` with default providers and a WAL (no Manager), waits for the pipeline to drain, and reconciles
+**events the network provider handed over** with **events that reached the WAL** and the **loss the sensor reported**.
+Ubuntu 22.04, kernel 5.15, x86_64, VirtualBox VM with 8 vCPUs, 4 GiB, ext4 on a virtual disk that sustains 57 to
+65 MB/s sequential writes (`dd ... conv=fdatasync`). The generator is pinned to CPUs 0 to 3 (4 processes) so it does
+not compete with the sensor's reader thread; 12 s per step.
+
+| Offered (connections/s) | Provider events | Delivered to the WAL | Reported loss | Unaccounted | Pipeline thread CPU |
+| --- | --- | --- | --- | --- | --- |
+| 1481 | 73567 | 73570 | none | 0 | 38 % |
+| 2949 | 144802 | 144812 | none | 0 | 60 % |
+| 4471 | 216841 | 172138 | `queue` 44709 | 0 | 51 % |
+| 6567 (generator unlimited) | 319432 | 154392 | `queue` 165037 | 0 | 48 % |
+
+("Unaccounted" is provider events minus delivered minus reported loss; the few events the sensor emits itself make it a
+number between -10 and +11, never a gap.) **No kernel ring buffer loss occurred in any of these runs**: the 4 MiB ring
+holds about 12000 network records and the reader keeps up. The sensor is therefore loss-free to roughly **12000 events
+per second** (3000 connections/s) on this VM and sheds beyond roughly **14000 to 19000 events per second**, and what it
+sheds is counted and reported. The amount shed at a given offered rate varies a lot from run to run (three runs of the
+same 5000 connections/s step lost 86131 unreported before the fix, then 36799 and 73817 reported), so the table is a
+picture of the boundary, not a repeatable benchmark figure.
+
+What this found, in the order it was found:
+
+1. **A silent loss, now fixed.** The first runs showed the provider counting 238472 events and the WAL holding 152341
+   records with `loss_records` 0: 86131 events (36 %) vanished with no loss record. `record_queue` counted what it refused
+   when full and nothing ever read the count (`take_dropped()` was called only by a unit test), although the capability
+   matrix claimed queue loss was reported. `collect_losses` now turns it into a `loss` record (`stage: queue`, exact count)
+   and a reconcile of the entity graph. `pipeline_reports_records_the_queue_refused` fails with the reporting disabled
+   (checked). This also corrects the earlier wording "no silent gap in 12 scenarios": the chaos suite never overflowed the
+   in-memory queue, so it could not see this. The `ringoverflow` scenario overflows the kernel ring buffer.
+2. **The ceiling is the single pipeline thread, and it is not CPU alone.** Profiling the pipeline thread under the storm
+   (`perf record`): 13.5 % `encode_wal_frame` (a byte-at-a-time CRC-32C over about 2.2 KB per record), 7 % JSON string
+   escaping, about 8 % kernel page zeroing for the page cache, and the rest spread over serialisation, allocation and
+   `write`. Moving the CRC to the SSE4.2 instruction (the same CRC-32C value; the table version remains for other CPUs and
+   is checked against it) cut the thread's CPU per record from **63 to 76 us down to 50 to 54 us** (three alternating
+   before/after pairs on the same storm). The thread is still only about 50 to 60 % busy when it saturates: it also
+   blocks in `fdatasync` (ADR 008: every 256 KiB or 200 ms; at 33 MB/s that is about 130 synchronous syncs a second on a
+   disk that takes milliseconds for each). A throwaway build with the byte trigger raised to 4 MiB delivered 182018
+   instead of 172138 events at 4500 connections/s: +6 %, smaller than this scenario's run-to-run spread, so it shows no
+   effect worth weakening the ADR 008 durability window for, and it was **not adopted**. Overlapping serialisation with
+   the sync on a second thread would raise the ceiling toward the CPU bound (about 20000 records/s at 50 us), at the cost
+   of WAL concurrency that has to be proven under TSAN; it is future work, not done.
+3. **Where loss does come from the kernel, it is contention, not capacity.** In earlier 4-vCPU runs with the generator
+   unpinned, the kernel ring overflowed (11368 events at 8000 connections/s offered, 217864 in one unconstrained run at
+   a sensor CPU of only 55 %) because the generator's busy processes starved the reader thread of CPU. With the generator
+   confined to its own CPUs no ring loss appeared in any run here. Those losses were also reported exactly (the BPF `drops`
+   map counts every `bpf_ringbuf_output` failure). The message "number of lost events is unknown" that the pipeline
+   attaches to every `kernel` loss is generic and wrong for eBPF, where the count is exact; it is right for netlink, audit
+   and fanotify, where a count is overflow notices.
+4. **Not claimed:** "zero loss under load". The honest statement is: no loss up to about 12000 network events a second
+   on this VM, exact accounting of everything beyond it. A bigger queue absorbs bursts (`queue_capacity`, default 65536
+   records, a few seconds at the observed drain rate) but not a sustained overload; the choice between a larger queue and
+   shedding earlier is a memory-for-latency trade that the operator can make.
+
+A caution about the 8-vCPU configuration of this VM: the kernel's per-program run time is wall time, and on 8 vCPUs the
+same binary averaged 3 to 6 us per hook call in some windows of 300 spawns and 40 to 58 us in others, where with CPUs
+4 to 7 offlined in the guest every window was 2.5 to 6 us. Section 6's figures were taken on 4 vCPUs and are not
+re-measured here. `live_wake_policy` now judges the hook cost on the best of five windows of 100 spawns (a build that
+wakes the reader on every record costs 535 us in its best window and still fails; checked).
