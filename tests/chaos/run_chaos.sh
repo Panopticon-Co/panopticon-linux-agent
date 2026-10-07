@@ -2,7 +2,7 @@
 # Real-kernel chaos scenarios for the sensor's WAL, uplink and recovery paths (test plan section 5).
 #
 # usage: sudo tests/chaos/run_chaos.sh [scenario ...]        (default: every scenario)
-#   scenarios: baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt
+#   scenarios: baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt ringoverflow memcap nofile
 #   power loss needs a reboot, so it is two runs (see scenario_powerloss_crash)
 #
 # Needs root (eBPF process provider), python3, openssl and a built build/panopticon-sensord.
@@ -97,6 +97,8 @@ kill_sensor() {
   SENSOR=; rm -f "$W/ctl.sock"
 }
 alive() { [ -n "${SENSOR:-}" ] && kill -0 "$SENSOR" 2>/dev/null; }
+# Peak and current resident memory of the sensor in MiB (VmHWM / VmRSS), "?" when it is gone.
+rss_peak_mb() { awk '/^VmHWM:/ {printf "%d", $2 / 1024; f=1} END {if (!f) printf "?"}' "/proc/${SENSOR:-0}/status" 2>/dev/null; }
 
 status() { "$CTL" --socket "$W/ctl.sock" status 2>/dev/null; }
 # field of the status reply, e.g. status_field wal.durable_seq
@@ -134,6 +136,18 @@ load() {
   LOADPID=$!
 }
 wait_load() { [ -n "${LOADPID:-}" ] && wait "$LOADPID" 2>/dev/null; }
+
+# Waits until the store holds `count` exec events of the process called `name` (the pipeline can trail the WAL
+# acknowledgements by seconds after a burst, so "drained" alone does not mean everything was processed).
+wait_exec_seen() { # name count timeout
+  local seen=0 i
+  for i in $(seq 1 "${3:-60}"); do
+    seen=$(analyze --count-exec "$1" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["exec_named"]["'"$1"'"])' 2>/dev/null)
+    [ "${seen:-0}" -ge "$2" ] && return 0
+    sleep 1
+  done
+  return 1
+}
 
 analyze() { python3 "$HERE/analyze.py" "$W/store.ndjson" --json "$@"; }
 jfield() { python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[sys.argv[1]])' "$1"; }
@@ -278,6 +292,95 @@ scenario_walcorrupt() {
     "stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported) conflicts=$(echo "$out" | jfield conflicts)"
 }
 
+# The kernel ring buffer overflows: the sensor is stopped (SIGSTOP) while 6000 processes run, so the
+# 4 MiB buffer fills and the BPF program drops. The sensor must survive, report the overflow as a
+# `kernel` loss, deliver at least part of the storm plus everything that happens after SIGCONT, and
+# the events it saw plus the losses it reported must cover what was generated.
+scenario_ringoverflow() {
+  reset_run; write_conf </dev/null; start_manager && start_sensor || return
+  cp /bin/true "$W/chaosstorm"; cp /bin/true "$W/chaospost"
+  load 3 0.02; wait_load; wait_drained 30
+  kill -STOP "$SENSOR"
+  local storm=6000 i
+  for i in $(seq 1 $storm); do "$W/chaosstorm"; done
+  kill -CONT "$SENSOR"
+  sleep 8
+  for i in $(seq 1 50); do "$W/chaospost"; done
+  wait_drained 90
+  local alive=no; alive && alive=yes
+  local out; out=$(analyze --count-exec chaosstorm,chaospost); local rc=$?
+  local rss; rss=$(rss_peak_mb)
+  stop_sensor
+  local seen post lost
+  seen=$(echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["exec_named"]["chaosstorm"])')
+  post=$(echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["exec_named"]["chaospost"])')
+  lost=$(echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["other_loss_reported"].get("kernel", 0))')
+  say "ringoverflow losses: $(echo "$out" | jfield loss_records)"
+  local ok=FAIL
+  [ "$alive" = yes ] && [ $rc = 0 ] && [ "$lost" -gt 0 ] && [ "$seen" -gt 0 ] && [ "$seen" -lt "$storm" ] \
+    && [ $((seen + lost)) -ge "$storm" ] && [ "$post" = 50 ] && ok=PASS
+  verdict ringoverflow "$ok" "generated=$storm seen=$seen kernel_loss_reported=$lost post_storm_seen=$post/50 peak_rss=${rss}MiB stored=$(echo "$out" | jfield stored)"
+}
+
+# Memory pressure: the sensor lives in a cgroup whose limit is only a little above its working set
+# while it takes an exec storm and the Manager is down (so the WAL grows). It must not be OOM-killed,
+# its memory must stay bounded, and nothing may go missing without a loss record.
+scenario_memcap() {
+  local cg=/sys/fs/cgroup/chaos-mem limit=$((48 * 1024 * 1024))
+  [ -f /sys/fs/cgroup/cgroup.controllers ] || { verdict memcap SKIP "no cgroup v2"; return; }
+  rmdir "$cg" 2>/dev/null
+  mkdir "$cg" 2>/dev/null || { verdict memcap SKIP "cannot create $cg"; return; }
+  echo "+memory" >/sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
+  reset_run; write_conf </dev/null; start_manager && start_sensor || { rmdir "$cg"; return; }
+  echo "$limit" >"$cg/memory.max"; echo 0 >"$cg/memory.swap.max" 2>/dev/null
+  echo "$SENSOR" >"$cg/cgroup.procs"
+  cp /bin/true "$W/chaosstorm"
+  echo http503 >"$W/mode"                       # nothing is acknowledged: the backlog builds up
+  load 20 0
+  local i; for i in $(seq 1 3000); do "$W/chaosstorm"; done
+  wait_load
+  echo ok >"$W/mode"
+  wait_drained 120
+  local alive=no; alive && alive=yes
+  local oom; oom=$(awk '/^oom_kill / {print $2}' "$cg/memory.events")
+  local current; current=$(( $(cat "$cg/memory.current") / 1048576 ))
+  local rss; rss=$(rss_peak_mb)
+  local out; out=$(analyze --count-exec chaosstorm); local rc=$?
+  stop_sensor; rmdir "$cg" 2>/dev/null
+  verdict memcap "$([ "$alive" = yes ] && [ "${oom:-1}" = 0 ] && [ $rc = 0 ] && echo PASS || echo FAIL)" \
+    "limit=48MiB alive=$alive oom_kill=${oom:-?} peak_rss=${rss}MiB cgroup_current=${current}MiB stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) accounted=$(echo "$out" | jfield accounted)"
+}
+
+# Descriptor exhaustion: the soft and hard RLIMIT_NOFILE of a running sensor are cut to a few above
+# what it holds at rest, with file events and hashing on so each event wants more descriptors. It must
+# stay up, keep delivering, and pick up again when the limit is raised.
+scenario_nofile() {
+  reset_run; write_conf </dev/null
+  sed -i 's/^enable_file_events=.*/enable_file_events=true/; s/^enable_hashing=.*/enable_hashing=true/' "$W/sensor.conf"   # duplicate keys are refused
+  start_manager && start_sensor || return
+  sleep 3
+  local held; held=$(ls "/proc/$SENSOR/fd" | wc -l)
+  local limit=$held                               # nothing new can be opened: no socket, no /proc file, no hashed file
+  prlimit --pid "$SENSOR" --nofile="$limit:$limit" || { verdict nofile SKIP "prlimit unavailable"; return; }
+  cp /bin/true "$W/chaosstorm"; cp /bin/true "$W/chaospost"
+  load 15 0
+  local i; for i in $(seq 1 1500); do "$W/chaosstorm"; echo x >"$W/scratch-$((i % 50))"; done
+  wait_load
+  local alive=no; alive && alive=yes
+  say "nofile: held=$held limit=$limit alive=$alive status=$(status_field status) sink_errors=$(status_field totals.sink_errors)"
+  prlimit --pid "$SENSOR" --nofile=65536:65536
+  sleep 6
+  for i in $(seq 1 30); do "$W/chaospost"; done
+  wait_exec_seen chaospost 30 90
+  wait_drained 90
+  local out; out=$(analyze --count-exec chaosstorm,chaospost); local rc=$?
+  local post; post=$(echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["exec_named"]["chaospost"])')
+  alive=no; alive && alive=yes
+  stop_sensor
+  verdict nofile "$([ "$alive" = yes ] && [ $rc = 0 ] && [ "$post" = 30 ] && echo PASS || echo FAIL)" \
+    "held=$held limit=$limit alive=$alive recovered_post_seen=$post/30 stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) accounted=$(echo "$out" | jfield accounted)"
+}
+
 # Power loss, phase 1. Crashes the machine with sysrq-b (no sync, no unmount: the page cache is lost) while the
 # sensor is writing under load and the Manager is refusing, so nothing is acknowledged. The lines "DURABLE n" go
 # to stdout (read them from outside the machine: files here would be subject to the same loss); n is a seq the
@@ -323,7 +426,7 @@ scenario_powerloss_verify() {
 [ -x "$SENSORD" ] || { echo "build first: $SENSORD" >&2; exit 2; }
 SCENARIOS=("$@")
 case " ${SCENARIOS[*]:-} " in *" powerloss_verify "*) ;; *) setup ;; esac
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt)
+[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt ringoverflow memcap nofile)
 for name in "${SCENARIOS[@]}"; do
   say "=== $name"
   "scenario_$name"

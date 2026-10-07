@@ -70,13 +70,19 @@ process provider runs, so the load is the load the script generates (fork, exec,
 | `diskfull` | WAL on a 2 MiB tmpfs that fills, then is grown | sensor alive and degraded, no crash, refused records reported as one `wal` loss with reason `write_failed` |
 | `clock` | wall clock stepped +2 days, then -1 day, then back, NTP off | sensor alive, contiguous, event `time` re-based (few records far from `observed_time`) |
 | `powerloss_crash` + `powerloss_verify` | `sysrq-b` (no sync, page cache lost) under load with the Manager refusing; then restart on the surviving WAL | every seq that the sensor had reported durable, read from outside the machine before the crash, arrives; nothing conflicts |
+| `ringoverflow` | sensor SIGSTOPped while 6000 processes run, so the 4 MiB kernel ring buffer fills; then SIGCONT and 50 more processes | sensor alive, overflow reported as a `kernel` loss, part of the storm delivered, events seen plus losses reported cover the 6000 generated, all 50 later processes seen, resident memory bounded (37 MiB peak) |
+| `memcap` | sensor in a 48 MiB cgroup v2 limit during a 3000-process storm with the Manager refusing, then accepting | no OOM kill, peak resident memory 38 MiB, contiguous |
+| `nofile` | `RLIMIT_NOFILE` of the running sensor cut to exactly the descriptors it holds (file events and hashing on) during a storm and file writes, then raised | sensor alive, records it could not write are reported as `write_failed` loss (4 in the run), no silent gap, all 30 processes after the limit was raised are delivered |
 | `walcorrupt` | 64 random bytes written into the middle of an unacknowledged WAL segment | recovery reports the lost range, no sequence number reused, no conflict |
 
 Power loss is a guest crash of a VirtualBox VM: it loses the guest page cache and tests the sensor fsync discipline, but it does not reorder or tear writes at the disk, and the host cache survives. Run it with `tests/chaos/run_chaos.sh powerloss_crash` (output read from outside the VM), reboot, then `REQUIRE_SEQ=n tests/chaos/run_chaos.sh powerloss_verify`.
 
-Not covered yet: disk-level torn writes and a real host power cut, memory pressure, ring-buffer
-overflow, forced provider failure, a long real outage with the real Manager, a full disk under the
-state directory rather than the WAL.
+Forced provider failure was probed by hand rather than scripted: with `kernel.ftrace_enabled=0` set before the sensor starts, the kernel refuses every fentry attach with `-EBUSY`, so `ebpf_network` and `ebpf_security` report `unavailable` with the libbpf reason, `sockdiag_network` takes over, and the process role (tracepoints) keeps working. With the sensor running the kernel refuses to set the sysctl at all (`EBUSY`). So that evasion is not silent on kernel 5.15.
+
+Not covered yet: disk-level torn writes and a real host power cut, a long real outage with the real
+Manager, a full disk under the state directory for the FIM baseline (the command ledger's append
+failure is unit tested and covered by `run_command_chaos_e2e.sh`), a scripted provider-failure
+scenario, failures of the response executor under resource pressure.
 
 ## 6. Security tests
 

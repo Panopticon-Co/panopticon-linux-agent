@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks what the fake Manager stored against the delivery guarantees of the sensor.
 
-usage: analyze.py <store.ndjson> [--min-seq N] [--require-through N] [--allow-gaps] [--json]
+usage: analyze.py <store.ndjson> [--min-seq N] [--require-through N] [--allow-gaps] [--count-exec name,name] [--json]
 
 Exit status is non-zero when:
   * one seq was stored with two different payloads (conflict), or
@@ -41,6 +41,9 @@ def main():
     other_loss = {}
     loss_details = []
     batches = set()
+    count_exec = {}
+    if "--count-exec" in sys.argv:
+        count_exec = {name: 0 for name in sys.argv[sys.argv.index("--count-exec") + 1].split(",")}
     with open(path, "r", encoding="utf-8") as handle:
         for text in handle:
             row = json.loads(text)
@@ -58,6 +61,8 @@ def main():
                 # offset is stale (a clock step it has not noticed) or the sensor is far behind.
                 lag = abs(parse_time(record["time"]) - parse_time(record["observed_time"]))
                 skewed_events += 1 if lag > 5.0 else 0
+            if kind == "process.exec" and record.get("process", {}).get("name") in count_exec:
+                count_exec[record["process"]["name"]] += 1
             if kind == "health":
                 health_dropped = max(health_dropped, record.get("health", {}).get("wal", {}).get("dropped_records", 0))
             if kind == "loss":
@@ -108,6 +113,7 @@ def main():
         "accounted": accounted,
         "write_failed_reported": write_failed,
         "skewed_events": skewed_events,
+        "exec_named": count_exec,
         "other_loss_reported": other_loss,
         "conflicts": conflicts,
         "batches": len(batches),
