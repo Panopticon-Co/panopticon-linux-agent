@@ -798,6 +798,15 @@ result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
                                  last_write_error_ + "); their sequence numbers were not used, so the stream has no gap"});
         }
     }
+    // Records the providers could not queue because the pipeline was behind: counted by the queue, never
+    // by a provider, so nothing else would ever say they existed. A dropped fork, exec or exit also
+    // leaves the entity graph wrong, hence the reconcile.
+    if (const auto dropped = queue_.take_dropped(); dropped > 0U) {
+        (void)emit_loss({"queue", dropped, {},
+                         "the in-memory record queue (capacity " + std::to_string(config_.queue_capacity) + ") was full: " + std::to_string(dropped) +
+                             " event(s) were dropped before the pipeline could process them"});
+        reconcile_now = true;
+    }
     for (const auto& source : providers_) {
         if (const auto governed = source->take_governed(); governed > 0U) {
             (void)emit_loss({"governor", governed, {},

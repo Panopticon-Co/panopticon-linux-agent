@@ -1525,6 +1525,49 @@ void test_pipeline_reports_records_the_sink_refused() {
     require(cause_named, "the cause is named");
 }
 
+// A burst that fills the in-memory queue used to vanish without a trace: the queue counted what it refused and nothing
+// ever read the count (found by comparing a network provider's event count with the records in the WAL under a
+// loopback connection storm). The loss must be written, with the exact count, and the stream must stay gap free.
+void test_pipeline_reports_records_the_queue_refused() {
+    const auto root = fresh_directory("queueloss");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    config.queue_capacity = 8U;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    auto script = std::make_unique<scripted_provider>(std::vector<raw_record>{});
+    auto* handle = script.get();
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::move(script));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        std::vector<raw_record> burst;
+        for (std::uint32_t pid = 100U; pid < 120U; ++pid) burst.push_back(record_of(raw_fork{1U, 1U, pid, pid, std::nullopt}));
+        handle->push(std::move(burst));
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        const auto reconciles = pipeline.metrics().reconciles;
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        require(pipeline.metrics().reconciles == reconciles, "the loss is reported once, not on every step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "a queue loss does not leave a gap in the sequence numbers");
+    }
+    std::size_t loss_records = 0U;
+    for (const auto& line : lines) {
+        if (!contains(line, R"("stage":"queue")")) continue;
+        ++loss_records;
+        require(contains(line, R"("count":12)"), "the loss carries the exact number of refused records (20 pushed, 8 fit)");
+    }
+    require(loss_records == 1U, "exactly one queue loss record is written: " + std::to_string(loss_records));
+}
+
 void test_pipeline_rebases_event_times_after_a_clock_step() {
     const auto root = fresh_directory("clockstepproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
@@ -2204,6 +2247,7 @@ int main() {
     run("pipeline_tcp_close_event", test_pipeline_tcp_close_event);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
+    run("pipeline_reports_records_the_queue_refused", test_pipeline_reports_records_the_queue_refused);
     run("pipeline_rebases_event_times_after_a_clock_step", test_pipeline_rebases_event_times_after_a_clock_step);
     run("pipeline_reports_delivery_and_turns_rejections_into_loss", test_pipeline_reports_delivery_and_turns_rejections_into_loss);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);
