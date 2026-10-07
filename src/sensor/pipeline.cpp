@@ -697,6 +697,21 @@ result<bool> sensor_pipeline::emit_loss(loss_report report) {
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.loss(report, seq, now); });
     if (succeeded(emitted)) {
         ++metrics_.loss_records;
+        written_losses_.push_back({last_emitted_seq_, report});
+        constexpr std::size_t maximum_tracked = 8192U;
+        if (written_losses_.size() > maximum_tracked) {
+            // Fold the oldest entry into the next of its stage (it keeps the older seq, so it is carried as soon as that
+            // one is dropped, possibly while the newer record still exists: an over-report, never an under-report).
+            const auto next = std::find_if(written_losses_.begin() + 1, written_losses_.end(),
+                                           [&](const written_loss& other) { return other.report.stage == written_losses_.front().report.stage; });
+            if (next != written_losses_.end()) {
+                written_losses_.front().report.count += next->report.count;
+                for (const auto& [name, count] : next->report.by_type) written_losses_.front().report.by_type[name] += count;
+                written_losses_.erase(next);
+            } else {
+                written_losses_.erase(written_losses_.begin());
+            }
+        }
         return emitted;
     }
     // Keep the report and write it once the sink accepts records again. It is not an unwritten
@@ -706,6 +721,39 @@ result<bool> sensor_pipeline::emit_loss(loss_report report) {
     if (pending_losses_.size() < maximum_pending) pending_losses_.push_back(std::move(report));
     else pending_losses_.back().count += report.count;
     return emitted;
+}
+
+// A range the log dropped may hold loss records this process wrote: what they reported would vanish with them. Write it
+// again, one record per stage with the summed count, so the newest loss records always explain the whole gap. For the
+// "wal" stage the count is a number of sequence numbers; the dropped loss record's own seq is inside the range being
+// reported now, so every missing seq is still counted exactly once.
+void sensor_pipeline::carry_dropped_loss_reports(const std::vector<wal_loss>& dropped) {
+    std::map<std::string, loss_report> carried;
+    std::map<std::string, std::uint64_t> reports;
+    for (const auto& loss : dropped) {
+        if (loss.last_seq == 0U) continue;  // open ended (a torn tail at recovery): nothing this process wrote
+        for (auto entry = written_losses_.begin(); entry != written_losses_.end();) {
+            if (entry->seq < loss.first_seq || entry->seq > loss.last_seq) {
+                ++entry;
+                continue;
+            }
+            auto& into = carried[entry->report.stage];
+            if (into.stage.empty()) {
+                into.stage = entry->report.stage;
+                into.detail = entry->report.detail;
+            }
+            into.count += entry->report.count;
+            for (const auto& [name, count] : entry->report.by_type) into.by_type[name] += count;
+            ++reports[entry->report.stage];
+            entry = written_losses_.erase(entry);
+        }
+    }
+    for (auto& [stage, report] : carried) {
+        constexpr std::size_t maximum_detail = 160U;
+        report.detail = "carried forward: " + std::to_string(reports[stage]) + " earlier " + stage +
+                        " loss record(s) were removed from the write-ahead log before delivery; the first said: " + report.detail.substr(0U, maximum_detail);
+        (void)emit_loss(std::move(report));
+    }
 }
 
 void sensor_pipeline::write_instance_marker(const std::uint64_t unix_now, const bool clean) {
@@ -1018,13 +1066,22 @@ result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
         last_storage_check_ns_ = now_ns;
         sink_.verify_storage();
     }
-    for (const auto& loss : sink_.take_losses()) {
+    if (!written_losses_.empty()) {
+        // Acknowledged loss records have been delivered; only unacknowledged ones can still be dropped.
+        const auto acknowledged = sink_.metrics().acknowledged_seq;
+        written_losses_.erase(std::remove_if(written_losses_.begin(), written_losses_.end(),
+                                             [&](const written_loss& entry) { return entry.seq <= acknowledged; }),
+                              written_losses_.end());
+    }
+    const auto dropped = sink_.take_losses();
+    for (const auto& loss : dropped) {
         loss_report report{"wal", loss.records, {{loss.reason, loss.records}}, {}};
         report.detail = loss.reason + ": seq " + std::to_string(loss.first_seq) +
                         (loss.last_seq != 0U ? "-" + std::to_string(loss.last_seq) : std::string{"+"}) + ", " +
                         std::to_string(loss.bytes) + " bytes";
         (void)emit_loss(std::move(report));
     }
+    carry_dropped_loss_reports(dropped);
     if (reconcile_now) {
         const auto unix_now = clock_domain::now_unix_ns();
         (void)emit_events(graph_.reconcile(unix_now), unix_now);

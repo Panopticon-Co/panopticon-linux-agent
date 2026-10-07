@@ -63,7 +63,7 @@ process provider runs, so the load is the load the script generates (fork, exec,
 | --- | --- | --- |
 | `baseline` | none | stream contiguous |
 | `kill9` | `kill -9` of the sensor 14 times in 70 s under load | contiguous, no conflicting payloads |
-| `outage` | Manager killed, short (under the WAL quota) then long (over a 2 MiB quota) | short: nothing lost; long: the gap is reported (loss records plus the cumulative `wal.dropped_records` of the newest health record) |
+| `outage` | Manager killed, short (under the WAL quota) then long (over a 2 MiB quota) | short: nothing lost; long: the loss records that reached the Manager alone explain the whole gap (at least as many as missing seqs; the cumulative `wal.dropped_records` of a health record is a cross-check, not the proof) |
 | `ackloss` | Manager stores a batch then drops the connection, 6 times | duplicates absorbed, contiguous |
 | `badack` / `http503` / `slowack` | acknowledgement that does not add up / 503 / 3 s delay | cursor does not move on a bad answer, delivery resumes, contiguous |
 | `rejected` | Manager rejects one line of a batch, 3 times | records quarantined, gap equals the `manager_rejected` loss |

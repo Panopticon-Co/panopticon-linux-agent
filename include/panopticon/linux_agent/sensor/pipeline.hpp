@@ -255,6 +255,17 @@ private:
     std::uint64_t quarantine_reported_{};
     // A loss record is a record: if the sink refuses it, the loss it describes must not vanish with it.
     std::vector<loss_report> pending_losses_;
+    // Loss records are written into the log they report on, so a quota drop can remove the records that explain an
+    // earlier drop. Every loss record written and not yet acknowledged is remembered by seq; when the log drops a range
+    // that holds some, carry_dropped_loss_reports() writes what they said again, so the loss records that survive
+    // always explain the whole gap. Process local: a loss record written before a restart is not carried. Bounded: past
+    // the limit the oldest entry is merged into the next of its stage, which can only over-report.
+    struct written_loss {
+        std::uint64_t seq{};
+        loss_report report;
+    };
+    std::vector<written_loss> written_losses_;
+    void carry_dropped_loss_reports(const std::vector<wal_loss>& dropped);
     std::uint64_t unwritten_reported_{};
     std::uint64_t last_loss_retry_ns_{};
     std::uint64_t last_storage_check_ns_{};

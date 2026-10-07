@@ -208,8 +208,12 @@ EOF
   out=$(analyze); rc=$?
   say "outage-long losses: $(echo "$out" | jfield loss_records) ranges=$(echo "$out" | jfield missing_ranges)"
   stop_sensor
-  verdict outage-long "$([ $rc = 0 ] && [ "$(echo "$out" | jfield wal_loss_reported)" -gt 0 ] && echo PASS || echo FAIL)" \
-    "stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported)"
+  # The loss records that reached the Manager must explain the whole gap on their own, not the cumulative counter of a
+  # health record that may not have been written yet (the sensor carries a dropped loss record's count forward). Not less
+  # than the gap; a little more is expected when a batch was delivered but its acknowledgement was not yet seen.
+  local gap lost; gap=$(echo "$out" | jfield missing); lost=$(echo "$out" | jfield wal_loss_reported)
+  verdict outage-long "$([ $rc = 0 ] && [ "$lost" -gt 0 ] && [ "$lost" -ge "$gap" ] && echo PASS || echo FAIL)" \
+    "stored=$(echo "$out" | jfield stored) missing=$gap wal_loss_reported=$lost excess=$((lost - gap))"
 }
 
 ackloss_case() { # name mode [gap_ok]: a gap is acceptable only when it is accounted (the analyzer fails a silent one)
@@ -337,7 +341,11 @@ scenario_ringoverflow() {
 # while it takes an exec storm and the Manager is down (so the WAL grows). It must not be OOM-killed,
 # its memory must stay bounded, and nothing may go missing without a loss record.
 scenario_memcap() {
-  local cg=/sys/fs/cgroup/chaos-mem limit=$((48 * 1024 * 1024))
+  # 48 MiB is the Release budget and the default. A sanitizer build keeps shadow memory, red zones and a quarantine in
+  # its resident set, so its run sets MEMCAP_MB to a wider envelope (it still has to survive, bounded, with nothing
+  # missing and no sanitizer finding); that never relaxes the Release limit.
+  local mb=${MEMCAP_MB:-48}
+  local cg=/sys/fs/cgroup/chaos-mem limit=$((mb * 1024 * 1024))
   [ -f /sys/fs/cgroup/cgroup.controllers ] || { verdict memcap SKIP "no cgroup v2"; return; }
   rmdir "$cg" 2>/dev/null
   mkdir "$cg" 2>/dev/null || { verdict memcap SKIP "cannot create $cg"; return; }
@@ -359,7 +367,7 @@ scenario_memcap() {
   local out; out=$(analyze --count-exec chaosstorm); local rc=$?
   stop_sensor; rmdir "$cg" 2>/dev/null
   verdict memcap "$([ "$alive" = yes ] && [ "${oom:-1}" = 0 ] && [ $rc = 0 ] && echo PASS || echo FAIL)" \
-    "limit=48MiB alive=$alive oom_kill=${oom:-?} peak_rss=${rss}MiB cgroup_current=${current}MiB stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) accounted=$(echo "$out" | jfield accounted)"
+    "limit=${mb}MiB alive=$alive oom_kill=${oom:-?} peak_rss=${rss}MiB cgroup_current=${current}MiB stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) accounted=$(echo "$out" | jfield accounted)"
 }
 
 # Descriptor exhaustion: the soft and hard RLIMIT_NOFILE of a running sensor are cut to a few above

@@ -1754,6 +1754,72 @@ void test_pipeline_reports_inputs_a_provider_refused() {
     require(reports == 1U, "exactly one refused loss record is written: " + std::to_string(reports));
 }
 
+// A loss record lives in the write-ahead log it reports on, so a long outage under a small quota drops the older loss
+// records along with the data. The chaos suite's outage-long scenario exposed it: the Manager saw a gap of thousands of
+// sequence numbers and loss records for a few hundred of them, the rest attributed only by the cumulative counter of a
+// health record that had not arrived yet. Whatever loss records survive in the log must explain the whole gap.
+void test_pipeline_carries_quota_loss_reports_forward_when_they_are_dropped() {
+    const auto root = fresh_directory("quotacarry");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    wal_options options = small_wal(fresh_directory("quotacarrywal"));
+    options.segment_bytes = 16384U;
+    options.quota_bytes = 65536U;
+    options.maximum_record_bytes = 16384U - wal_header_bytes;
+    wal_sink sink{std::move(std::get<std::unique_ptr<write_ahead_log>>(write_ahead_log::open(options)))};
+    auto script = std::make_unique<scripted_provider>(std::vector<raw_record>{});
+    auto* handle = script.get();
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::move(script));
+    sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+    value_of(pipeline.start(), "pipeline start");
+    std::uint32_t pid = 100U;
+    for (int round = 0; round < 60; ++round) {
+        std::vector<raw_record> burst;
+        for (int index = 0; index < 15; ++index, ++pid) burst.push_back(record_of(raw_fork{1U, 1U, pid, pid, std::nullopt}));
+        handle->push(std::move(burst));
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+    }
+    // A loss record can itself push the log over the quota; steps without new drops mean everything has been reported.
+    for (int quiet = 0, step = 0; quiet < 3 && step < 200; ++step) {
+        const auto before = sink.metrics().dropped_records;
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        quiet = sink.metrics().dropped_records == before ? quiet + 1 : 0;
+    }
+    value_of(sink.flush(0U, true), "sync");
+    require(sink.take_losses().empty(), "every drop has been handed to the pipeline");
+    const auto records = value_of(sink.log().read(1U, 100000U, 1U << 26U), "read what survived");
+    require(!records.empty() && records.front().seq > 1U, "the quota dropped the oldest records");
+    const auto dropped = records.front().seq - 1U;
+    require(dropped == sink.metrics().dropped_records, "the log's own counter matches the gap");
+    require(dropped > 400U, "the outage was long enough to drop many loss records too: " + std::to_string(dropped));
+    // A "wal" loss is either a range of sequence numbers dropped at the quota (the gap) or records the log refused, whose
+    // sequence numbers were never used (no gap); `by_type` tells them apart.
+    const auto by_type = [](const std::string& payload, const std::string& reason) -> std::uint64_t {
+        const auto key = "\"" + reason + "\":";
+        const auto at = payload.find(key, payload.find(R"("by_type":)"));
+        return at == std::string::npos ? 0U : std::stoull(payload.substr(at + key.size()));
+    };
+    std::uint64_t quota_reported = 0U;
+    std::uint64_t refused_reported = 0U;
+    std::string survivors;
+    for (const auto& record : records) {
+        if (!contains(record.payload, R"("type":"loss")") || !contains(record.payload, R"("stage":"wal")")) continue;
+        quota_reported += by_type(record.payload, "quota");
+        refused_reported += by_type(record.payload, "write_failed");
+        survivors += " [seq " + std::to_string(record.seq) + " quota " + std::to_string(by_type(record.payload, "quota")) +
+                     (contains(record.payload, "carried forward") ? " carried]" : "]");
+    }
+    require(quota_reported == dropped, "the surviving loss records explain the whole gap: " + std::to_string(quota_reported) + " of " + std::to_string(dropped) +
+                                           ", first retained seq " + std::to_string(records.front().seq) + ", survivors" + survivors);
+    require(refused_reported == pipeline.metrics().records_unwritten, "records the log refused stay reported once: " + std::to_string(refused_reported) + " of " +
+                                                                          std::to_string(pipeline.metrics().records_unwritten));
+}
+
 // A hook a provider restored after it was removed from outside is reported as one `provider_gap` interval, with the
 // times that bound it, and the entity graph is reconciled because forks, execs or exits may have been missed.
 void test_pipeline_reports_a_provider_gap_and_reconciles() {
@@ -2632,6 +2698,7 @@ int main() {
     run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
     run("pipeline_reports_records_the_queue_refused", test_pipeline_reports_records_the_queue_refused);
     run("pipeline_reports_inputs_a_provider_refused", test_pipeline_reports_inputs_a_provider_refused);
+    run("pipeline_carries_quota_loss_reports_forward_when_they_are_dropped", test_pipeline_carries_quota_loss_reports_forward_when_they_are_dropped);
     run("pipeline_reports_a_provider_gap_and_reconciles", test_pipeline_reports_a_provider_gap_and_reconciles);
     run("pipeline_reports_an_unclean_previous_instance", test_pipeline_reports_an_unclean_previous_instance);
     run("config_and_ca_must_be_trustworthy", test_config_and_ca_must_be_trustworthy);

@@ -349,9 +349,15 @@ PATH] <command>` is the client (default `/run/panopticon/sensord.sock`).
   WAL losses carry the reason in `detail`: `torn_tail`, `corrupt_segment`, `gap`, `quota`, and
   `write_failed` (the WAL refused records, for example a full disk; `by_type.write_failed` is how many;
   their sequence numbers were never used, so there is no gap in the stream). A loss record that could
-  not be written is kept and written once the WAL accepts records again. After a long quota loss the
-  earlier loss records may themselves have been dropped; the cumulative `health.wal.dropped_records`
-  of the newest health record is the total.
+  not be written is kept and written once the WAL accepts records again. A loss record lives in the
+  WAL it reports on, so a long quota loss drops the older ones with the data; the sensor therefore
+  writes what a dropped loss record said again (`detail` starts `carried forward:`, one record per
+  stage, `count` and `by_type` summed), and the loss records that survive explain the whole gap on
+  their own, without waiting for a health record. The cumulative `health.wal.dropped_records` stays as
+  a cross-check. A report is carried only while this sensor process runs and until it is
+  acknowledged; a loss record written before a restart is not carried, and a batch that was delivered
+  but not yet acknowledged when its segment was dropped is reported as lost as well (an over-report,
+  never an under-report).
 * The `procfs` provider always appears in `providers[]`: it is the reconciler that backs every
   process capability when no kernel provider is active.
 * `policy.match` and `policy.change` (ADR 016, ADR 032; only with `policy_path` and `policy_signing_keys` set):
