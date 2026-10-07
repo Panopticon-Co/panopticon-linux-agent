@@ -1098,4 +1098,45 @@ std::string record_serializer::policy_change_event(const policy_change& change, 
     return out.take();
 }
 
+std::string record_serializer::tamper_integrity_event(const tamper_record& record, const std::uint64_t seq, const std::uint64_t now_unix_ns) const {
+    constexpr std::size_t maximum_detail_bytes = 1024U;
+    const auto& change = record.change;
+    json_writer out;
+    begin(out, "event", "tamper.integrity", seq, now_unix_ns, now_unix_ns, {"integrity", "BUILD-MANIFEST", confidence::observed});
+    std::vector<unavailable_field> unavailable;
+    if (record.actor) {
+        out.key("process");
+        write_process(out, *record.actor);
+        out.end_object();
+    } else if (record.actor_pid != 0U) {
+        out.key("process").begin_object();
+        out.field("pid", record.actor_pid);
+        out.end_object();
+        unavailable.push_back({"process", unavailable_reason::process_exited});
+    } else {
+        unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+    }
+    out.key("tamper").begin_object();
+    out.field("status", change.status);
+    out.field("technique", change.finding.technique);
+    out.field("target", change.finding.target);
+    if (!change.finding.expected_sha256.empty()) out.field("expected_sha256", change.finding.expected_sha256);
+    if (!change.finding.observed_sha256.empty()) out.field("observed_sha256", change.finding.observed_sha256);
+    if (!change.manifest_version.empty()) out.field("manifest_version", change.manifest_version);
+    if (!change.key_id.empty()) out.field("key_id", change.key_id);
+    out.field("files_checked", static_cast<std::uint64_t>(change.files_checked));
+    out.field("files_in_violation", static_cast<std::uint64_t>(change.files_in_violation));
+    if (!record.last_operation.empty()) {
+        out.key("last_change").begin_object();
+        out.field("operation", record.last_operation);
+        out.field("time", format_rfc3339_ns(record.last_change_unix_ns));
+        out.end_object();
+    }
+    out.field("detail", std::string_view{change.finding.detail}.substr(0U, maximum_detail_bytes));
+    out.end_object();
+    write_unavailable(out, unavailable);
+    out.end_object();
+    return out.take();
+}
+
 }  // namespace panopticon::linux_agent::sensor

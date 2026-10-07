@@ -68,8 +68,9 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 47U> allowed{
+    constexpr std::array<std::string_view, 50U> allowed{
         "policy_path", "policy_signing_keys", "policy_check_seconds",
+        "integrity_manifest", "integrity_keys", "integrity_check_seconds",
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
@@ -161,6 +162,15 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     }
     if (config.policy_path.empty() != config.policy_signing_keys.empty()) valid = false;
     number("policy_check_seconds", config.policy_check_seconds, 5U, 3600U);
+    // A manifest without a pinned key could never verify, and a key without a manifest is a mistake: both or neither.
+    for (const auto& [key, target] : {std::pair{"integrity_manifest", &config.integrity_manifest}, std::pair{"integrity_keys", &config.integrity_keys}}) {
+        if (const auto value = text(key); value.has_value()) {
+            *target = *value;
+            if (!target->is_absolute() || value->find("..") != std::string::npos) valid = false;
+        }
+    }
+    if (config.integrity_manifest.empty() != config.integrity_keys.empty()) valid = false;
+    number("integrity_check_seconds", config.integrity_check_seconds, 5U, 3600U);
     if (const auto value = text("enable_ebpf"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.enable_ebpf = *value == "true";
@@ -367,6 +377,32 @@ void sensor_pipeline::refresh_policy(const std::uint64_t unix_now_ns) {
     policy_expires_unix_ = active != nullptr ? active->header.expires_unix : 0;
     // Every record names the policy that decided about it, or "none" (none accepted, or the one accepted expired).
     serializer_.set_policy_version(active != nullptr ? active->header.policy_id + "/" + std::to_string(active->header.version) : "none");
+}
+
+void sensor_pipeline::note_integrity_writer(const std::string& path, const std::string_view operation, const entity_ptr& actor, const std::uint32_t pid,
+                                            const std::uint64_t time_unix_ns) {
+    if (integrity_watched_.count(path) == 0U) return;
+    // One entry per watched path (the manifest lists at most maximum_manifest_entries), so this cannot grow.
+    integrity_writers_[path] = integrity_writer{actor, pid, std::string{operation}, time_unix_ns};
+}
+
+void sensor_pipeline::refresh_integrity(const std::uint64_t unix_now_ns) {
+    if (!integrity_) return;
+    for (const auto& change : integrity_->refresh(static_cast<std::int64_t>(unix_now_ns / ns_per_second))) {
+        tamper_record record;
+        record.change = change;
+        // Who last touched the file, if a file event saw it. A restored finding is not attributed.
+        if (change.status == "violated") {
+            if (const auto writer = integrity_writers_.find(change.finding.target); writer != integrity_writers_.end()) {
+                record.actor = writer->second.actor;
+                record.actor_pid = writer->second.pid;
+                record.last_operation = writer->second.operation;
+                record.last_change_unix_ns = writer->second.time_unix_ns;
+            }
+        }
+        if (succeeded(emit([&](const std::uint64_t seq) { return serializer_.tamper_integrity_event(record, seq, unix_now_ns); }))) ++metrics_.tamper_records;
+    }
+    integrity_watched_ = integrity_->watched_paths();
 }
 
 void sensor_pipeline::evaluate_policy(const policy_input& input, const entity_ptr& actor, const std::uint32_t pid, const std::uint64_t time_unix_ns,
@@ -688,6 +724,10 @@ result<bool> sensor_pipeline::emit_file_event(const raw_record& record, const ra
             evaluate_policy(input, out.actor, file.pid, record.time_unix_ns, out.type, observed_ns);
         }
     }
+    if (integrity_ && succeeded(emitted) && file.operation != file_operation::open_sensitive) {
+        note_integrity_writer(file.path, to_string(file.operation), out.actor, file.pid, record.time_unix_ns);
+        if (file.old_path.has_value()) note_integrity_writer(*file.old_path, to_string(file.operation), out.actor, file.pid, record.time_unix_ns);
+    }
     if (fim_ && file.pid != 0U && file.operation != file_operation::open_sensitive) (void)fim_->note(file.path, file.old_path, file.pid, record.time_unix_ns, clock_domain::now_monotonic_ns());
     return emitted;
 }
@@ -853,6 +893,13 @@ health_snapshot sensor_pipeline::health_now() const {
         snapshot.providers.push_back({"policy", policy.state, policy.reason, {"policy.match"}, metrics_.policy_matches, 0U});
         snapshot.coverage["policy.match"] = policy.state == "active" ? "policy" : "";
         if (policy.state != "active") snapshot.status = "degraded";
+    }
+    if (integrity_) {
+        // Installed files that differ from the signed manifest are lost trust in the sensor itself, not a detail.
+        const auto integrity = integrity_->health();
+        snapshot.providers.push_back({"integrity", integrity.state, integrity.reason, {"tamper.integrity"}, metrics_.tamper_records, 0U});
+        snapshot.coverage["tamper.integrity"] = integrity.state == "active" ? "integrity" : "";
+        if (integrity.state != "active") snapshot.status = "degraded";
     }
 
     const auto statm = read_small_file("/proc/self/statm");
@@ -1131,6 +1178,13 @@ result<bool> sensor_pipeline::start() {
         policy_ = std::make_unique<policy_store>(std::move(options));
         refresh_policy(unix_now);
     }
+    if (!config_.integrity_manifest.empty()) {
+        integrity_options options;
+        options.manifest_path = config_.integrity_manifest;
+        options.keys_path = config_.integrity_keys;
+        integrity_ = std::make_unique<integrity_monitor>(std::move(options));
+        refresh_integrity(unix_now);
+    }
     (void)emit_health(unix_now);
     (void)emit_process_state(unix_now);
     (void)emit_host_state(unix_now);
@@ -1143,7 +1197,7 @@ result<bool> sensor_pipeline::start() {
         (void)emit([&](const std::uint64_t seq) { return serializer_.fim_baseline_record(begun, seq, unix_now); });
         (void)emit_fim_changes(begun.changes, unix_now);
     }
-    last_reconcile_ns_ = last_health_ns_ = last_state_ns_ = last_resample_ns_ = last_fim_ns_ = last_policy_ns_ = now;
+    last_reconcile_ns_ = last_health_ns_ = last_state_ns_ = last_resample_ns_ = last_fim_ns_ = last_policy_ns_ = last_integrity_ns_ = now;
     refresh_status(now);
     started_ns_ = clock_domain::now_monotonic_ns();
     started_ = true;
@@ -1178,6 +1232,10 @@ result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono
             refresh_policy(unix_now);
             last_policy_ns_ = now_ns;
         }
+    }
+    if (integrity_ && now_ns - last_integrity_ns_ >= config_.integrity_check_seconds * ns_per_second) {
+        refresh_integrity(clock_domain::now_unix_ns());
+        last_integrity_ns_ = now_ns;
     }
     if (delivery_probe_) {
         // The Manager said these records can never be valid. Say so in the stream, with the

@@ -375,8 +375,24 @@ PATH] <command>` is the client (default `/run/panopticon/sensord.sock`).
 * `policy.change` carries provenance `{policy, POLICY-FILE, observed}`. `reason` is one of `no_previous_state`,
   `updated`, `resumed`, `state_unreadable` (accepted), or `malformed`, `bad_signature`, `unknown_key`, `no_keys`,
   `out_of_scope`, `not_yet_valid`, `already_expired`, `rollback`, `untrusted_file`, `too_large`, `unreadable`,
-  `file_missing`, `expired`. A refused update leaves the policy in force (fail-safe); expiry unloads it (fail-closed).
-  A `health` record shows the policy provider and `sensor.policy_version` (`<id>/<version>` or `none`).
+  `file_missing`, `expired`, `key_revoked`. A refused update leaves the policy in force (fail-safe); expiry unloads
+  it (fail-closed); so does revoking its key (outcome `removed`, reason `key_revoked`: the key was removed from a
+  key list that still loads). A `health` record shows the policy provider and `sensor.policy_version`
+  (`<id>/<version>` or `none`).
+
+* `tamper.integrity` (ADR 033; only with `integrity_manifest` and `integrity_keys` set): the installed files or the
+  running binary no longer match the signed build manifest, or the manifest itself cannot be trusted. One record
+  when a finding is confirmed (two consecutive looks; immediately at start) and one when it clears.
+
+| Type | Emitted when | `tamper` body |
+| --- | --- | --- |
+| `tamper.integrity` | a finding is confirmed (`status: violated`) or clears (`status: restored`) | `status`, `technique` (`binary_modified`, `binary_missing`, `binary_replaced`, `manifest_missing`, `manifest_invalid`), `target` (absolute path), `expected_sha256?`, `observed_sha256?`, `manifest_version?`, `key_id?`, `files_checked`, `files_in_violation`, `last_change {operation, time}?`, `detail` (at most 1,024 bytes) |
+
+* The acting `process` is the last writer fanotify reported for the target (`file.create/modify/delete/rename/attrib`,
+  and the old path of a rename), or a bare `pid` with `unavailable.process = process_exited`; with no writer seen the
+  record says `unavailable.process = not_supported_by_provider`. A `restored` record is not attributed.
+* Provenance is `{integrity, BUILD-MANIFEST, observed}`. A `health` record has an `integrity` provider (capability
+  `tamper.integrity`), `degraded` while any finding is violated.
 
 ## 7. Detection, evidence, response
 

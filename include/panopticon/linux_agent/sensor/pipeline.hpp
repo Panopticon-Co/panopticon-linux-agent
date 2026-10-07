@@ -14,8 +14,10 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -86,6 +88,12 @@ struct sensor_config {
     std::filesystem::path policy_path;
     std::filesystem::path policy_signing_keys;
     std::uint64_t policy_check_seconds{30U};
+    // Self-integrity (ADR 033): the signed build manifest of the installed files and the pinned keys that may sign it,
+    // both or neither. A file that differs from the manifest, or a manifest that does not verify, becomes a
+    // tamper.integrity record and a degraded `integrity` provider.
+    std::filesystem::path integrity_manifest;
+    std::filesystem::path integrity_keys;
+    std::uint64_t integrity_check_seconds{60U};
     std::size_t maximum_args{64U};
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};
@@ -150,6 +158,7 @@ struct pipeline_metrics {
     std::uint64_t clock_steps{};        // wall-clock steps detected; offsets were re-sampled at once
     std::uint64_t records_unwritten{};  // records the sink refused (full or failing disk); reported as a wal loss
     std::uint64_t policy_matches{};     // policy.match records written
+    std::uint64_t tamper_records{};     // tamper.integrity records written
 };
 
 class sensor_pipeline {
@@ -219,6 +228,11 @@ private:
     // Signed local policy (ADR 032): re-reads the policy and key files, records what changed, and names the policy
     // in force in every later record.
     void refresh_policy(std::uint64_t unix_now_ns);
+    // Self-integrity (ADR 033): re-checks the installed files against the signed manifest and writes a tamper.integrity
+    // record for each finding that began or ended, naming whoever last changed the file when a file event saw it.
+    void refresh_integrity(std::uint64_t unix_now_ns);
+    // Remembers the process behind the latest change of a path the integrity manifest covers.
+    void note_integrity_writer(const std::string& path, std::string_view operation, const entity_ptr& actor, std::uint32_t pid, std::uint64_t time_unix_ns);
     // Writes a policy.match for each decision about the record just written (seq last_emitted_seq_). Decides only:
     // nothing here can reach the command processor or any response action.
     void evaluate_policy(const policy_input& input, const entity_ptr& actor, std::uint32_t pid, std::uint64_t time_unix_ns,
@@ -279,6 +293,16 @@ private:
     std::unique_ptr<policy_store> policy_;
     std::uint64_t last_policy_ns_{};
     std::int64_t policy_expires_unix_{};  // of the policy in force; 0 when none
+    struct integrity_writer {
+        entity_ptr actor;
+        std::uint32_t pid{};
+        std::string operation;
+        std::uint64_t time_unix_ns{};
+    };
+    std::unique_ptr<integrity_monitor> integrity_;
+    std::uint64_t last_integrity_ns_{};
+    std::set<std::string> integrity_watched_;
+    std::map<std::string, integrity_writer> integrity_writers_;  // by path, at most one per watched path
     std::uint64_t last_emitted_seq_{};    // seq of the last record the sink accepted
 };
 

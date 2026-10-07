@@ -5,6 +5,7 @@
 #include "panopticon/linux_agent/sensor/entity_graph.hpp"
 #include "panopticon/linux_agent/sensor/fim.hpp"
 #include "panopticon/linux_agent/sensor/host_state.hpp"
+#include "panopticon/linux_agent/sensor/integrity.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
 #include "panopticon/linux_agent/sensor/policy_bundle.hpp"
 #include "panopticon/linux_agent/sensor/provider.hpp"
@@ -103,6 +104,15 @@ struct file_record {
     bool directory{false};
     std::optional<file_stat> stat;
     std::vector<unavailable_field> unavailable;
+};
+
+// A tamper.integrity record: an integrity_change plus who last changed the target.
+struct tamper_record {
+    integrity_change change;
+    entity_ptr actor;  // null when no file event named the target, or the process was gone before it could be identified
+    std::uint32_t actor_pid{};
+    std::string last_operation;  // create | modify | delete | rename | attrib; empty when unknown
+    std::uint64_t last_change_unix_ns{};
 };
 
 // A network.* event after the pipeline attached the owning process (if it still exists).
@@ -236,6 +246,10 @@ public:
     // policy.match and policy.change (ADR 032).
     [[nodiscard]] std::string policy_match(const policy_match_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
     [[nodiscard]] std::string policy_change_event(const policy_change& change, std::uint64_t seq, std::uint64_t now_unix_ns) const;
+
+    // tamper.integrity (ADR 033). `actor` and `last_operation` say who last changed the target, when a file event
+    // named it; otherwise the process is reported as unavailable.
+    [[nodiscard]] std::string tamper_integrity_event(const tamper_record& record, std::uint64_t seq, std::uint64_t now_unix_ns) const;
 
     // state.<object> snapshot part for host-state inventory objects (catalog §5). `items` are
     // already-serialised JSON objects; `unavailable` is carried on part 1 only.

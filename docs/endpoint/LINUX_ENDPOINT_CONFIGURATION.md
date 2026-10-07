@@ -96,6 +96,29 @@ A policy never causes an action: its decisions are `policy.match` records. A bun
 `panopticon-command-signer sign-policy <key> <policy_id> <version> <issued_at> <expires_at> <scope>` (body on
 stdin).
 
+Revoking a policy key is removing its line from `policy_signing_keys`. At the next check, if the key list still
+loads, the policy in force that the key signed goes out of force (`policy.change` `removed` / `key_revoked`,
+health `degraded`) and a policy signed by a pinned key replaces it; pinning the key again resumes the same
+version. A key list that cannot be read revokes nothing: the keys loaded before stay in force and health says
+why.
+
+## Self-integrity (ADR 033)
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `integrity_manifest` | empty | Absolute path of the signed build manifest (SHA-256, size and install path of each installed file). Without it no integrity check runs. |
+| `integrity_keys` | empty | Absolute path of the pinned key list that verifies the manifest, the same line format as `response_signing_keys`. |
+| `integrity_check_seconds` | 60 | 5 to 3600; how often the installed files and the running image are checked. |
+
+`integrity_manifest` and `integrity_keys` are set together or not at all, absolute, without `..`, and both files
+must pass the trusted-path check above. A package built with `packaging/build_signed_deb.sh` ships the manifest
+and its key under `/usr/share/panopticon/` and the post-install script sets both keys at first install. A
+violation (`binary_modified`, `binary_missing`, `binary_replaced`, `manifest_missing`, `manifest_invalid`) is a
+`tamper.integrity` record, names the process that last wrote the file when file events saw it, and turns health
+`degraded` until it clears. A manifest is produced by `panopticon-command-signer sign-manifest <key> <package>
+<version> <built_at>` (the files on stdin). The pinned key sits on the same host as the files: see ADR 033 for what
+that does and does not stop.
+
 ## Installing and running as a service
 
 `cpack -G DEB` (in the build directory) produces `panopticon-sensord_<version>_amd64.deb` with `/usr/bin/panopticon-sensord`,
