@@ -1,0 +1,54 @@
+[Unit]
+Description=Panopticon Linux endpoint sensor (sensord)
+Documentation=https://github.com/Panopticon-Co/panopticon-linux-agent/blob/main/docs/endpoint/LINUX_ENDPOINT_SECURITY_MODEL.md
+After=network-online.target local-fs.target
+Wants=network-online.target
+# A sensor that crashes is restarted for ever, not given up on after five tries.
+StartLimitIntervalSec=0
+
+[Service]
+# Type=notify: sensord says READY=1 once collection is running, and feeds the watchdog from its own pipeline loop, so
+# a loop stuck behind a hung disk or a deadlock is restarted instead of looking alive.
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/panopticon-sensord --config /etc/panopticon/sensord.conf --control-socket /run/panopticon/control.sock
+Restart=always
+RestartSec=2
+WatchdogSec=30
+TimeoutStartSec=90
+TimeoutStopSec=30
+# A sensor that is killed on a memory shortage is a blind endpoint; let the kernel take something else first.
+OOMScoreAdjust=-900
+UMask=0077
+RuntimeDirectory=panopticon
+RuntimeDirectoryMode=0700
+# /var/lib/panopticon holds the WAL (wal), the instance marker (wal.instance), the command ledger (wal.commands) and
+# the quarantine (wal.quarantine); set wal_path under it in sensord.conf.
+StateDirectory=panopticon
+StateDirectoryMode=0700
+
+# The sensor runs as root because eBPF, fanotify on whole filesystems, the audit netlink socket and pidfd_send_signal
+# on arbitrary processes need it. What it is allowed to do with that is limited to the capabilities it uses.
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER CAP_NET_ADMIN CAP_AUDIT_READ CAP_AUDIT_CONTROL CAP_KILL
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Home directories are read for persistence and credential-file telemetry, never written. Quarantine and the other
+# response file actions write only under the roots named in sensord.conf: add them to ReadWritePaths= in a drop-in.
+# There is no PrivateTmp= on purpose: the sensor must see the real /tmp and /dev/shm, where payloads are staged.
+ProtectHome=read-only
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

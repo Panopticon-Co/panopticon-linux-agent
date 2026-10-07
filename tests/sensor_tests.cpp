@@ -11,6 +11,7 @@
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 #include "panopticon/linux_agent/sensor/process_info.hpp"
 #include "panopticon/linux_agent/sensor/serializer.hpp"
+#include "panopticon/linux_agent/sensor/systemd_notify.hpp"
 #include "panopticon/linux_agent/sensor/wal.hpp"
 
 #include <linux/cn_proc.h>
@@ -28,6 +29,9 @@
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -1675,6 +1679,98 @@ void test_pipeline_reports_an_unclean_previous_instance() {
     require(unreadable.size() == 1U && contains(unreadable[0], "length of the gap is unknown"), "an unreadable marker is a gap of unknown length, not silence");
 }
 
+// The configuration decides what the sensor trusts, and the CA bundle decides who may speak as the Manager: a copy that
+// another user can write, or can replace by writing to its directory, is refused at load.
+void test_config_and_ca_must_be_trustworthy() {
+    const auto dir = fresh_directory("trustedconfig");
+    const auto config_path = dir / "sensor.conf";
+    const auto ca_path = dir / "ca.pem";
+    const auto set_mode = [](const fs::path& path, const fs::perms perms) { fs::permissions(path, perms, fs::perm_options::replace); };
+    const auto owner_only = fs::perms::owner_read | fs::perms::owner_write;
+    write_file(config_path, "sensor_id=s-1\nhost_id=h-1\n");
+    set_mode(config_path, owner_only | fs::perms::group_read | fs::perms::others_read);
+    require(succeeded(load_sensor_config(config_path)), "a config only its owner can write loads");
+
+    set_mode(config_path, owner_only | fs::perms::group_write);
+    const auto group_writable = load_sensor_config(config_path);
+    require(!succeeded(group_writable) && contains(std::get<error>(group_writable).message, "writable by group or others"), "a group-writable config is refused");
+    set_mode(config_path, owner_only | fs::perms::others_write);
+    require(!succeeded(load_sensor_config(config_path)), "a world-writable config is refused");
+    set_mode(config_path, owner_only);
+
+    set_mode(dir, fs::perms::all);
+    const auto open_directory = load_sensor_config(config_path);
+    require(!succeeded(open_directory) && contains(std::get<error>(open_directory).message, "directory"), "a config in a directory others can write into is refused");
+    set_mode(dir, fs::perms::owner_all);
+    require(succeeded(load_sensor_config(config_path)), "the same config loads once the directory is closed");
+
+    write_file(config_path, "sensor_id=s-1\nhost_id=h-1\nca_bundle=" + ca_path.string() + "\n");
+    set_mode(config_path, owner_only);
+    const auto missing_ca = load_sensor_config(config_path);
+    require(!succeeded(missing_ca) && contains(std::get<error>(missing_ca).message, "ca_bundle"), "a CA bundle that cannot be read is refused");
+    write_file(ca_path, "not a real certificate\n");
+    set_mode(ca_path, owner_only | fs::perms::others_read);
+    require(succeeded(load_sensor_config(config_path)), "a CA bundle only its owner can write is accepted");
+    set_mode(ca_path, owner_only | fs::perms::group_write);
+    const auto writable_ca = load_sensor_config(config_path);
+    require(!succeeded(writable_ca) && contains(std::get<error>(writable_ca).message, "ca_bundle is not trustworthy"), "a CA bundle another user can write is refused");
+
+    if (::geteuid() == 0) {
+        set_mode(ca_path, owner_only);
+        require(::chown(ca_path.c_str(), 12345, static_cast<gid_t>(-1)) == 0, "chown to another user");
+        require(!succeeded(load_sensor_config(config_path)), "a CA bundle owned by another user is refused");
+    }
+    set_mode(dir, fs::perms::all);
+}
+
+// A Type=notify unit: READY and STOPPING are sent, the watchdog is fed at half its period and only by whoever calls
+// pet_if_due (the pipeline loop), and a sensor started by hand sends nothing.
+void test_systemd_notifier_protocol() {
+    const auto dir = fresh_directory("notify");
+    const auto socket_path = (dir / "notify.sock").string();
+    const int server = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    require(server >= 0, "create the notify socket");
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size());
+    require(::bind(server, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0, "bind the notify socket");
+    const auto received = [&] {
+        std::vector<std::string> messages;
+        char buffer[256];
+        for (;;) {
+            const auto count = ::recv(server, buffer, sizeof(buffer), MSG_DONTWAIT);
+            if (count <= 0) break;
+            messages.emplace_back(buffer, static_cast<std::size_t>(count));
+        }
+        return messages;
+    };
+
+    systemd_notifier notifier{socket_path, 2'000'000U};  // WatchdogSec=2: a pet at least every second
+    require(notifier.active() && notifier.watchdog_interval_ns() == 1'000'000'000ULL, "the watchdog interval is half the period");
+    require(notifier.ready() && notifier.status("collecting"), "ready and status are sent");
+    const auto first = received();
+    require(first.size() == 2U && first[0] == "READY=1" && first[1] == "STATUS=collecting", "the messages arrive as written");
+
+    constexpr std::uint64_t second = 1'000'000'000ULL;
+    require(notifier.pet_if_due(10U * second), "the first pet is sent at once");
+    require(!notifier.pet_if_due(10U * second + second / 2U), "no second pet inside the interval");
+    require(notifier.pet_if_due(11U * second), "a pet is sent when the interval has passed");
+    const auto pets = received();
+    require(pets.size() == 2U && pets[0] == "WATCHDOG=1" && pets[1] == "WATCHDOG=1", "exactly the two pets were sent");
+    require(notifier.stopping(), "stopping is sent");
+    require(received() == std::vector<std::string>{"STOPPING=1"}, "the stop notice arrives");
+
+    systemd_notifier no_watchdog{socket_path, 0U};
+    require(no_watchdog.ready() && !no_watchdog.pet_if_due(99U * second), "without a watchdog period nothing is petted");
+    require(received() == std::vector<std::string>{"READY=1"}, "only READY went out");
+
+    systemd_notifier by_hand{"", 2'000'000U};
+    require(!by_hand.active() && !by_hand.ready() && !by_hand.pet_if_due(5U * second) && !by_hand.stopping(), "a sensor started by hand sends nothing");
+    systemd_notifier gone{(dir / "nobody-listens.sock").string(), 2'000'000U};
+    require(!gone.ready() && !gone.pet_if_due(5U * second), "a missing notify socket fails quietly");
+    ::close(server);
+}
+
 void test_pipeline_rebases_event_times_after_a_clock_step() {
     const auto root = fresh_directory("clockstepproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
@@ -2315,6 +2411,7 @@ void test_parse_container_cgroup() {
 }
 
 int main() {
+    ::umask(0022);  // the sensor refuses configuration another user can write; see test_config_and_ca_must_be_trustworthy
     std::cout << std::unitbuf;
     run("parse_container_cgroup", test_parse_container_cgroup);
     run("container_tracker_lifecycle", test_container_tracker_lifecycle);
@@ -2357,6 +2454,8 @@ int main() {
     run("pipeline_reports_records_the_queue_refused", test_pipeline_reports_records_the_queue_refused);
     run("pipeline_reports_inputs_a_provider_refused", test_pipeline_reports_inputs_a_provider_refused);
     run("pipeline_reports_an_unclean_previous_instance", test_pipeline_reports_an_unclean_previous_instance);
+    run("config_and_ca_must_be_trustworthy", test_config_and_ca_must_be_trustworthy);
+    run("systemd_notifier_protocol", test_systemd_notifier_protocol);
     run("pipeline_rebases_event_times_after_a_clock_step", test_pipeline_rebases_event_times_after_a_clock_step);
     run("pipeline_reports_delivery_and_turns_rejections_into_loss", test_pipeline_reports_delivery_and_turns_rejections_into_loss);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);

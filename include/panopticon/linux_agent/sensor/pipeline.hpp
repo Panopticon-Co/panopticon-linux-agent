@@ -168,6 +168,9 @@ public:
     // Called only from the pipeline thread; the probe must be safe to call there.
     using delivery_probe = std::function<delivery_health()>;
     void set_delivery_probe(delivery_probe probe) { delivery_probe_ = std::move(probe); }
+    // Called once per loop iteration of run(), on the pipeline thread. A service watchdog is fed from here, so a loop that
+    // is stuck stops feeding it.
+    void set_heartbeat(std::function<void()> heartbeat) { heartbeat_ = std::move(heartbeat); }
 
     [[nodiscard]] const pipeline_metrics& metrics() const noexcept { return metrics_; }
     [[nodiscard]] const entity_graph& graph() const noexcept { return graph_; }
@@ -235,6 +238,7 @@ private:
     std::string coverage_cache_{"{}"};
     std::uint64_t last_status_ns_{};
     delivery_probe delivery_probe_;
+    std::function<void()> heartbeat_;
     std::uint64_t quarantine_reported_{};
     // A loss record is a record: if the sink refuses it, the loss it describes must not vanish with it.
     std::vector<loss_report> pending_losses_;

@@ -3,6 +3,7 @@
 #include "panopticon/linux_agent/durable_file.hpp"
 #include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/sensor/command_channel.hpp"
+#include "panopticon/linux_agent/trusted_path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -276,11 +277,19 @@ result<sensor_config> load_sensor_config(const std::filesystem::path& path) {
     if (filesystem_error || !std::filesystem::is_regular_file(status)) {
         return error{error_code::io_failure, "configuration path is not a regular file"};
     }
-    const auto unsafe = std::filesystem::perms::group_write | std::filesystem::perms::others_write;
-    if ((status.permissions() & unsafe) != std::filesystem::perms::none) {
-        return error{error_code::invalid_input, "configuration must not be group or world writable"};
+    // The configuration decides what the sensor trusts and does (command mode, signing keys, CA), so anyone who can
+    // edit it or replace it by writing to its directory controls the sensor.
+    if (const auto reason = untrusted_path_reason(path); !reason.empty()) {
+        return error{error_code::invalid_input, "configuration is not trustworthy: " + reason};
     }
-    return parse_sensor_config(read_small_file(path));
+    auto parsed = parse_sensor_config(read_small_file(path));
+    // The CA bundle decides which server may speak as the Manager (records go there, commands come from there).
+    if (succeeded(parsed) && !std::get<sensor_config>(parsed).ca_bundle.empty()) {
+        if (const auto reason = untrusted_path_reason(std::get<sensor_config>(parsed).ca_bundle); !reason.empty()) {
+            return error{error_code::invalid_input, "ca_bundle is not trustworthy: " + reason};
+        }
+    }
+    return parsed;
 }
 
 result<bool> wal_sink::append(const std::uint64_t seq, const std::string_view record) {
@@ -1017,6 +1026,7 @@ result<bool> sensor_pipeline::run(const std::atomic<bool>& stop, const std::uint
     while (!stop.load(std::memory_order_relaxed)) {
         const auto now = clock_domain::now_monotonic_ns();
         if (deadline_ns != 0U && now >= deadline_ns) break;
+        if (heartbeat_) heartbeat_();
         if (auto stepped = step(now, std::chrono::milliseconds{200}); !succeeded(stepped)) {
             ++metrics_.sink_errors;  // keep running: a full or failing disk must not stop collection
         }

@@ -109,6 +109,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/file_actions.cpp
         src/sensor/command_https.cpp
         src/sensor/pipeline.cpp
+        src/sensor/systemd_notify.cpp
     )
     target_include_directories(panopticon-sensor-core PUBLIC include)
     # Kernel/user wire layout shared with bpf/panopticon.bpf.c (needed with or without eBPF).

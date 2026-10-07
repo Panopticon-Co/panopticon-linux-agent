@@ -2,6 +2,7 @@
 
 #include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/sensor/command_channel.hpp"
+#include "panopticon/linux_agent/trusted_path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -112,6 +113,11 @@ const char* to_string(const authorization_verdict verdict) noexcept {
 }
 
 result<std::map<std::string, ec_public_key_point>> command_keyring::read_file(const std::filesystem::path& path) {
+    // The key list is the trust anchor for every enforcement command: a file another user can edit lets them
+    // authorise their own commands. An untrusted file is refused as a whole (at a reload the previous keys stay).
+    if (const auto reason = untrusted_path_reason(path); !reason.empty()) {
+        return error{error_code::invalid_input, "the command signing key file is not trustworthy: " + reason};
+    }
     std::ifstream input{path};
     if (!input) return error{error_code::io_failure, "cannot read the command signing key file " + path.string()};
     std::map<std::string, ec_public_key_point> keys;

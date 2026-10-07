@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -1483,6 +1484,47 @@ void test_keyring_file_and_revocation() {
     fs::remove_all(dir);
 }
 
+// The signing key list is the trust anchor for every enforcement command, so a copy that another user can edit is refused,
+// at start (the channel stays off) and at a reload (the previous keys stay in force).
+void test_keyring_refuses_an_untrusted_file() {
+    const fs::path dir = scratch("keyring-trust");
+    const auto k1 = make_key();
+    const auto k2 = make_key();
+    const auto line = [](const ec_keypair& key) { return base64_encode_for_test(key.public_point.data(), key.public_point.size()) + "\n"; };
+    const auto write = [&](const std::string& text) { std::ofstream out{dir / "keys", std::ios::trunc}; out << text; };
+    const auto mode = [&](const fs::path& path, const fs::perms perms) { fs::permissions(path, perms, fs::perm_options::replace); };
+    write(line(k1));
+    mode(dir / "keys", fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::others_read);
+    auto loaded = command_keyring::load(dir / "keys");
+    require(succeeded(loaded), "a file only its owner can write loads");
+    auto ring = std::move(std::get<std::unique_ptr<command_keyring>>(loaded));
+
+    // Group-writable: refused at start; at a reload the previous keys stay and the error says why.
+    mode(dir / "keys", fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_write);
+    require(!succeeded(command_keyring::load(dir / "keys")), "a group-writable key file is not loaded");
+    write("# changed\n" + line(k2));  // a different size, so the reload does not depend on the timestamp granularity
+    ring->refresh();
+    require(ring->size() == 1U && ring->last_error().find("writable by group or others") != std::string::npos, "the reload is refused and says why");
+    mode(dir / "keys", fs::perms::owner_read | fs::perms::owner_write);
+    require(!succeeded(command_keyring::load(dir / "missing")), "a missing file is still refused");
+
+    // A directory that others can write into lets them replace the file, so the same file is refused there.
+    mode(dir, fs::perms::all);
+    const auto in_open_directory = command_keyring::load(dir / "keys");
+    require(!succeeded(in_open_directory) && std::get<error>(in_open_directory).message.find("directory") != std::string::npos, "a key file in a world-writable directory is not loaded");
+    mode(dir, fs::perms::owner_all);
+    require(succeeded(command_keyring::load(dir / "keys")), "the same file loads once the directory is closed");
+
+    // Owned by someone else: only a root test run can arrange it.
+    if (::geteuid() == 0) {
+        require(::chown((dir / "keys").c_str(), 12345, static_cast<gid_t>(-1)) == 0, "chown to another user");
+        const auto foreign = command_keyring::load(dir / "keys");
+        require(!succeeded(foreign) && std::get<error>(foreign).message.find("owned by uid 12345") != std::string::npos, "a key file owned by another user is not loaded");
+    }
+    mode(dir, fs::perms::all);
+    fs::remove_all(dir);
+}
+
 void test_signature_covers_values_not_json_text() {
     // The signature travels as JSON and verifies against the parsed command.
     const auto key = make_key();
@@ -1574,6 +1616,9 @@ void test_configuration() {
 }  // namespace
 
 int main() {
+    // The sensor refuses key files another user can write; a login umask of 002 (Ubuntu's user-private groups) would
+    // make every file these tests create group-writable.
+    ::umask(0022);
     struct named {
         const char* name;
         void (*run)();
@@ -1617,6 +1662,7 @@ int main() {
         {"processor_requires_valid_signature", test_processor_requires_valid_signature},
         {"processor_signature_policy", test_processor_signature_policy},
         {"keyring_file_and_revocation", test_keyring_file_and_revocation},
+        {"keyring_refuses_an_untrusted_file", test_keyring_refuses_an_untrusted_file},
         {"signature_covers_values_not_json_text", test_signature_covers_values_not_json_text},
         {"configuration", test_configuration},
     };

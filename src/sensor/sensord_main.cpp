@@ -19,6 +19,7 @@
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 #include "panopticon/linux_agent/sensor/sensitive_file.hpp"
 #include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
+#include "panopticon/linux_agent/sensor/systemd_notify.hpp"
 #include "panopticon/linux_agent/sensor/uplink.hpp"
 
 #include <algorithm>
@@ -343,8 +344,19 @@ int main(int argc, char** argv) {
             control.reset();
         }
     }
+    // Under systemd (Type=notify, WatchdogSec=): say when collection is up, and feed the watchdog from the pipeline loop
+    // itself, so a stalled loop is restarted instead of looking alive.
+    auto notifier = std::make_shared<sensor::systemd_notifier>(sensor::systemd_notifier::from_environment());
+    if (notifier->active()) {
+        if (notifier->watchdog_interval_ns() != 0U) {
+            pipeline.set_heartbeat([notifier] { notifier->pet_if_due(sensor::clock_domain::now_monotonic_ns()); });
+        }
+        notifier->ready();
+        std::fprintf(stderr, "panopticon-sensord: service manager notified; watchdog %s\n", notifier->watchdog_interval_ns() != 0U ? "armed" : "off");
+    }
     const auto deadline = duration_seconds == 0U ? 0U : sensor::clock_domain::now_monotonic_ns() + duration_seconds * 1'000'000'000ULL;
     const auto finished = pipeline.run(stop_requested, deadline);
+    notifier->stopping();
     if (control) control->stop();
     pipeline.shutdown();
     if (delivery_runner) {
