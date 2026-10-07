@@ -1,6 +1,6 @@
 # ADR 025: Per-command authorization
 
-**Status:** Accepted (endpoint side implemented and verified; the Manager signer and the contract change are proposals, see "For the Manager and contracts owners")
+**Status:** Accepted (endpoint side implemented and verified; the Manager signs on `feat/linux-command-signing`, Manager ADR 008, verified end to end; the contract change is still a proposal, see "For the Manager and contracts owners")
 **Date:** 2026-10-07
 
 ## Context
@@ -85,12 +85,26 @@ start processes no command.
   operational failure that is refused, not a bypass.
 * ES256 only; algorithm agility is deliberately absent.
 
-## For the Manager and contracts owners (proposal; not implemented in their repositories)
+## For the Manager and contracts owners
 
-* Command envelope 1.1: an optional `authorization` object as in decision 1, and `created_at` required when
-  signing. Note that the Manager rewrites a command to a schema-1 envelope on enqueue (`authorize_and_enqueue`);
-  it must carry `authorization` through unchanged.
-* A signer holding the private key outside the ingest tier, signing the string in decision 2, and a way to
-  distribute the public half to endpoints (the keyring file today; enrollment-time delivery later).
+* **Done in the Manager** (`panopticon-manager` `feat/linux-command-signing`, ADR 008, not yet merged):
+  `authorize_and_enqueue` signs every command it stores with a file-held P-256 key
+  (`PANOPTICON_COMMAND_SIGNING_KEY`), using a port of the string in decision 2. Its tests check it byte for byte
+  against vectors from `tests/e2e/command_signing_vectors.py`, which runs the reference signer, and verify the
+  reference signer's signatures. The signature is stored with the command, so a rewrite of the Manager's table
+  is refused at the endpoint. The sensor asks for it with `command_auth=ES256` on its poll; the Manager leaves
+  `authorization` out for a poll without it, because the Windows agent refuses unknown members. When signing is
+  configured and the key is unusable, command creation fails rather than queueing unsigned.
+  `python -m manager.command_signing keyring-line <key>` prints the line for this endpoint's key file.
+  REAL-VM VERIFIED against the real Manager over HTTPS: a signed `COLLECT_PROCESS_INFO` and a dry-run
+  `KILL_PROCESS` were carried out as configured; an enforced `KILL_PROCESS` stopped a sacrificial process; a
+  command was refused (`unknown_signing_key`) by a sensor pinning another key; and a command whose target was
+  rewritten in the `commands` table after signing was refused (`signature_invalid`), touching neither process.
+  Every command closed at the Manager with its result and a `created … signed ES256 key_id=…` audit event.
+* Still a proposal: command envelope 1.1 in `panopticon-contracts`, with an optional `authorization` object as
+  in decision 1 and `created_at` required when signing.
+* Later: a signer that holds the private key outside the Manager process (today anyone controlling that process
+  can sign), and delivery of the public half at enrollment (today the key file is placed by hand or by the
+  package).
 * `tests/e2e/command_signer.cpp` is the reference implementation of the signing input and
   `tests/e2e/fake_command_manager.py` shows the delivery routes.

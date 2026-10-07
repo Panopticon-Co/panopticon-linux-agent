@@ -91,7 +91,7 @@ never repeat the action.
   host produced `not_yet_valid` for every command in the first live run. The gate is kept.
 * **Known gaps.** Per-command authorization is ADR 025 (signed commands, pinned revocable keys); a
   sensor configured with `response_allow_unsigned=true` still relies on TLS plus the enrolled identity
-  alone, and the Manager does not yet sign (proposal in ADR 025).
+  alone. The Manager signs from `feat/linux-command-signing` (Manager ADR 008, not yet merged).
   Schema "1" has no `boot_id`; schema 2 closes that for process actions, but binding is required
   only when `response_require_boot_binding=true` (off by default until Manager issues schema 2 to
   Linux everywhere). There is no

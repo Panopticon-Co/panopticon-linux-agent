@@ -40,7 +40,9 @@ public:
     https_command_transport(const https_command_transport&) = delete;
     https_command_transport& operator=(const https_command_transport&) = delete;
 
-    post_response poll() override { return exchange(false, base_ + "/commands?delivery_mode=durable", {}); }
+    // command_auth=ES256 asks the Manager for each command's signature (it leaves it out for agents that cannot parse
+    // it). Asking costs nothing when no key is pinned: the signature is then not checked.
+    post_response poll() override { return exchange(false, base_ + "/commands?delivery_mode=durable&command_auth=ES256", {}); }
 
     post_response accept(const std::string& command_id) override {
         if (!is_valid_identifier(command_id)) return refused("the command id is not a valid identifier");
