@@ -1,0 +1,7 @@
+# Scripts and unit files run on Linux: never convert them to CRLF on a Windows checkout.
+*.sh text eol=lf
+packaging/deb/* text eol=lf
+systemd/*.service text eol=lf
+tests/e2e/*.sh text eol=lf
+tests/chaos/*.sh text eol=lf
+tests/perf/*.sh text eol=lf
