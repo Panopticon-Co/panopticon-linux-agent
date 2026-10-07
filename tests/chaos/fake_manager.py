@@ -29,13 +29,30 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+COMPACT_FULL_TYPES = ("health", "loss")
+
+
+def compact_line(line):
+    """--compact-store: an event keeps only its envelope (what analyze.py and the soak read); health, loss and
+    response records keep everything. The digest is always of the full line, so dedup and conflicts are exact."""
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return line
+    if record.get("record_type") in COMPACT_FULL_TYPES or str(record.get("type", "")).startswith("response."):
+        return line
+    keep = {key: record[key] for key in ("seq", "record_type", "type", "time", "observed_time") if key in record}
+    return json.dumps(keep, separators=(",", ":"))
+
+
 class State:
-    def __init__(self, store_path, mode_path, token, wire_path=None):
+    def __init__(self, store_path, mode_path, token, wire_path=None, compact=False):
         self.wire = open(wire_path, "a", encoding="utf-8", buffering=1) if wire_path else None
         self.lock = threading.Lock()
         self.mode_path = mode_path
         self.token = token
-        self.seen = {}  # seq -> set of digests
+        self.compact = compact
+        self.seen = {}  # seq -> digest, or a set of digests once a seq has two (a conflict)
         self.requests = 0
         self.connections = 0
         self.mode_text = None
@@ -47,8 +64,24 @@ class State:
                         row = json.loads(line)
                     except ValueError:
                         continue
-                    self.seen.setdefault(row["seq"], set()).add(row["digest"])
+                    self.remember(row["seq"], row["digest"])
         self.store = open(store_path, "a", encoding="utf-8", buffering=1)
+
+    def known(self, seq, digest):
+        value = self.seen.get(seq)
+        if value is None:
+            return False
+        return digest == value if isinstance(value, str) else digest in value
+
+    def remember(self, seq, digest):
+        value = self.seen.get(seq)
+        if value is None:
+            self.seen[seq] = digest
+        elif isinstance(value, str):
+            if value != digest:
+                self.seen[seq] = {value, digest}
+        else:
+            value.add(digest)
 
     def mode(self):
         try:
@@ -116,11 +149,12 @@ def make_handler(state):
                         rejected.append({"line": index, "reason": "not_json"})
                         continue
                     digest = hashlib.sha256(line.encode()).hexdigest()
-                    if digest in state.seen.get(seq, set()):
+                    if state.known(seq, digest):
                         duplicates += 1
                         continue
-                    state.seen.setdefault(seq, set()).add(digest)
-                    state.store.write(json.dumps({"rx": time.time(), "batch": batch, "seq": seq, "digest": digest, "line": line}) + "\n")
+                    state.remember(seq, digest)
+                    stored = compact_line(line) if state.compact else line
+                    state.store.write(json.dumps({"rx": time.time(), "batch": batch, "seq": seq, "digest": digest, "line": stored}) + "\n")
                     accepted += 1
                 answer = {"batch_id": batch, "received": len(lines), "accepted": accepted, "duplicates": duplicates, "rejected": rejected}
                 if mode == "bad_ack":
@@ -149,8 +183,9 @@ def main():
     parser.add_argument("--mode-file", required=True)
     parser.add_argument("--token", required=True)
     parser.add_argument("--wire-log")
+    parser.add_argument("--compact-store", action="store_true", help="store only the envelope of event records")
     args = parser.parse_args()
-    state = State(args.store, args.mode_file, args.token, args.wire_log)
+    state = State(args.store, args.mode_file, args.token, args.wire_log, args.compact_store)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
     server.daemon_threads = True
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

@@ -321,9 +321,10 @@ class Soak:
             [sys.executable, os.path.join(ROOT, "tests", "e2e", "fake_command_manager.py"), "--port", str(PORT),
              "--cert", self.path("cert.pem"), "--key", self.path("key.pem"), "--store", self.path("store.ndjson"),
              "--mode-file", self.path("mode"), "--token", TOKEN, "--commands", self.path("commands.ndjson"),
-             "--events", self.path("events.ndjson"), "--redeliver-file", self.path("redeliver"), "--wire-log", self.path("wire.ndjson")],
+             "--events", self.path("events.ndjson"), "--redeliver-file", self.path("redeliver"), "--wire-log", self.path("wire.ndjson"),
+             "--compact-store"],
             stdout=open(self.path("manager.log"), "a"), stderr=subprocess.STDOUT)
-        for _ in range(50):
+        for _ in range(600):
             try:
                 socket.create_connection(("127.0.0.1", PORT), timeout=1).close()
                 return
@@ -336,6 +337,26 @@ class Soak:
             self.manager.kill()
             self.manager.wait()
             self.manager = None
+
+    # An outage is the Manager's port refusing connections and resetting the open one (tcp-reset), as when the
+    # Manager host is down; the fake Manager keeps running so it never has to reload a multi-hour store.
+    OUTAGE_RULE = ["INPUT", "-p", "tcp", "--dport", str(PORT), "-j", "REJECT", "--reject-with", "tcp-reset"]
+
+    def outage(self, on):
+        subprocess.run(["iptables", "-I" if on else "-D"] + self.OUTAGE_RULE, check=on, stderr=subprocess.DEVNULL)
+
+    def cleanup(self):
+        self.outage(False)
+        for process in (self.loader, self.sensor):
+            if process and process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+        self.stop_manager()
+        if getattr(self, "victim_process", None) and self.victim_process.poll() is None:
+            self.victim_process.kill()
 
     def start_sensor(self):
         self.sensor = subprocess.Popen([self.args.sensord, "--config", self.path("sensor.conf"), "--control-socket", self.path("ctl.sock")],
@@ -414,11 +435,19 @@ class Soak:
             handle.write(text + "\n")
 
     def run(self):
+        try:
+            return self.soak()
+        finally:
+            self.cleanup()
+
+    def soak(self):
         hours = self.args.hours
         self.setup()
+        self.outage(False)  # a rule left by an interrupted earlier run
         self.start_manager()
         self.start_sensor()
         victim, ticks = self.victim()
+        self.victim_process = victim
         loader_log = self.path("load.ndjson")
         self.loader = subprocess.Popen([sys.executable, os.path.abspath(__file__), "load", "--scale", str(self.args.scale)],
                                        stdout=open(loader_log, "a"), stderr=open(self.path("load.err"), "a"))
@@ -438,8 +467,8 @@ class Soak:
             minute = int((now - start) // 60)
             if minute != last_minute:
                 last_minute = minute
-                if minute % 30 == 15 and self.manager:
-                    self.stop_manager()
+                if minute % 30 == 15 and not outage_until:
+                    self.outage(True)
                     outage_until = now + 90
                     faults.append((now, "outage"))
                     self.say("manager outage (90 s)")
@@ -454,7 +483,7 @@ class Soak:
                     faults.append((now, "drop_ack"))
                     self.say("three dropped acks")
             if outage_until and now >= outage_until:
-                self.start_manager()
+                self.outage(False)
                 outage_until = None
                 self.say("manager back")
             if mode_until and now >= mode_until:
@@ -477,8 +506,7 @@ class Soak:
             self.loader.wait(timeout=60)
         except subprocess.TimeoutExpired:
             self.loader.kill()
-        if outage_until:
-            self.start_manager()
+        self.outage(False)
         self.set_mode("ok")
         drained = False
         for _ in range(180):
@@ -608,19 +636,36 @@ def analyze(args):
         report["providers"] = {p["name"]: {"state": p["state"], "events": p["events"], "drops": p["drops"]} for p in last["providers"]}
         lines.append("providers at end: " + ", ".join("%s=%s ev=%d drops=%d" % (name, value["state"], value["events"], value["drops"])
                                                       for name, value in report["providers"].items()))
-        degraded = {}
+        # A provider on standby (superseded by a preferred member of its family) is working as designed. A state other
+        # than active while an injected fault is in force (plus a minute to recover) is expected and reported apart;
+        # only the rest counts against the verdict.
+        fault_seconds = {"outage": 90, "slow": 120, "drop_ack": 60}
+        windows = [(t, t + fault_seconds.get(kind, 120) + 60) for t, kind in run.get("faults", [])]
+        degraded, during_faults, standby = {}, {}, {}
         for t, status in statuses:
             for provider in status["providers"]:
-                if provider["state"] != "active":
-                    entry = degraded.setdefault(provider["name"], {"samples": 0, "first": t, "last": t, "reasons": set()})
-                    entry["samples"] += 1
-                    entry["last"] = t
-                    entry["reasons"].add(provider["state"] + ": " + provider["reason"])
-        report["provider_not_active"] = {name: {"samples": value["samples"], "of": len(statuses),
-                                                "first_minute": round((value["first"] - start) / 60, 1),
-                                                "last_minute": round((value["last"] - start) / 60, 1), "reasons": sorted(value["reasons"])}
-                                         for name, value in degraded.items()}
-        lines.append("providers ever not active: %s" % (report["provider_not_active"] or "none"))
+                if provider["state"] == "active":
+                    continue
+                if provider["state"] == "standby":
+                    standby[provider["name"]] = provider["reason"]
+                    continue
+                bucket = during_faults if any(begin <= t <= end for begin, end in windows) else degraded
+                entry = bucket.setdefault(provider["name"], {"samples": 0, "first": t, "last": t, "reasons": set()})
+                entry["samples"] += 1
+                entry["last"] = t
+                entry["reasons"].add(provider["state"] + ": " + provider["reason"])
+
+        def summary(bucket):
+            return {name: {"samples": value["samples"], "of": len(statuses), "first_minute": round((value["first"] - start) / 60, 1),
+                           "last_minute": round((value["last"] - start) / 60, 1), "reasons": sorted(value["reasons"])}
+                    for name, value in bucket.items()}
+
+        report["provider_not_active"] = summary(degraded)
+        report["provider_not_active_during_faults"] = summary(during_faults)
+        report["provider_standby"] = standby
+        lines.append("providers on standby (superseded): %s" % (", ".join(sorted(standby)) or "none"))
+        lines.append("providers not active during injected faults (expected): %s" % (report["provider_not_active_during_faults"] or "none"))
+        lines.append("providers not active outside faults: %s" % (report["provider_not_active"] or "none"))
         delivery = last.get("delivery", {})
         report["delivery"] = {key: delivery.get(key) for key in ("state", "batches_sent", "records_acknowledged", "retries", "refusals",
                                                                   "records_quarantined", "quarantine_failures")}
@@ -734,7 +779,7 @@ def analyze(args):
         verdicts["threads"] = "stable" if report["threads"]["max"] == report["threads"]["min"] else "CHANGED"
     if "health_interval_seconds" in report:
         verdicts["timer"] = "on time" if report["health_interval_seconds"]["p99"] <= HEALTH_SECONDS + 1.0 else "DRIFT"
-    verdicts["providers"] = "all active" if not report.get("provider_not_active") else "NOT ALWAYS ACTIVE"
+    verdicts["providers"] = "active outside injected faults" if not report.get("provider_not_active") else "NOT ALWAYS ACTIVE"
     c = report["commands"]
     verdicts["commands"] = "all answered, victim alive" if c["sent"] and c["with_result"] == c["sent"] and c["victim_alive_at_end"] else "CHECK"
     if "integrity" in report:

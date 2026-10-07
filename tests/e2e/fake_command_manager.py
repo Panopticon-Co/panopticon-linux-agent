@@ -39,12 +39,13 @@ def main():
     parser.add_argument("--events", required=True)
     parser.add_argument("--redeliver-file", default="")
     parser.add_argument("--wire-log")
+    parser.add_argument("--compact-store", action="store_true", help="store only the envelope of event records")
     args = parser.parse_args()
 
-    state = fake_manager.State(args.store, args.mode_file, args.token, args.wire_log)
+    state = fake_manager.State(args.store, args.mode_file, args.token, args.wire_log, args.compact_store)
     base = fake_manager.make_handler(state)
     lock = threading.Lock()
-    # Accepted ids survive a restart, as they do in the real Manager's database (the soak restarts this process).
+    # Accepted ids survive a restart, as they do in the real Manager's database.
     accepted = set()
     if os.path.exists(args.events):
         with open(args.events, "r", encoding="utf-8") as handle:
