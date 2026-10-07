@@ -129,6 +129,10 @@ public:
     // Events the provider deliberately dropped to stay within its rate budget since the last
     // call; the count is exact, so no reconcile is needed (reported as a `governor` loss).
     [[nodiscard]] virtual std::uint64_t take_governed() { return 0U; }
+    // Inputs the provider read and refused to turn into events since the last call (an authentication
+    // log line over the size limit, for example). Nothing about them reaches the stream, so without
+    // this they would be invisible; the count is exact (reported as a `refused` loss).
+    [[nodiscard]] virtual std::uint64_t take_refused() { return 0U; }
 };
 
 }  // namespace panopticon::linux_agent::sensor

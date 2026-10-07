@@ -812,6 +812,11 @@ result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
             (void)emit_loss({"governor", governed, {},
                              std::string{source->name()} + " exceeded its event budget; " + std::to_string(governed) + " event(s) skipped"});
         }
+        if (const auto refused = source->take_refused(); refused > 0U) {
+            (void)emit_loss({"refused", refused, {},
+                             std::string{source->name()} + " refused " + std::to_string(refused) +
+                                 " input(s) it could not turn into events (for example a log line over the size limit); nothing was recorded about them"});
+        }
         if (const auto lost = source->take_losses(); lost > 0U) {
             (void)emit_loss({"kernel", lost, {},
                              std::string{source->name()} + " receive buffer overflowed " + std::to_string(lost) +

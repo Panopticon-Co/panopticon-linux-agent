@@ -783,10 +783,13 @@ public:
     provider_health health() const override { return {"scripted", active_ ? "active" : "stopped", "", capabilities(), records_.size(), 0U}; }
     std::uint64_t take_losses() override { return 0U; }
     std::uint64_t take_governed() override { return std::exchange(governed_, 0U); }
+    std::uint64_t take_refused() override { return std::exchange(refused_, 0U); }
+    void refuse(const std::uint64_t count) { refused_ = count; }
 
 private:
     std::vector<raw_record> records_;
     std::uint64_t governed_{0U};
+    std::uint64_t refused_{0U};
     bool active_{false};
     record_queue* queue_{nullptr};
 };
@@ -1586,6 +1589,39 @@ void test_pipeline_reports_records_the_queue_refused() {
     require(loss_records == 1U, "exactly one queue loss record is written: " + std::to_string(loss_records));
 }
 
+// Inputs a provider read and refused (an oversize log line) are reported as a `refused` loss with the exact count, once.
+void test_pipeline_reports_inputs_a_provider_refused() {
+    const auto root = fresh_directory("refusedloss");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    auto script = std::make_unique<scripted_provider>(std::vector<raw_record>{});
+    auto* handle = script.get();
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::move(script));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        handle->refuse(3U);
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::size_t reports = 0U;
+    for (const auto& line : lines) {
+        if (!contains(line, R"("stage":"refused")")) continue;
+        ++reports;
+        require(contains(line, R"("count":3)") && contains(line, "scripted"), "the loss names the provider and carries the exact count");
+    }
+    require(reports == 1U, "exactly one refused loss record is written: " + std::to_string(reports));
+}
+
 void test_pipeline_rebases_event_times_after_a_clock_step() {
     const auto root = fresh_directory("clockstepproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
@@ -2266,6 +2302,7 @@ int main() {
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
     run("pipeline_reports_records_the_queue_refused", test_pipeline_reports_records_the_queue_refused);
+    run("pipeline_reports_inputs_a_provider_refused", test_pipeline_reports_inputs_a_provider_refused);
     run("pipeline_rebases_event_times_after_a_clock_step", test_pipeline_rebases_event_times_after_a_clock_step);
     run("pipeline_reports_delivery_and_turns_rejections_into_loss", test_pipeline_reports_delivery_and_turns_rejections_into_loss);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);

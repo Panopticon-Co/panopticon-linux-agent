@@ -571,7 +571,9 @@ void auth_log_provider::poll_once() {
     std::string failure;
     for (auto& tailer : tailers_) {
         std::vector<std::string> lines;
+        const auto oversize_before = tailer->oversize_lines();
         if (!tailer->poll(lines)) failure = "cannot read " + tailer->path().string();
+        refused_ += tailer->oversize_lines() - oversize_before;
         const auto now = clock_domain::now_unix_ns();
         for (const auto& line : lines) {
             ++lines_;

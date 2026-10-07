@@ -103,6 +103,9 @@ public:
     [[nodiscard]] provider_health health() const override;
     [[nodiscard]] std::uint64_t take_losses() override { return 0U; }
     [[nodiscard]] std::uint64_t take_governed() override { return governed_.exchange(0U); }
+    // Log lines over `maximum_auth_line_bytes`, skipped because they cannot be parsed safely. A failed
+    // login padded past the limit would otherwise disappear without a trace.
+    [[nodiscard]] std::uint64_t take_refused() override { return refused_.exchange(0U); }
 
     // One pass over every followed file. Public for tests.
     void poll_once();
@@ -119,6 +122,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<std::uint64_t> events_{0U};
     std::atomic<std::uint64_t> governed_{0U};
+    std::atomic<std::uint64_t> refused_{0U};
     std::atomic<std::uint64_t> lines_{0U};
     mutable std::mutex failure_mutex_;
     std::string failure_;

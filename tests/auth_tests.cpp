@@ -290,6 +290,26 @@ void test_provider_without_logs_is_unavailable_and_governor_counts() {
     require(seen.size() == 2U && provider.take_governed() == 3U && provider.take_governed() == 0U, "events over the budget are counted, exactly");
 }
 
+// A log line over the limit is skipped, and that used to be silent: the tailer counted it and nothing read the count, so a
+// failed login padded past the limit disappeared without a trace.
+void test_provider_reports_refused_oversize_lines() {
+    scratch dir;
+    dir.write("auth.log", "");
+    auth_log_options options;
+    options.paths = {dir.path / "auth.log"};
+    options.interval = std::chrono::milliseconds{20};
+    auth_log_provider provider{options};
+    record_queue queue{64U};
+    require(std::holds_alternative<bool>(provider.start(queue)), "start");
+    dir.append("auth.log", iso + "sshd[1]: Failed password for invalid user " + std::string(maximum_auth_line_bytes + 100U, 'A') +
+                               " from 3.3.3.3 port 3 ssh2\n" + iso + "sshd[2]: Failed password for root from 2.2.2.2 port 2 ssh2\n");
+    std::vector<raw_auth_event> seen;
+    require(wait_for_auth(queue, seen, 1U), "the ordinary line after the oversize one is delivered");
+    provider.stop();
+    require(seen.size() == 1U && seen[0].user == "root", "only the ordinary line became an event");
+    require(provider.take_refused() == 1U && provider.take_refused() == 0U, "the oversize line is counted, exactly once");
+}
+
 }  // namespace
 
 int main() {
@@ -308,6 +328,7 @@ int main() {
         {"tailer_skips_oversize_lines_and_waits_for_missing_files", test_tailer_skips_oversize_lines_and_waits_for_missing_files},
         {"provider_reports_new_lines_only", test_provider_reports_new_lines_only},
         {"provider_without_logs_is_unavailable_and_governor_counts", test_provider_without_logs_is_unavailable_and_governor_counts},
+        {"provider_reports_refused_oversize_lines", test_provider_reports_refused_oversize_lines},
     };
     int failures = 0;
     for (const auto& test : tests) {
