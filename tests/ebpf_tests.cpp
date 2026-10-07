@@ -671,6 +671,83 @@ void test_live_attachment_self_check() {
     require(health.reason.find("hook attachment lost") != std::string::npos, "and says why");
 }
 
+std::vector<int> link_descriptors() {
+    std::vector<int> found;
+    for (const auto& entry : fs::directory_iterator("/proc/self/fd")) {
+        std::error_code error;
+        if (fs::read_symlink(entry.path(), error).string() == "anon_inode:bpf_link" && !error) found.push_back(std::stoi(entry.path().filename().string()));
+    }
+    return found;
+}
+
+// Every hook closed from outside: each is attached again, verified, and reported as one closed blind interval; the
+// process lifecycle is then observed exactly once (a second copy of a hook would report it twice).
+void test_live_lost_hooks_are_reattached_and_reported() {
+    live_provider live{ebpf_role::process};
+    if (!live.begin("live_lost_hooks_are_reattached_and_reported")) return;
+    auto& provider = live.provider();
+    require(provider.check_attachments() == 0U && provider.take_gaps().empty(), "an untouched provider has nothing lost");
+
+    const auto descriptors = link_descriptors();
+    require(!descriptors.empty(), "the provider holds bpf-link descriptors");
+    for (const int fd : descriptors) require(::close(fd) == 0, "close a link descriptor");
+
+    require(provider.check_attachments() == descriptors.size(), "every closed hook is reported lost");
+    require(provider.health().state == "degraded", "the provider is degraded while hooks are lost");
+    require(provider.recover_attachments() == 0U, "every hook is attached again");
+    require(provider.check_attachments() == 0U, "and the new links verify");
+    const auto health = provider.health();
+    require(health.state == "active", "the provider is active again");
+    require(health.reason.find(std::to_string(descriptors.size()) + " re-attached") != std::string::npos, "health says hooks were re-attached");
+
+    const auto gaps = provider.take_gaps();
+    require(gaps.size() == descriptors.size(), "one gap per re-attached hook");
+    for (const auto& gap : gaps) {
+        require(gap.last_verified_unix_ns != 0U && gap.last_verified_unix_ns <= gap.detected_unix_ns && gap.detected_unix_ns <= gap.restored_unix_ns,
+                "the gap runs from the last verification through detection to the re-attach");
+        require(gap.attempts == 1U && gap.what.rfind("hook ", 0U) == 0U, "the gap names the hook and the attempts");
+    }
+    require(provider.take_gaps().empty(), "a gap is reported once");
+
+    const auto pid = spawn_child("exit7");
+    (void)reap(pid);
+    records_t all;
+    require(collect(live.queue(), all, [&](const records_t& r) { return !exits_of(r, pid).empty(); }), "a process after the re-attach is observed");
+    require(forks_of(all, pid).size() == 1U && execs_of(all, pid).size() == 1U && exits_of(all, pid).size() == 1U,
+            "exactly one fork, exec and exit: no hook is attached twice");
+}
+
+// A link someone else still holds (they took a copy of the descriptor and closed the sensor's) never stopped: the
+// provider takes it back instead of attaching a duplicate, and reports no gap because there was none.
+void test_live_held_link_is_taken_back_without_gap() {
+    live_provider live{ebpf_role::process};
+    if (!live.begin("live_held_link_is_taken_back_without_gap")) return;
+    auto& provider = live.provider();
+
+    const auto descriptors = link_descriptors();
+    require(!descriptors.empty(), "the provider holds bpf-link descriptors");
+    std::vector<int> held;
+    for (const int fd : descriptors) {
+        held.push_back(::dup(fd));
+        require(held.back() >= 0 && ::close(fd) == 0, "copy, then close, a link descriptor");
+    }
+    require(provider.check_attachments() == descriptors.size(), "the closed descriptors are noticed");
+    require(provider.recover_attachments() == 0U, "every hook is taken back");
+    require(provider.take_gaps().empty(), "no gap: the hooks never stopped");
+    require(provider.health().reason.find(std::to_string(descriptors.size()) + " taken back without a gap") != std::string::npos, "health says so");
+
+    // The copies are dropped; the provider's own references keep the hooks attached.
+    for (const int fd : held) (void)::close(fd);
+    require(provider.check_attachments() == 0U, "the hooks stay attached after the other holder lets go");
+
+    const auto pid = spawn_child("exit7");
+    (void)reap(pid);
+    records_t all;
+    require(collect(live.queue(), all, [&](const records_t& r) { return !exits_of(r, pid).empty(); }), "a process after the take-back is observed");
+    require(forks_of(all, pid).size() == 1U && execs_of(all, pid).size() == 1U && exits_of(all, pid).size() == 1U,
+            "exactly one fork, exec and exit: nothing was attached twice");
+}
+
 // A loopback server and client in one process: the kernel hooks must report the listen, the
 // connect, the accept and the first UDP datagram with this process as the actor and the exact
 // ports. A connection that is closed immediately is the case the socket-table poll misses.
@@ -1589,6 +1666,8 @@ int main(int argc, char** argv) {
     run("live_namespace_change", test_live_namespace_change);
     run("live_dns_query", test_live_dns_query);
     run("live_attachment_self_check", test_live_attachment_self_check);
+    run("live_lost_hooks_are_reattached_and_reported", test_live_lost_hooks_are_reattached_and_reported);
+    run("live_held_link_is_taken_back_without_gap", test_live_held_link_is_taken_back_without_gap);
     std::cout << (failures == 0 ? std::string{"ALL PASSED"} : "FAILURES: " + std::to_string(failures)) << " (skipped " << skipped << ")\n";
     return failures == 0 ? 0 : 1;
 }

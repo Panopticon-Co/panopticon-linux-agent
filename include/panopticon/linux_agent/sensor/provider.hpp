@@ -26,6 +26,17 @@ struct provider_health {
     std::string tier{};    // primary, or fallback when an earlier member of the family is preferred
 };
 
+// A closed interval in which part of a provider was not observing: a hook that was removed from outside the sensor
+// and attached again. The provider cannot know when inside the interval the hook went away, so the interval runs
+// from the last moment the hook was verified attached to the moment it was verified attached again.
+struct provider_gap {
+    std::string what;  // the part that was blind, e.g. "hook handle_exec (process.lifecycle)"
+    std::uint64_t last_verified_unix_ns{};
+    std::uint64_t detected_unix_ns{};
+    std::uint64_t restored_unix_ns{};
+    std::uint32_t attempts{};  // attach attempts it took, the successful one included
+};
+
 // FIFO, bounded, multi-producer/single-consumer. Order matters for the entity graph (fork before
 // exec before exit), so unlike bounded_priority_queue this never reorders; when full the new
 // record is dropped and counted, and the consumer turns the count into a `loss` record and an
@@ -136,6 +147,10 @@ public:
     // log line over the size limit, for example). Nothing about them reaches the stream, so without
     // this they would be invisible; the count is exact (reported as a `refused` loss).
     [[nodiscard]] virtual std::uint64_t take_refused() { return 0U; }
+    // Blind intervals the provider recovered from since the last call (reported as one `provider_gap` loss each,
+    // followed by a reconcile). A provider that restores a hook must report the interval: reattaching silently
+    // would make the stream look complete when it is not.
+    [[nodiscard]] virtual std::vector<provider_gap> take_gaps() { return {}; }
 };
 
 }  // namespace panopticon::linux_agent::sensor

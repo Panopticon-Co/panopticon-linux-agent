@@ -889,6 +889,18 @@ result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
                                        " time(s); the number of lost events is unknown"});
             reconcile_now = true;
         }
+        // A hook removed from outside the sensor and attached again: whatever it would have seen in between is missing,
+        // and the entity graph may have missed forks, execs or exits, hence the reconcile.
+        for (const auto& gap : source->take_gaps()) {
+            const auto ms = [](const std::uint64_t ns) { return std::to_string(ns / 1000000U); };
+            const auto blind = gap.restored_unix_ns >= gap.last_verified_unix_ns ? gap.restored_unix_ns - gap.last_verified_unix_ns : 0U;
+            (void)emit_loss({"provider_gap", 1U, {},
+                             std::string{source->name()} + " " + gap.what + " was removed from outside the sensor: last verified attached at unix " +
+                                 ms(gap.last_verified_unix_ns) + " ms, found missing at " + ms(gap.detected_unix_ns) + " ms, attached again and verified at " +
+                                 ms(gap.restored_unix_ns) + " ms after " + std::to_string(gap.attempts) + " attempt(s); events it would have reported in those " +
+                                 ms(blind) + " ms may be missing. The count is 1 interval, not a number of events"});
+            reconcile_now = true;
+        }
     }
     if (now_ns - last_storage_check_ns_ >= ns_per_second) {
         last_storage_check_ns_ = now_ns;

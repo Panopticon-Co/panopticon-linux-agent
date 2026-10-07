@@ -806,9 +806,12 @@ public:
     std::uint64_t take_governed() override { return std::exchange(governed_, 0U); }
     std::uint64_t take_refused() override { return std::exchange(refused_, 0U); }
     void refuse(const std::uint64_t count) { refused_ = count; }
+    std::vector<provider_gap> take_gaps() override { return std::exchange(gaps_, {}); }
+    void gap(provider_gap closed) { gaps_.push_back(std::move(closed)); }
 
 private:
     std::vector<raw_record> records_;
+    std::vector<provider_gap> gaps_;
     std::uint64_t governed_{0U};
     std::uint64_t refused_{0U};
     bool active_{false};
@@ -1643,6 +1646,47 @@ void test_pipeline_reports_inputs_a_provider_refused() {
     require(reports == 1U, "exactly one refused loss record is written: " + std::to_string(reports));
 }
 
+// A hook a provider restored after it was removed from outside is reported as one `provider_gap` interval, with the
+// times that bound it, and the entity graph is reconciled because forks, execs or exits may have been missed.
+void test_pipeline_reports_a_provider_gap_and_reconciles() {
+    const auto root = fresh_directory("providergap");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    auto script = std::make_unique<scripted_provider>(std::vector<raw_record>{});
+    auto* handle = script.get();
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::move(script));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        const auto reconciles = pipeline.metrics().reconciles;
+        handle->gap({"hook handle_exec (process.lifecycle)", 1700000000000000000ULL, 1700000004000000000ULL, 1700000004002000000ULL, 1U});
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        require(pipeline.metrics().reconciles == reconciles + 1U, "the gap triggers a reconcile");
+        (void)pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0});
+        require(pipeline.metrics().reconciles == reconciles + 1U, "once");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::size_t reports = 0U;
+    for (const auto& line : lines) {
+        if (!contains(line, R"("stage":"provider_gap")")) continue;
+        ++reports;
+        require(contains(line, R"("count":1)") && contains(line, R"("by_type":{})"), "one interval, no per-type event counts");
+        require(contains(line, "scripted hook handle_exec") && contains(line, "1700000000000 ms") && contains(line, "1700000004002 ms") &&
+                    contains(line, "those 4002 ms"),
+                "the detail names the hook and bounds the interval");
+    }
+    require(reports == 1U, "exactly one provider_gap loss record is written: " + std::to_string(reports));
+}
+
 // An unclean end of the sensor (kill, crash, power loss) is reported by the next start as a `sensor_gap` loss; a clean
 // stop and a first start report nothing.
 void test_pipeline_reports_an_unclean_previous_instance() {
@@ -2471,6 +2515,7 @@ int main() {
     run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
     run("pipeline_reports_records_the_queue_refused", test_pipeline_reports_records_the_queue_refused);
     run("pipeline_reports_inputs_a_provider_refused", test_pipeline_reports_inputs_a_provider_refused);
+    run("pipeline_reports_a_provider_gap_and_reconciles", test_pipeline_reports_a_provider_gap_and_reconciles);
     run("pipeline_reports_an_unclean_previous_instance", test_pipeline_reports_an_unclean_previous_instance);
     run("config_and_ca_must_be_trustworthy", test_config_and_ca_must_be_trustworthy);
     run("systemd_notifier_protocol", test_systemd_notifier_protocol);

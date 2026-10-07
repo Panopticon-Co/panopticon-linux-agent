@@ -196,7 +196,7 @@ limits** · **Perf** impact · **Privacy** implications · **Test** method · **
 | BJ1 | deb/rpm, systemd units, SBOM, signing | M | Supply chain | – | CPack + scripts | – | signing key is a release secret | – | none | VM install | MISSING | MISSING |
 | BK1 | Kernel/distro compatibility with per-capability fallback | M | Silent failure | `health.coverage` | prober | – | – | – | none | matrix | MISSING | MISSING |
 | BL1 | Performance budgets and governor | M | Host destabilisation | `health.resources`, `loss` | governor | – | – | – | none | perf | MISSING | MISSING |
-| BM1 | Recovery (crash restart, WAL replay, re-attach, resync) | M | Gaps after crash | `sensor.started` | systemd + WAL + reconcile | – | – | – | none | chaos | PARTIAL | PARTIAL |
+| BM1 | Recovery (crash restart, WAL replay, re-attach, resync) | M | Gaps after crash or hook removal | `sensor.started`, `sensor_gap` / `provider_gap` loss | systemd + WAL + reconcile + hook re-attach (S13.16) | – | – | – | none | chaos, live eBPF tests, gdb `close()` on the daemon | PARTIAL | PARTIAL |
 | BN1 | Test infrastructure (unit, ground truth, attack, fuzz, chaos, matrix) | M | Regressions | – | – | – | – | – | – | CI + VM | PARTIAL | PARTIAL |
 | BO1 | Hardening (systemd sandboxing, capability bounding, FORTIFY, PIE/RELRO/NX, stack protector, no shell-outs) | M | Sensor as attack surface | – | build + units | – | – | – | – | checksec + review | PARTIAL | PARTIAL |
 

@@ -21,10 +21,13 @@ document, which lists `kernel`, `queue`, `wal`, `governor`, `transport` and `man
 | `wal` | durable log loss; `detail` says `removed`, `corrupt_segment`, `quota` or `write_failed` | records |
 | `manager_rejected` | the Manager refused records | records |
 | `sensor_gap` | the previous sensor process did not shut down cleanly; **count is always 1 (one blind interval), not a number of events**; `detail` carries the last time the sensor was known alive, the restart time, the blind seconds and whether the boot id changed | intervals |
+| `provider_gap` | a kernel hook of a running sensor was removed from outside it and the sensor attached it again; **count is always 1 (one blind interval per hook), not a number of events**; `detail` names the provider, the hook and its capability, and carries the last time it was verified attached, the time it was found missing, the time it was attached again, the attempts and the blind milliseconds | intervals |
 
 Proposal: add the rows to the table in `LINUX_ENDPOINT_RECORD_1.md`, and state that `by_type` is empty for
-`sensor_gap`. Consumers must not add a `sensor_gap` count to an event-loss total. Real-VM evidence: the chaos
-`kill9` scenario (14 kills, 14 `sensor_gap` records, 0 records missing).
+`sensor_gap` and `provider_gap`. Consumers must not add either count to an event-loss total. Real-VM evidence:
+the chaos `kill9` scenario (14 kills, 14 `sensor_gap` records, 0 records missing); for `provider_gap`, 18 hook
+links of a running sensor closed by a `close()` injected with gdb gave 18 `provider_gap` records and 18 restored
+links (S13.16 in IMPLEMENTATION_STATUS.md).
 
 `transport` is in the contract document but the sensor does not emit it (checked in `src/`); delivery failures stay
 in uplink state. Either drop it from the document or keep it reserved.

@@ -64,23 +64,40 @@ public:
     // The probes count each event they fail to reserve in the ring buffer.
     [[nodiscard]] bool losses_are_event_counts() const noexcept override { return true; }
 
+    [[nodiscard]] std::vector<provider_gap> take_gaps() override;
+
     // Asks the kernel about every link this provider attached and returns how many are gone or no longer the
     // link that was attached (closed or replaced from outside the sensor). Runs on the provider thread every
     // few seconds; a non-zero result makes health() report "degraded". Public so a test can provoke it.
     std::uint32_t check_attachments();
+    // Restores every hook check_attachments() found lost and returns how many are still lost. A link the kernel
+    // still holds (another process kept a reference) is taken back: the hook never stopped, so there is no gap.
+    // Otherwise the program is attached again, the new link is verified, and the interval since the hook was last
+    // verified is queued for take_gaps(). Runs right after check_attachments(); public for the same reason.
+    std::uint32_t recover_attachments();
 
 private:
-    // One attached hook, with the identity the kernel gave it so a closed and reused descriptor is noticed.
+    // One attached hook, with the identity the kernel gave it so a closed and reused descriptor is noticed. The
+    // descriptor is owned here rather than by a libbpf link, so that a descriptor number someone else closed (and the
+    // process may have reused) is never closed again by the sensor.
     struct attached_link {
-        ::bpf_link* link{nullptr};
+        int fd{-1};  // -1 while lost
         std::uint32_t id{0U};
         std::uint32_t type{0U};
+        std::uint32_t program_id{0U};
         std::string program;
+        std::string capability;
+        std::uint64_t last_verified_unix_ns{0U};
+        std::uint64_t detected_unix_ns{0U};  // non-zero while lost
+        std::uint32_t attempts{0U};
+        std::string last_error;
     };
 
     void run();
     int on_sample(const void* data, std::size_t size);
     void release();
+    bool attach(attached_link& attached);
+    bool intact(const attached_link& attached) const;
 
     const clock_domain& clock_;
     ebpf_process_options options_;
@@ -90,10 +107,14 @@ private:
 
     ::bpf_object* object_{nullptr};
     ::ring_buffer* ring_{nullptr};
+    std::mutex links_mutex_;  // the provider thread checks the links while a test may also check them
     std::vector<attached_link> links_;
     std::atomic<std::uint32_t> links_lost_{0U};
     mutable std::mutex lost_mutex_;
-    std::string lost_programs_;  // guarded by lost_mutex_
+    std::string lost_programs_;           // guarded by lost_mutex_
+    std::vector<provider_gap> gaps_;      // guarded by lost_mutex_; bounded, see recover_attachments()
+    std::uint64_t reattached_{0U};        // guarded by lost_mutex_
+    std::uint64_t adopted_{0U};           // guarded by lost_mutex_
     int drops_map_fd_{-1};
     std::uint64_t drops_seen_{0};
 

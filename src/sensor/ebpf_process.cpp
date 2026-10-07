@@ -528,21 +528,13 @@ result<bool> ebpf_process_provider::start(record_queue& queue) {
     for (const auto& entry : active_hooks) {
         auto* program = bpf_object__find_program_by_name(object_, entry.program);
         if (!bpf_program__autoload(program)) continue;
-        auto* link = bpf_program__attach(program);
-        if (link == nullptr) {
-            const auto attach_error = errno;
-            if (entry.core) {
-                return fail(std::string{"cannot attach "} + entry.program + ": " + std::strerror(attach_error) + " " + summarise(capture.text));
-            }
+        attached_link attached;
+        attached.program = entry.program;
+        attached.capability = entry.capability;
+        if (!attach(attached)) {
+            if (entry.core) return fail(std::string{"cannot attach "} + entry.program + ": " + attached.last_error + " " + summarise(capture.text));
             missing_programs_.push_back(entry.capability);
             continue;
-        }
-        attached_link attached{link, 0U, 0U, entry.program};
-        bpf_link_info info{};
-        auto info_length = static_cast<std::uint32_t>(sizeof(info));
-        if (bpf_obj_get_info_by_fd(bpf_link__fd(link), &info, &info_length) == 0) {
-            attached.id = info.id;
-            attached.type = info.type;
         }
         links_.push_back(std::move(attached));
         if (std::find(capabilities_.begin(), capabilities_.end(), entry.capability) == capabilities_.end()) capabilities_.emplace_back(entry.capability);
@@ -583,7 +575,7 @@ void ebpf_process_provider::run() {
     auto next_attachment_check = std::chrono::steady_clock::now() + attachment_check_interval;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (std::chrono::steady_clock::now() >= next_attachment_check) {
-            (void)check_attachments();
+            if (check_attachments() > 0U) (void)recover_attachments();
             next_attachment_check = std::chrono::steady_clock::now() + attachment_check_interval;
         }
         const auto polled = ring_buffer__poll(ring_, timeout_ms);
@@ -602,25 +594,142 @@ void ebpf_process_provider::run() {
     (void)ring_buffer__consume(ring_);  // whatever the kernel queued before shutdown
 }
 
+bool ebpf_process_provider::attach(attached_link& attached) {
+    auto* program = bpf_object__find_program_by_name(object_, attached.program.c_str());
+    if (program == nullptr) {
+        attached.last_error = "the program is not in the loaded object";
+        return false;
+    }
+    auto* link = bpf_program__attach(program);
+    if (link == nullptr) {
+        attached.last_error = std::strerror(errno);
+        return false;
+    }
+    // Keep the descriptor, free libbpf's wrapper without letting it close the descriptor (see attached_link).
+    const int fd = bpf_link__fd(link);
+    bpf_link__disconnect(link);
+    (void)bpf_link__destroy(link);
+    bpf_link_info info{};
+    auto info_length = static_cast<std::uint32_t>(sizeof(info));
+    const bool described = bpf_obj_get_info_by_fd(fd, &info, &info_length) == 0;
+    // On a re-attach the program descriptor itself may have been closed and reused from outside: a link to any program
+    // other than the one first attached is not this hook, and is detached at once.
+    if (attached.program_id != 0U && (!described || info.prog_id != attached.program_id)) {
+        ::close(fd);
+        attached.last_error = "the program descriptor no longer names the program that was loaded";
+        return false;
+    }
+    attached.fd = fd;
+    attached.id = described ? info.id : 0U;
+    attached.type = described ? info.type : 0U;
+    if (described) attached.program_id = info.prog_id;
+    attached.last_verified_unix_ns = clock_domain::now_unix_ns();
+    attached.last_error.clear();
+    return true;
+}
+
+bool ebpf_process_provider::intact(const attached_link& attached) const {
+    if (attached.fd < 0) return false;
+    bpf_link_info info{};
+    auto info_length = static_cast<std::uint32_t>(sizeof(info));
+    // A closed descriptor fails here; one that was closed and reused names a different object, or none that can be
+    // asked about, or another link with another id.
+    if (bpf_obj_get_info_by_fd(attached.fd, &info, &info_length) != 0) return false;
+    return attached.id == 0U || (info.id == attached.id && info.type == attached.type);
+}
+
 std::uint32_t ebpf_process_provider::check_attachments() {
+    const std::lock_guard links_lock{links_mutex_};
+    const auto now = clock_domain::now_unix_ns();
     std::uint32_t lost = 0U;
     std::string names;
-    for (const auto& attached : links_) {
-        bpf_link_info info{};
-        auto info_length = static_cast<std::uint32_t>(sizeof(info));
-        // A closed descriptor fails here; one that was closed and reused names a different object, or none that
-        // can be asked about, or another link with another id.
-        const bool gone = bpf_obj_get_info_by_fd(bpf_link__fd(attached.link), &info, &info_length) != 0 ||
-                          (attached.id != 0U && (info.id != attached.id || info.type != attached.type));
-        if (!gone) continue;
+    for (auto& attached : links_) {
+        if (attached.detected_unix_ns == 0U) {
+            if (intact(attached)) {
+                attached.last_verified_unix_ns = now;
+                continue;
+            }
+            // The descriptor number is no longer this link (closed, and perhaps reused for something else): forget it
+            // without ever closing it.
+            attached.fd = -1;
+            attached.detected_unix_ns = now;
+            attached.attempts = 0U;
+        }
         ++lost;
         if (!names.empty()) names += ", ";
         names += attached.program;
+        if (!attached.last_error.empty()) names += " (re-attach failed: " + attached.last_error + ")";
     }
     links_lost_.store(lost, std::memory_order_relaxed);
     const std::lock_guard lock{lost_mutex_};
     lost_programs_ = std::move(names);
     return lost;
+}
+
+std::uint32_t ebpf_process_provider::recover_attachments() {
+    constexpr std::size_t maximum_queued_gaps = 256U;
+    const std::lock_guard links_lock{links_mutex_};
+    std::uint32_t still_lost = 0U;
+    std::string names;
+    for (auto& attached : links_) {
+        if (attached.detected_unix_ns == 0U) continue;
+        ++attached.attempts;
+        // Someone else may still hold the link, for example by taking a copy of the descriptor before closing the
+        // sensor's. Then the hook never stopped, and attaching a second copy would report every event twice.
+        if (attached.id != 0U) {
+            if (const int fd = bpf_link_get_fd_by_id(attached.id); fd >= 0) {
+                bpf_link_info info{};
+                auto info_length = static_cast<std::uint32_t>(sizeof(info));
+                if (bpf_obj_get_info_by_fd(fd, &info, &info_length) == 0 && info.id == attached.id && info.type == attached.type &&
+                    info.prog_id == attached.program_id) {
+                    attached.fd = fd;
+                    attached.detected_unix_ns = 0U;
+                    attached.attempts = 0U;
+                    attached.last_error.clear();
+                    attached.last_verified_unix_ns = clock_domain::now_unix_ns();
+                    const std::lock_guard lock{lost_mutex_};
+                    ++adopted_;
+                    continue;
+                }
+                ::close(fd);
+            }
+        }
+        // The link is gone from the kernel, so the hook is detached: attach the program again.
+        const provider_gap pending{"hook " + attached.program + " (" + attached.capability + ")", attached.last_verified_unix_ns,
+                                   attached.detected_unix_ns, 0U, attached.attempts};
+        if (!attach(attached) || !intact(attached)) {
+            ++still_lost;
+            if (!names.empty()) names += ", ";
+            names += attached.program + " (re-attach failed: " + (attached.last_error.empty() ? "not verified" : attached.last_error) + ")";
+            continue;
+        }
+        auto gap = pending;
+        gap.restored_unix_ns = attached.last_verified_unix_ns;
+        attached.detected_unix_ns = 0U;
+        attached.attempts = 0U;
+        const std::lock_guard lock{lost_mutex_};
+        ++reattached_;
+        if (gaps_.size() < maximum_queued_gaps) {
+            gaps_.push_back(std::move(gap));
+        } else {
+            // Nobody is draining (no pipeline): widen the last interval instead of growing without bound.
+            auto& last = gaps_.back();
+            last.what = "several hooks";
+            last.last_verified_unix_ns = std::min(last.last_verified_unix_ns, gap.last_verified_unix_ns);
+            last.restored_unix_ns = std::max(last.restored_unix_ns, gap.restored_unix_ns);
+        }
+    }
+    links_lost_.store(still_lost, std::memory_order_relaxed);
+    const std::lock_guard lock{lost_mutex_};
+    lost_programs_ = std::move(names);
+    return still_lost;
+}
+
+std::vector<provider_gap> ebpf_process_provider::take_gaps() {
+    const std::lock_guard lock{lost_mutex_};
+    auto taken = std::move(gaps_);
+    gaps_.clear();
+    return taken;
 }
 
 int ebpf_process_provider::on_sample(const void* data, const std::size_t size) {
@@ -654,8 +763,15 @@ void ebpf_process_provider::release() {
         ring_buffer__free(ring_);
         ring_ = nullptr;
     }
-    for (auto& attached : links_) bpf_link__destroy(attached.link);
-    links_.clear();
+    {
+        const std::lock_guard links_lock{links_mutex_};
+        // Only a descriptor that still names the link is closed: a number someone else closed may belong to anything now.
+        for (auto& attached : links_) {
+            if (intact(attached)) ::close(attached.fd);
+        }
+        links_.clear();
+    }
+    links_lost_.store(0U, std::memory_order_relaxed);
     if (object_ != nullptr) {
         bpf_object__close(object_);
         object_ = nullptr;
@@ -670,10 +786,16 @@ provider_health ebpf_process_provider::health() const {
         state = "degraded";
         reason = "ring buffer polling failed";
     }
-    if (state == "active" && links_lost_.load(std::memory_order_relaxed) > 0U) {
+    {
         const std::lock_guard lock{lost_mutex_};
-        state = "degraded";
-        reason = "hook attachment lost from outside the sensor: " + lost_programs_ + (reason.empty() ? "" : "; " + reason);
+        if (state == "active" && links_lost_.load(std::memory_order_relaxed) > 0U) {
+            state = "degraded";
+            reason = "hook attachment lost from outside the sensor: " + lost_programs_ + (reason.empty() ? "" : "; " + reason);
+        }
+        if (reattached_ > 0U || adopted_ > 0U) {
+            reason += (reason.empty() ? "" : "; ") + std::string{"hooks restored after removal from outside the sensor: "} + std::to_string(reattached_) +
+                      " re-attached (each reported as a provider_gap loss), " + std::to_string(adopted_) + " taken back without a gap";
+        }
     }
     if (malformed_.load() > 0U) reason += (reason.empty() ? "" : "; ") + std::to_string(malformed_.load()) + " malformed samples";
     return {std::string{name()}, state, reason, capabilities(), events_.load(), drops_seen_};
@@ -716,6 +838,9 @@ int ebpf_process_provider::on_sample(const void*, std::size_t) { return 0; }
 void ebpf_process_provider::release() {}
 provider_health ebpf_process_provider::health() const { return {std::string{name()}, "unavailable", probe(), capabilities(), 0U, 0U}; }
 std::uint64_t ebpf_process_provider::take_losses() { return 0U; }
+std::vector<provider_gap> ebpf_process_provider::take_gaps() { return {}; }
+std::uint32_t ebpf_process_provider::check_attachments() { return 0U; }
+std::uint32_t ebpf_process_provider::recover_attachments() { return 0U; }
 
 #endif
 
