@@ -135,6 +135,7 @@ before this exec), `previous_name` (`process.rename`), `creds_before` (`process.
 | `package.installed`, `package.removed`, `package.upgraded` | `package {manager, name, version, arch}` | package DB diff | – |
 | `kernel.module_load`, `kernel.module_unload` | process, `module {name, path}` | ebpf | `/proc/modules` diff |
 | `kernel.bpf_load` | process, `bpf {prog_id, prog_type, name}` | ebpf | enumeration diff |
+| `network.raw_socket` | process, `socket {family, type, protocol, protocol_name}` | ebpf `security_socket_create` | none |
 | `mount.changed` | process, `mount {source, target, fstype, operation}` | ebpf | mountinfo diff |
 | `device.attached`, `device.removed` | `device {subsystem, vendor_id, product_id, devpath}` | uevent | sysfs diff |
 | `posture.changed` | `posture {item, before, after}` | sysfs/procfs poll | – |
@@ -208,6 +209,7 @@ had exited) and one body.
   address is not known at the hook and `memory.range` is listed as unavailable.
 - `bpf`: `command` (`prog_load` | `prog_attach` | `raw_tracepoint_open` | `link_create`),
   `program_type` (`prog_load`), `attach_type` (attach, link), `name`.
+- `network.raw_socket`: the `socket` object, `family` (`inet`, `inet6`, `packet`), `type` (`raw`, or `dgram` for a packet socket), `protocol` (the IP protocol number, or the EtherType for a packet socket, in host order; a socket created with protocol 0 reports 0) and `protocol_name` when the number is well known. Reported when a process creates `AF_PACKET` of any type or `SOCK_RAW` over IPv4 or IPv6, once per process, family and type per five seconds; sockets the kernel makes for itself are not reported. It says what was asked for before the kernel acted, not that creation succeeded. `ping` does not appear (it uses an unprivileged ICMP datagram socket); `tcpdump` and any packet-capture or scanning tool do.
 
 These are requests seen before the kernel acts, deduplicated per process, operation and backing
 over five seconds. File-backed mappings, read-only mprotects of file mappings and eBPF map creation

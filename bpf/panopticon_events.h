@@ -43,6 +43,7 @@ enum pan_event_kind {
     PAN_EVENT_NS_CHANGE = 14,   /* setns() or unshare() moved a task into other namespaces */
     PAN_EVENT_DNS_QUERY = 15,   /* UDP datagram to port 53; its first bytes ride in `filename` */
     PAN_EVENT_SIGNAL = 16,      /* a process sent a terminating or stopping signal to another process */
+    PAN_EVENT_RAW_SOCKET = 17,  /* a process created a raw (AF_INET/AF_INET6 SOCK_RAW) or packet (AF_PACKET) socket */
 };
 
 /* What a standard descriptor referred to when the program began (exec-time stdio, matrix G5). */
@@ -126,7 +127,8 @@ struct pan_event {
     u8 mem_write;   /* memory: the mapping is writable as well as executable */
     u8 stdio[3];    /* exec: pan_fd_kind of descriptors 0, 1 and 2 after the image was replaced */
     u8 sig_result;  /* signal: TRACE_SIGNAL_* (0 delivered, 1 ignored, 2 already pending, 3 overflow, 4 info lost) */
-    u8 sec_pad[2];
+    u8 sock_family; /* raw socket: address family (2, 10 or 17) */
+    u8 sock_type;   /* raw socket: socket type with the SOCK_NONBLOCK/CLOEXEC flags removed */
     u32 sig_number; /* signal: the signal number; `pid`/`tid` name the target */
     u32 sig_code;   /* signal: si_code as a two's complement value (0 kill, -1 sigqueue, -6 tgkill) */
     u32 sig_sender; /* signal: tgid of the sending process */
@@ -134,7 +136,8 @@ struct pan_event {
     u32 ns_old[6]; /* ns change: inode numbers before: mnt, pid_for_children, net, uts, ipc, cgroup */
     u32 ns_new[6]; /* ns change: inode numbers after, same order */
     u16 dns_len;   /* dns: bytes of the datagram stored at the start of `filename` (at most PAN_DNS_CAPTURE) */
-    u16 dns_pad[3];
+    u16 sock_protocol; /* raw socket: the protocol argument as given (network byte order for AF_PACKET) */
+    u16 dns_pad[2];
 
     char comm[PAN_COMM_LEN];      /* task->comm (rename: the new name) */
     char filename[PAN_FILENAME_LEN]; /* exec: bprm->filename */

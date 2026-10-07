@@ -792,6 +792,54 @@ void test_pipeline_signal_event() {
             "a sender that is gone is reported as unavailable, not invented: " + signals[1]);
 }
 
+void test_pipeline_raw_socket_event() {
+    const auto root = fresh_directory("rawsockproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "sniff", 500U, "/tmp/sniff", {"sniff"}}.write(root);
+    raw_security_event packet;
+    packet.kind = security_kind::raw_socket;
+    packet.pid = 100U;
+    packet.socket_family = "packet";
+    packet.socket_type = "raw";
+    packet.socket_protocol = 3U;
+    packet.protocol_name = "all";
+    raw_security_event unnamed;
+    unnamed.kind = security_kind::raw_socket;
+    unnamed.pid = 4040U;  // gone
+    unnamed.socket_family = "inet";
+    unnamed.socket_type = "raw";
+    unnamed.socket_protocol = 200U;
+    std::vector<raw_record> script{record_of(packet), record_of(unnamed)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::vector<std::string> found;
+    for (const auto& line : lines) {
+        if (contains(line, "\"type\":\"network.raw_socket\"")) found.push_back(line);
+    }
+    require(found.size() == 2U, "two network.raw_socket records");
+    require(contains(found[0], "\"socket\":{\"family\":\"packet\",\"type\":\"raw\",\"protocol\":3,\"protocol_name\":\"all\"}") &&
+                contains(found[0], "\"name\":\"sniff\""),
+            "the socket and the process that made it: " + found[0]);
+    require(contains(found[1], "\"socket\":{\"family\":\"inet\",\"type\":\"raw\",\"protocol\":200}") && !contains(found[1], "protocol_name") &&
+                contains(found[1], "{\"field\":\"process\",\"reason\":\"process_exited\"}"),
+            "an unnamed protocol keeps its number and a vanished process is unavailable: " + found[1]);
+}
+
 void test_pipeline_enriches_file_events() {
     const auto root = fresh_directory("fileproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
@@ -1808,6 +1856,7 @@ int main() {
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
     run("pipeline_exec_stdio_and_interpreter", test_pipeline_exec_stdio_and_interpreter);
     run("pipeline_signal_event", test_pipeline_signal_event);
+    run("pipeline_raw_socket_event", test_pipeline_raw_socket_event);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
     run("pipeline_rebases_event_times_after_a_clock_step", test_pipeline_rebases_event_times_after_a_clock_step);

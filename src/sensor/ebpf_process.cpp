@@ -60,11 +60,12 @@ constexpr std::array<hook, 5U> network_hooks{{
 
 // Hooks on the kernel's LSM call sites. The mmap hook is the one that makes the provider worth
 // having; the others are dropped (and reported) when the kernel cannot host them.
-constexpr std::array<hook, 4U> security_hooks{{
+constexpr std::array<hook, 5U> security_hooks{{
     {"on_mmap_exec", "memory.exec_mapping", true},
     {"on_mprotect_exec", "memory.exec_mapping", false},
     {"on_bpf_syscall", "kernel.bpf_load", false},
     {"on_ns_switch", "process.ns_change", false},
+    {"on_socket_create", "network.raw_socket", false},
 }};
 
 std::vector<hook> hooks_for(const ebpf_role role) {
@@ -281,6 +282,48 @@ std::vector<raw_record> decode_ebpf_process_sample(const void* data, const std::
         }
         load.name = std::string{bounded_string(event.obj_name, wire::PAN_COMM_LEN, wire::PAN_COMM_LEN)};
         records.push_back({time, observed("security_bpf"), std::move(load)});
+        break;
+    }
+    case wire::PAN_EVENT_RAW_SOCKET: {
+        static constexpr std::array<const char*, 11U> types{"", "stream", "dgram", "raw", "rdm", "seqpacket", "dccp", "", "", "", "packet"};
+        const bool known_family = event.sock_family == 2U || event.sock_family == 10U || event.sock_family == 17U;
+        if (!known_family || event.sock_type == 0U || event.sock_type >= types.size() || types[event.sock_type][0] == '\0') {
+            if (malformed != nullptr) *malformed = true;
+            return {};
+        }
+        raw_security_event socket;
+        socket.kind = security_kind::raw_socket;
+        socket.pid = event.pid;
+        socket.socket_family = event.sock_family == 2U ? "inet" : event.sock_family == 10U ? "inet6" : "packet";
+        socket.socket_type = types[event.sock_type];
+        if (event.sock_family == 17U) {
+            socket.socket_protocol = ntohs(event.sock_protocol);
+            switch (socket.socket_protocol) {
+            case 0x0003U: socket.protocol_name = "all"; break;
+            case 0x0800U: socket.protocol_name = "ip"; break;
+            case 0x0806U: socket.protocol_name = "arp"; break;
+            case 0x86ddU: socket.protocol_name = "ipv6"; break;
+            default: break;
+            }
+        } else {
+            socket.socket_protocol = event.sock_protocol;
+            switch (socket.socket_protocol) {
+            case 1U: socket.protocol_name = "icmp"; break;
+            case 2U: socket.protocol_name = "igmp"; break;
+            case 6U: socket.protocol_name = "tcp"; break;
+            case 17U: socket.protocol_name = "udp"; break;
+            case 41U: socket.protocol_name = "ipv6"; break;
+            case 47U: socket.protocol_name = "gre"; break;
+            case 50U: socket.protocol_name = "esp"; break;
+            case 51U: socket.protocol_name = "ah"; break;
+            case 58U: socket.protocol_name = "icmpv6"; break;
+            case 89U: socket.protocol_name = "ospf"; break;
+            case 132U: socket.protocol_name = "sctp"; break;
+            case 255U: socket.protocol_name = "raw"; break;
+            default: break;
+            }
+        }
+        records.push_back({time, observed("security_socket_create"), std::move(socket)});
         break;
     }
     case wire::PAN_EVENT_DNS_QUERY: {

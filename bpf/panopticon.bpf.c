@@ -780,6 +780,39 @@ int BPF_PROG(on_bpf_syscall, int cmd, union bpf_attr *attr, unsigned int size)
 }
 
 
+// A raw or packet socket lets a process read or forge traffic below what the protocol stack
+// normally allows: sniffers, scanners, custom-protocol command and control. Creation is rare and
+// is reported once per process, family and type per window; sockets the kernel makes for itself
+// (`kern`) are not the process's doing.
+SEC("fentry/security_socket_create")
+int BPF_PROG(on_socket_create, int family, int type, int protocol, int kern)
+{
+    if (kern)
+        return 0;
+    int base = type & 0xf;
+    if (family != 17 && !((family == 2 || family == 10) && base == 3))
+        return 0;
+    struct pan_mem_key key = {};
+    key.tgid = bpf_get_current_pid_tgid() >> 32;
+    key.kind = PAN_EVENT_RAW_SOCKET;
+    key.backing = (u8)family;
+    key.write = (u8)base;
+    u64 now = bpf_ktime_get_boot_ns();
+    u64 *last = bpf_map_lookup_elem(&mem_seen, &key);
+    if (last && now - *last < PAN_MEM_WINDOW_NS)
+        return 0;
+    bpf_map_update_elem(&mem_seen, &key, &now, BPF_ANY);
+    struct pan_event *e = event_base(PAN_EVENT_RAW_SOCKET);
+    if (!e)
+        return 0;
+    e->sock_family = (u8)family;
+    e->sock_type = (u8)base;
+    e->sock_protocol = (u16)protocol;
+    net_actor(e);
+    submit(e);
+    return 0;
+}
+
 // ---- namespace changes (ADR 021) -----------------------------------------------------------
 //
 // setns(2) and unshare(2) both end in switch_task_namespaces(). It runs in the calling task, so

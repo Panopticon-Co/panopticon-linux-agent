@@ -232,6 +232,7 @@ struct raw_namespace_change {
 enum class security_kind : std::uint8_t {
     memory_exec_mapping,  // memory that no file on disk backs was made executable
     bpf_load,             // a process loaded or attached an eBPF program
+    raw_socket,           // a process created a raw or packet socket
 };
 
 // A request a process made to the kernel that matters for code execution. The kernel reports it
@@ -250,6 +251,11 @@ struct raw_security_event {
     std::string program_type;  // prog_load: kprobe, tracing, lsm, xdp, ...
     std::optional<std::uint32_t> attach_type;
     std::string name;          // program name (prog_load) or tracepoint name (raw_tracepoint_open)
+    // raw_socket
+    std::string socket_family;    // inet, inet6, packet
+    std::string socket_type;      // raw, dgram (packet sockets only), ...
+    std::uint32_t socket_protocol{};  // host byte order: IP protocol number, or the EtherType for a packet socket
+    std::string protocol_name;    // when the number is a well-known one
 };
 
 // A decision of a mandatory access control module (AppArmor, SELinux), or a change to its policy

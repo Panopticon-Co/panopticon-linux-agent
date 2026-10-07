@@ -736,8 +736,10 @@ std::string record_serializer::security_event(const security_record& record, con
                                               const std::uint64_t observed_unix_ns) const {
     const auto& item = record.security;
     const bool memory = item.kind == security_kind::memory_exec_mapping;
+    const bool raw_socket = item.kind == security_kind::raw_socket;
     json_writer out;
-    begin(out, "event", memory ? "memory.exec_mapping" : "kernel.bpf_load", seq, record.time_unix_ns, observed_unix_ns, record.source);
+    begin(out, "event", memory ? "memory.exec_mapping" : raw_socket ? "network.raw_socket" : "kernel.bpf_load", seq, record.time_unix_ns,
+          observed_unix_ns, record.source);
     std::vector<unavailable_field> unavailable;
     if (record.actor) {
         out.key("process");
@@ -760,6 +762,13 @@ std::string record_serializer::security_event(const security_record& record, con
         } else {
             unavailable.push_back({"memory.range", unavailable_reason::not_supported_by_provider});
         }
+        out.end_object();
+    } else if (raw_socket) {
+        out.key("socket").begin_object();
+        out.field("family", item.socket_family);
+        out.field("type", item.socket_type);
+        out.field("protocol", item.socket_protocol);
+        if (!item.protocol_name.empty()) out.field("protocol_name", item.protocol_name);
         out.end_object();
     } else {
         out.key("bpf").begin_object();

@@ -18,6 +18,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sched.h>
+#include <linux/if_packet.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
@@ -227,6 +228,52 @@ void test_decode_signal() {
     event.sig_result = 5U;
     malformed = false;
     require(decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed).empty() && malformed, "an unknown result code is malformed");
+}
+
+void test_decode_raw_socket() {
+    clock_domain clock;
+    auto event = base_event(wire::PAN_EVENT_RAW_SOCKET);
+    event.pid = 801U;
+    event.sock_family = 17U;  // AF_PACKET, ETH_P_ALL as the process gave it: network byte order
+    event.sock_type = 3U;
+    event.sock_protocol = htons(0x0003U);
+    bool malformed = true;
+    auto records = decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed);
+    require(!malformed && records.size() == 1U, "a raw socket decodes");
+    const auto& packet = std::get<raw_security_event>(records[0].payload);
+    require(packet.kind == security_kind::raw_socket && packet.pid == 801U && packet.socket_family == "packet" && packet.socket_type == "raw" &&
+                packet.socket_protocol == 3U && packet.protocol_name == "all",
+            "AF_PACKET with ETH_P_ALL is read in host order");
+    require(records[0].source.mechanism == "security_socket_create", "provenance");
+
+    event.sock_family = 2U;
+    event.sock_type = 3U;
+    event.sock_protocol = 1U;
+    records = decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed);
+    const auto& icmp = std::get<raw_security_event>(records[0].payload);
+    require(icmp.socket_family == "inet" && icmp.socket_type == "raw" && icmp.socket_protocol == 1U && icmp.protocol_name == "icmp", "a raw ICMP socket");
+
+    event.sock_family = 10U;
+    event.sock_protocol = 200U;  // not a name this build knows: the number is still reported
+    records = decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed);
+    const auto& other = std::get<raw_security_event>(records[0].payload);
+    require(other.socket_family == "inet6" && other.socket_protocol == 200U && other.protocol_name.empty(), "an unnamed protocol keeps its number");
+
+    event.sock_family = 17U;
+    event.sock_type = 2U;
+    records = decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed);
+    require(std::get<raw_security_event>(records[0].payload).socket_type == "dgram", "a cooked packet socket");
+
+    const auto reject = [&](const std::uint8_t family, const std::uint8_t type, const char* why) {
+        event.sock_family = family;
+        event.sock_type = type;
+        malformed = false;
+        require(decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed).empty() && malformed, why);
+    };
+    reject(1U, 3U, "AF_UNIX is not a raw socket");
+    reject(2U, 0U, "type 0 is malformed");
+    reject(2U, 9U, "an unnamed socket type is malformed");
+    reject(2U, 200U, "a type past the table is malformed");
 }
 
 void test_decode_network() {
@@ -1091,6 +1138,44 @@ void test_live_signals_between_processes() {
     require(live.provider().take_losses() == 0U, "no ring buffer losses");
 }
 
+void test_live_raw_sockets() {
+    live_provider live{ebpf_role::security};
+    if (!live.begin("live raw sockets")) return;
+
+    const int packet = ::socket(AF_PACKET, SOCK_RAW, htons(0x0003U));
+    require(packet >= 0, "a packet socket can be created as root");
+    const int packet_again = ::socket(AF_PACKET, SOCK_RAW, htons(0x0003U));
+    const int icmp = ::socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    require(icmp >= 0, "a raw ICMP socket can be created as root");
+    // Ordinary sockets are not reported.
+    const int tcp = ::socket(AF_INET, SOCK_STREAM, 0);
+    const int udp = ::socket(AF_INET, SOCK_DGRAM, 0);
+    const int unix_socket = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+    for (const int fd : {packet, packet_again, icmp, tcp, udp, unix_socket}) {
+        if (fd >= 0) ::close(fd);
+    }
+
+    const auto self = static_cast<std::uint32_t>(::getpid());
+    const auto mine = [&](const records_t& seen) {
+        return select<raw_security_event>(seen, [&](const raw_security_event& e) { return e.pid == self && e.kind == security_kind::raw_socket; });
+    };
+    records_t all;
+    require(collect(live.queue(), all, [&](const records_t& seen) { return mine(seen).size() >= 2U; }), "both raw sockets were reported for this process");
+    // Give a possible third report (a duplicate, or an ordinary socket) time to arrive before counting.
+    (void)collect(live.queue(), all, [&](const records_t& seen) { return mine(seen).size() > 2U; }, std::chrono::milliseconds{500});
+    const auto found = mine(all);
+    require(found.size() == 2U, "two reports: the repeated packet socket is one, ordinary sockets are none");
+    bool saw_packet = false;
+    bool saw_icmp = false;
+    for (const auto* record : found) {
+        const auto& event = std::get<raw_security_event>(record->payload);
+        if (event.socket_family == "packet" && event.socket_type == "raw" && event.socket_protocol == 3U && event.protocol_name == "all") saw_packet = true;
+        if (event.socket_family == "inet" && event.socket_type == "raw" && event.socket_protocol == 1U && event.protocol_name == "icmp") saw_icmp = true;
+    }
+    require(saw_packet && saw_icmp, "a packet socket for all EtherTypes and a raw ICMP socket, with their protocols");
+    require(live.provider().take_losses() == 0U, "no ring buffer losses");
+}
+
 void test_live_start_ticks_match_procfs() {
     live_provider live;
     if (!live.begin("live start ticks")) return;
@@ -1200,6 +1285,7 @@ int main(int argc, char** argv) {
     run("decode_exec_arguments", test_decode_exec_arguments);
     run("decode_exec_stdio_and_interpreter", test_decode_exec_stdio_and_interpreter);
     run("decode_signal", test_decode_signal);
+    run("decode_raw_socket", test_decode_raw_socket);
     run("decode_network", test_decode_network);
     run("decode_security", test_decode_security);
     run("decode_namespace_change", test_decode_namespace_change);
@@ -1210,6 +1296,7 @@ int main(int argc, char** argv) {
     run("live_lifecycle_and_arguments", test_live_lifecycle_and_arguments);
     run("live_exec_stdio_and_interpreter", test_live_exec_stdio_and_interpreter);
     run("live_signals_between_processes", test_live_signals_between_processes);
+    run("live_raw_sockets", test_live_raw_sockets);
     run("live_start_ticks_match_procfs", test_live_start_ticks_match_procfs);
     run("live_signal_exit", test_live_signal_exit);
     run("live_rename_ignores_exec_rename", test_live_rename_ignores_exec_rename);
