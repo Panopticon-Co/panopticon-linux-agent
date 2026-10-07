@@ -269,3 +269,5 @@ same binary averaged 3 to 6 us per hook call in some windows of 300 spawns and 4
 4 to 7 offlined in the guest every window was 2.5 to 6 us. Section 6's figures were taken on 4 vCPUs and are not
 re-measured here. `live_wake_policy` now judges the hook cost on the best of five windows of 100 spawns (a build that
 wakes the reader on every record costs 535 us in its best window and still fails; checked).
+
+**Re-measured after the attachment self-check (S13.14), same script, same binary.** With 4 vCPUs online (CPUs 4 to 7 offlined in the guest): exec -0.4 %, tcp loopback connection +5.1 %, open+close +1.3 %; the sensor used about 10 % of one core and 55 MiB and recorded no loss. With all 8 vCPUs online the same binary measured exec +11.9 % and tcp +38 % and the sensor 14 to 27 % of a core. The 4-vCPU numbers are the ones comparable with the table above; the 8-vCPU figures are the scheduling effect described in section 7, so overhead budgets are judged on the pinned 4-CPU configuration and the 8-vCPU result is reported, not hidden.
