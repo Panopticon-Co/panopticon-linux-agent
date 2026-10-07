@@ -83,6 +83,9 @@ public:
 
     [[nodiscard]] std::size_t rule_count() const noexcept { return rules_.size(); }
     [[nodiscard]] std::size_t ioc_count() const noexcept;
+    // True when some rule decides on this field (an ioc rule counts). The start-of-policy sweep of running
+    // processes hashes their images only when a rule could use the digest.
+    [[nodiscard]] bool has_rules_on(policy_field field) const noexcept;
 
 private:
     policy_limits limits_;

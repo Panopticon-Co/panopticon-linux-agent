@@ -85,8 +85,9 @@ able to kill a process. Response stays where ADR 024 and ADR 025 put it: a Manag
 * An indicator on a SHA-256 matches when the hash completes. That is after the exec record, by the hashing
   queue's delay.
 * The policy key is a second trust anchor, managed like the command keys: pinned in a root-owned file, revoked
-  by removal. Removing the key of the policy in force does not unload it; only a newer valid policy or expiry
-  does.
+  by removal. Removing the key of the policy in force takes that policy out of force (`policy.change` `removed`,
+  reason `key_revoked`; an unreadable key list revokes nothing); a newer policy signed by a pinned key, or pinning
+  the key again, brings one back.
 * Known gaps: processes already running when the sensor starts are not evaluated, because the start-up
-  reconciliation emits no per-process records. When a refused or removed file is followed by the file of the
+  reconciliation emits no per-process records (closed by ADR 035, which sweeps them when a policy comes into force). When a refused or removed file is followed by the file of the
   policy already in force, no new record is written; health shows the recovery.

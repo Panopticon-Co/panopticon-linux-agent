@@ -372,6 +372,11 @@ PATH] <command>` is the client (default `/run/panopticon/sensord.sock`).
 * `policy.match` carries provenance `{policy, POLICY, inferred}` and the actor `process` when the sensor still knows it
   (a bare `pid` plus an `unavailable` entry otherwise). The `subject` names the record the decision is about by type
   and `seq`; the match is always written after its subject, and its own `seq` is never reused.
+* A policy that comes into force is also applied once to the processes already running (ADR 035): a match found
+  that way has `subject.type = "process.running"`, the process as actor, and a `subject.seq` that is only the last
+  record written when the sweep ran (the process has no record of its own). The sweep applies rules scoped to
+  `process.exec` or `*`, writes at most 1,024 matches, and the policy provider's health reason says when it stopped
+  early. Each newer policy version sweeps again.
 * `policy.change` carries provenance `{policy, POLICY-FILE, observed}`. `reason` is one of `no_previous_state`,
   `updated`, `resumed`, `state_unreadable` (accepted), or `malformed`, `bad_signature`, `unknown_key`, `no_keys`,
   `out_of_scope`, `not_yet_valid`, `already_expired`, `rollback`, `untrusted_file`, `too_large`, `unreadable`,

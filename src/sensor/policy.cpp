@@ -233,6 +233,10 @@ result<policy_engine> policy_engine::parse(const std::string_view text, const po
     return engine;
 }
 
+bool policy_engine::has_rules_on(const policy_field field) const noexcept {
+    return std::any_of(rules_.begin(), rules_.end(), [field](const policy_rule& rule) { return rule.field == field; });
+}
+
 std::vector<policy_decision> policy_engine::evaluate(const policy_input& input, const std::optional<policy_field> only) const {
     std::vector<policy_decision> decisions;
     for (const auto& prefix : allow_exe_) {

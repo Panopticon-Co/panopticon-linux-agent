@@ -228,6 +228,11 @@ private:
     // Signed local policy (ADR 032): re-reads the policy and key files, records what changed, and names the policy
     // in force in every later record.
     void refresh_policy(std::uint64_t unix_now_ns);
+    // ADR 035: when a policy first comes into force (at start, or when a newer one replaces it) the processes already
+    // running are decided against it as well, because their exec records were written before the policy existed or
+    // before this sensor did. Matches are policy.match records with subject type process.running; the sweep is bounded
+    // and says so in health when it stopped early.
+    void sweep_running_processes(std::uint64_t unix_now_ns);
     // Self-integrity (ADR 033): re-checks the installed files against the signed manifest and writes a tamper.integrity
     // record for each finding that began or ended, naming whoever last changed the file when a file event saw it.
     void refresh_integrity(std::uint64_t unix_now_ns);
@@ -293,6 +298,8 @@ private:
     std::unique_ptr<policy_store> policy_;
     std::uint64_t last_policy_ns_{};
     std::int64_t policy_expires_unix_{};  // of the policy in force; 0 when none
+    std::string swept_policy_;            // "<policy_id>/<version>" the running processes were last decided against
+    std::string sweep_note_;              // non-empty when the last sweep stopped at its limit; shown in health
     struct integrity_writer {
         entity_ptr actor;
         std::uint32_t pid{};

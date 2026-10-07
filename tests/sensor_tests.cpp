@@ -880,13 +880,28 @@ void test_pipeline_end_to_end_with_scripted_provider() {
             "an exec without kernel-captured stdio says it is unavailable: " + *exec);
 }
 
+fs::path policy_directory(const std::string& name) {
+    const auto cfg = fresh_directory(name);
+    fs::permissions(cfg, fs::perms::owner_all, fs::perm_options::replace);
+    fs::permissions(cfg.parent_path(), fs::perms::owner_all, fs::perm_options::replace);
+    return cfg;
+}
+
+void put_private(const fs::path& path, const std::string& contents) {
+    write_file(path, contents);
+    fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
+}
+
+const std::string exfil_policy =
+    "rule curl-exfil process.exec cmdline contains recommend_terminate high 198.51.100.7\n"
+    "rule never process.exec exe equals alert low /nonexistent\n";
+
 // ADR 032: a signed policy decides about an exec, the decision is a policy.match after the exec record, the policy is
 // named in every later record, and nothing acts.
 std::vector<std::string> run_policy_pipeline(const fs::path& cfg, const std::string& name, std::uint64_t& matches) {
     const auto root = fresh_directory(name + "proc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
     fake_process{100U, 1U, "bash", 500U, "/usr/bin/bash", {"-bash"}}.write(root);
-    fake_process{200U, 100U, "curl", 900U, "/usr/bin/curl", {"curl", "-s", "http://198.51.100.7/x"}}.write(root);
     std::vector<raw_record> script{record_of(raw_fork{100U, 100U, 200U, 200U, std::nullopt}),
                                    record_of(raw_exec{200U, 200U, std::nullopt, std::nullopt, std::nullopt}),
                                    record_of(raw_exit{200U, 200U, 0U, 17U})};
@@ -906,6 +921,9 @@ std::vector<std::string> run_policy_pipeline(const fs::path& cfg, const std::str
         sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
                                  std::move(providers)};
         value_of(pipeline.start(), "pipeline start");
+        // The process that execs is not running when the sensor starts (otherwise the start-of-policy sweep, ADR 035,
+        // would decide about it too); it appears in procfs just before its fork and exec arrive.
+        fake_process{200U, 100U, "curl", 900U, "/usr/bin/curl", {"curl", "-s", "http://198.51.100.7/x"}}.write(root);
         value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
         matches = pipeline.metrics().policy_matches;
     }
@@ -914,21 +932,110 @@ std::vector<std::string> run_policy_pipeline(const fs::path& cfg, const std::str
     return lines;
 }
 
-fs::path policy_directory(const std::string& name) {
-    const auto cfg = fresh_directory(name);
-    fs::permissions(cfg, fs::perms::owner_all, fs::perm_options::replace);
-    fs::permissions(cfg.parent_path(), fs::perms::owner_all, fs::perm_options::replace);
-    return cfg;
+// ADR 035: processes that were already running when a policy came into force are decided against it too.
+struct sweep_fixture {
+    fs::path cfg;
+    fs::path root;
+    ec_keypair key;
+    sweep_fixture(const std::string& name) : cfg{policy_directory(name)}, root{fresh_directory(name + "proc")}, key{policy_test_support::make_key()} {
+        put_private(cfg / "keys", policy_test_support::key_line(key));
+    }
+    void publish(const std::uint64_t version, const std::string& body) const {
+        policy_test_support::bundle_fields fields;
+        fields.version = version;
+        fields.issued_unix = static_cast<std::int64_t>(std::time(nullptr)) - 10;
+        fields.expires_unix = fields.issued_unix + 3600;
+        put_private(cfg / "policy", policy_test_support::signed_bundle(key, fields, body));
+    }
+    sensor_config config() const {
+        sensor_config result;
+        result.sensor_id = "sensor-test";
+        result.host_id = "host-test";
+        result.proc_root = root;
+        result.wal_path = cfg / "wal";
+        result.policy_path = cfg / "policy";
+        result.policy_signing_keys = cfg / "keys";
+        return result;
+    }
+};
+
+std::size_t count_matches(const std::vector<std::string>& lines, const std::string& subject_type) {
+    return static_cast<std::size_t>(std::count_if(lines.begin(), lines.end(), [&](const std::string& line) {
+        return contains(line, "\"type\":\"policy.match\"") && contains(line, "\"subject\":{\"type\":\"" + subject_type + "\"");
+    }));
 }
 
-void put_private(const fs::path& path, const std::string& contents) {
-    write_file(path, contents);
-    fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
+void test_pipeline_policy_sweeps_running_processes() {
+    sweep_fixture fx{"policysweep"};
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(fx.root);
+    fake_process{100U, 1U, "bash", 500U, "/usr/bin/bash", {"-bash"}}.write(fx.root);
+    fake_process{200U, 100U, "curl", 900U, "/usr/bin/curl", {"curl", "-s", "http://198.51.100.7/x"}}.write(fx.root);
+    fx.publish(3U, exfil_policy);
+    auto config = fx.config();
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(std::vector<raw_record>{}));
+    std::uint64_t after_start = 0U;
+    std::uint64_t after_update = 0U;
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        after_start = pipeline.metrics().policy_matches;
+        // The same version being re-read decides nothing again.
+        value_of(pipeline.step(clock_domain::now_monotonic_ns() + 40'000'000'000ULL, std::chrono::milliseconds{0}), "step with the same policy");
+        require(pipeline.metrics().policy_matches == after_start, "an unchanged policy is not swept again");
+        // A newer version comes into force: the processes still running are decided against it.
+        fx.publish(4U, exfil_policy);
+        value_of(pipeline.step(clock_domain::now_monotonic_ns() + 80'000'000'000ULL, std::chrono::milliseconds{0}), "step with a newer policy");
+        after_update = pipeline.metrics().policy_matches;
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    require(after_start == 1U, "only the curl that was already running matches at start");
+    require(after_update == 2U, "the newer policy sweeps again");
+    require(count_matches(lines, "process.running") == 2U && count_matches(lines, "process.exec") == 0U, "swept matches are labelled as such");
+    const auto match = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"type\":\"policy.match\""); });
+    require(match != lines.end(), "a match record");
+    require(contains(*match, "\"rule_id\":\"curl-exfil\"") && contains(*match, "\"action\":\"recommend_terminate\"") &&
+                contains(*match, "\"path\":\"/usr/bin/curl\"") && contains(*match, "\"policy_version\":\"test-policy/3\""),
+            "the match names the rule, the process and the policy: " + *match);
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "seq stays contiguous");
+        require(!contains(lines[index], "response.action"), "a sweep never becomes an action");
+    }
+    const auto loaded = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"outcome\":\"loaded\""); });
+    require(loaded != lines.end() && loaded < match, "the policy is recorded as loaded before it decides");
 }
 
-const std::string exfil_policy =
-    "rule curl-exfil process.exec cmdline contains recommend_terminate high 198.51.100.7\n"
-    "rule never process.exec exe equals alert low /nonexistent\n";
+void test_pipeline_policy_sweep_is_bounded_and_says_so() {
+    sweep_fixture fx{"policysweeplimit"};
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(fx.root);
+    for (std::uint32_t pid = 100U; pid < 1200U; ++pid) {
+        fake_process{pid, 1U, "worker", 1000U + pid, "/usr/bin/worker", {"worker", "--marker"}}.write(fx.root);
+    }
+    fx.publish(1U, "rule everything process.exec cmdline contains alert low --marker\n");
+    auto config = fx.config();
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(std::vector<raw_record>{}));
+    std::uint64_t matches = 0U;
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        matches = pipeline.metrics().policy_matches;
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    require(matches == 1024U, "the sweep stops at its match limit, not at the number of processes (matches " + std::to_string(matches) + ")");
+    require(count_matches(lines, "process.running") == 1024U, "and writes exactly that many records");
+    const auto health = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"record_type\":\"health\""); });
+    require(health != lines.end() && contains(*health, "start-of-policy sweep stopped at its limit (1024 matches)"),
+            "health says the sweep was cut short: " + (health != lines.end() ? *health : std::string{"no health record"}));
+}
 
 void test_pipeline_policy_match_is_a_record_not_an_action() {
     const auto cfg = policy_directory("policycfg");
@@ -2691,6 +2798,8 @@ int main() {
     run("pipeline_exec_stdio_and_interpreter", test_pipeline_exec_stdio_and_interpreter);
     run("pipeline_policy_match_is_a_record_not_an_action", test_pipeline_policy_match_is_a_record_not_an_action);
     run("pipeline_refused_policy_decides_nothing", test_pipeline_refused_policy_decides_nothing);
+    run("pipeline_policy_sweeps_running_processes", test_pipeline_policy_sweeps_running_processes);
+    run("pipeline_policy_sweep_is_bounded_and_says_so", test_pipeline_policy_sweep_is_bounded_and_says_so);
     run("pipeline_signal_event", test_pipeline_signal_event);
     run("pipeline_raw_socket_event", test_pipeline_raw_socket_event);
     run("pipeline_tcp_close_event", test_pipeline_tcp_close_event);

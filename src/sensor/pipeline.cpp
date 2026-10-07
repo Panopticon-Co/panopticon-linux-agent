@@ -383,6 +383,65 @@ void sensor_pipeline::refresh_policy(const std::uint64_t unix_now_ns) {
     policy_expires_unix_ = active != nullptr ? active->header.expires_unix : 0;
     // Every record names the policy that decided about it, or "none" (none accepted, or the one accepted expired).
     serializer_.set_policy_version(active != nullptr ? active->header.policy_id + "/" + std::to_string(active->header.version) : "none");
+    if (active == nullptr) {
+        // Out of force (expired, revoked, never loaded): the same version coming back into force is swept again.
+        swept_policy_.clear();
+        sweep_note_.clear();
+    } else if (const auto identity = active->header.policy_id + "/" + std::to_string(active->header.version); identity != swept_policy_) {
+        swept_policy_ = identity;
+        sweep_running_processes(unix_now_ns);
+    }
+}
+
+void sensor_pipeline::sweep_running_processes(const std::uint64_t unix_now_ns) {
+    // Bounds: a rule such as `cmdline contains /` would otherwise match every process, sixteen times over. Past
+    // the match limit the sweep stops and health says so; the rest are still decided as they exec.
+    constexpr std::uint64_t match_limit = 1024U;
+    constexpr std::size_t hash_limit = 2048U;
+    sweep_note_.clear();
+    if (!policy_) return;
+    const auto* active = policy_->active(static_cast<std::int64_t>(unix_now_ns / ns_per_second));
+    if (active == nullptr) return;
+    const bool wants_hash = hashes_ != nullptr && active->engine.has_rules_on(policy_field::sha256);
+    const auto first_match = metrics_.policy_matches;
+    std::size_t hash_requests = 0;
+    bool hash_limited = false;
+    bool match_limited = false;
+    for (const auto& entity : graph_.live_entities()) {
+        if (metrics_.policy_matches - first_match >= match_limit) {
+            match_limited = true;
+            break;
+        }
+        const auto& info = entity->info;
+        policy_input input;
+        // A running process was started by an exec, so rules about executions apply to it.
+        input.kind = "process.exec";
+        input.exe = info.executable.path;
+        for (const auto& arg : info.args) {
+            if (!input.cmdline.empty()) input.cmdline += ' ';
+            input.cmdline += arg;
+        }
+        if (input.exe.empty() && input.cmdline.empty()) continue;
+        if (wants_hash) {
+            if (hash_requests < hash_limit) {
+                process_event candidate;
+                candidate.type = "process.exec";
+                candidate.process = entity;
+                ++hash_requests;
+                // A digest already known is decided now; one still being computed is decided when it arrives
+                // (emit_hash_results), under the same kind.
+                if (const auto hashed = with_executable_hash(candidate); hashed.executable_hash && hashed.executable_hash->status == "computed") {
+                    input.sha256 = hashed.executable_hash->sha256;
+                }
+            } else {
+                hash_limited = true;
+            }
+        }
+        evaluate_policy(input, entity, info.pid, unix_now_ns, "process.running", unix_now_ns);
+    }
+    if (match_limited || hash_limited) {
+        sweep_note_ = std::string{"start-of-policy sweep stopped at its limit ("} + (match_limited ? "1024 matches" : "2048 image digests") + ")";
+    }
 }
 
 void sensor_pipeline::note_integrity_writer(const std::string& path, const std::string_view operation, const entity_ptr& actor, const std::uint32_t pid,
@@ -896,7 +955,8 @@ health_snapshot sensor_pipeline::health_now() const {
     if (policy_) {
         // A configured policy that is not in force (refused, expired, missing keys) is lost protection, not a detail.
         const auto policy = policy_->health(static_cast<std::int64_t>(clock_domain::now_unix_ns() / ns_per_second));
-        snapshot.providers.push_back({"policy", policy.state, policy.reason, {"policy.match"}, metrics_.policy_matches, 0U});
+        snapshot.providers.push_back({"policy", policy.state, sweep_note_.empty() ? policy.reason : policy.reason.empty() ? sweep_note_ : policy.reason + "; " + sweep_note_,
+                                      {"policy.match"}, metrics_.policy_matches, 0U});
         snapshot.coverage["policy.match"] = policy.state == "active" ? "policy" : "";
         if (policy.state != "active") snapshot.status = "degraded";
     }

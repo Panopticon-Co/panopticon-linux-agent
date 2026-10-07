@@ -1,7 +1,7 @@
 # Helpers shared by the end-to-end scripts that read what a sensord wrote to its WAL. Source it; set WAL to the
 # directory that holds the *.log files before calling anything.
 #
-#   dump                          tamper.integrity and health records as JSON lines (kind, seq, ...)
+#   dump                          tamper.integrity, policy.match and health records as JSON lines (kind, seq, ...)
 #   wait_for <seconds> <expr>     polls until the python expression over `rows` (the dump) is true
 #   count <expr>                  prints a python expression over `rows`
 
@@ -21,9 +21,12 @@ for seq in sorted(recs):
     r = recs[seq]
     if r["type"] == "tamper.integrity":
         print(json.dumps({"kind": "tamper", "seq": seq, **r["tamper"], "process": r.get("process"), "unavailable": r.get("unavailable"), "record": r}))
+    elif r["type"] == "policy.match":
+        print(json.dumps({"kind": "match", "seq": seq, **r["policy"], "process": r.get("process"), "record": r}))
     elif r["type"] == "health":
         p = [x for x in r["health"]["providers"] if x["name"] == "integrity"]
-        print(json.dumps({"kind": "health", "seq": seq, "status": r["health"]["status"], "integrity": p[0] if p else None, "time": r["time"]}))
+        q = [x for x in r["health"]["providers"] if x["name"] == "policy"]
+        print(json.dumps({"kind": "health", "seq": seq, "status": r["health"]["status"], "integrity": p[0] if p else None, "policy": q[0] if q else None, "time": r["time"]}))
 PY
 }
 
