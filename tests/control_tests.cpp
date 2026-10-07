@@ -138,7 +138,9 @@ void test_malformed_requests() {
     require(contains(too_long, "request too long"), "oversized request refused: " + too_long);
     const auto control_chars = raw_exchange(dir / "c.sock", std::string{"status\x01\x1b[2J\n"});
     require(contains(control_chars, "invalid characters"), "control characters refused: " + control_chars);
-    const auto half = raw_exchange(dir / "c.sock", "status");  // never terminated: the 2 s deadline answers
+    // Never terminated: the server's 2 s deadline answers. The client waits well past it (5 s more) because a
+    // stalled VM has failed this test with an empty reply when the margin was 1 s.
+    const auto half = raw_exchange(dir / "c.sock", "status", milliseconds{7000});
     require(contains(half, "request timed out") || contains(half, "incomplete request"), "unterminated request refused: " + half);
     // The server survived all of that.
     require(contains(text_of(control_request(dir / "c.sock", "status", milliseconds{3000}), "after abuse"), "\"ok\":true"), "still serving");

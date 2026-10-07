@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <limits>
 #include <array>
 #include <chrono>
 #include <csignal>
@@ -1200,21 +1201,38 @@ void test_live_wake_policy_delivers_after_bursts_and_pauses() {
     // Cost is measured over a dense workload only. When events are further apart than the gap every one of them
     // is supposed to wake the reader (the sanitizer builds of this binary start children so slowly that their own
     // processes are such a workload), so the earlier part of the test says nothing about it.
+    //
+    // The kernel's figure is wall time, so an interrupt or a descheduled virtual CPU inside a hook is counted as
+    // the hook's cost. On the dev VM with 8 vCPUs the same binary averaged 3 to 6 us in some windows of 300
+    // spawns and 40 to 58 us in others (with 4 CPUs online every window was 2.5 to 6 us), and a single window
+    // failed this bound in 2 of 3 runs under ctest. The policy is judged on the best of five windows of 100
+    // spawns: a build that wakes the reader on every record pays 500 us or more in every window, so it still
+    // fails, while one disturbed window no longer does.
     const std::array<const char*, 3U> hooks{"on_fork", "on_exec", "on_exit"};
-    std::array<std::pair<std::uint64_t, std::uint64_t>, 3U> before;
-    for (std::size_t index = 0U; index < hooks.size(); ++index) before[index] = bpf_run_time_stats::of(hooks[index]);
+    constexpr int windows = 5;
+    constexpr int spawns_per_window = 100;
+    std::array<std::uint64_t, 3U> best_us{};
+    best_us.fill(std::numeric_limits<std::uint64_t>::max());
     char* const argv[] = {const_cast<char*>("true"), nullptr};
-    for (int i = 0; i < 300; ++i) {
-        pid_t pid = 0;
-        require(::posix_spawn(&pid, "/bin/true", nullptr, nullptr, argv, environ) == 0, "spawn /bin/true");
-        reap(pid);
+    for (int window = 0; window < windows; ++window) {
+        std::array<std::pair<std::uint64_t, std::uint64_t>, 3U> before;
+        for (std::size_t index = 0U; index < hooks.size(); ++index) before[index] = bpf_run_time_stats::of(hooks[index]);
+        for (int i = 0; i < spawns_per_window; ++i) {
+            pid_t pid = 0;
+            require(::posix_spawn(&pid, "/bin/true", nullptr, nullptr, argv, environ) == 0, "spawn /bin/true");
+            reap(pid);
+        }
+        for (std::size_t index = 0U; index < hooks.size(); ++index) {
+            const auto after = bpf_run_time_stats::of(hooks[index]);
+            const auto runs = after.first - before[index].first;
+            require(runs >= static_cast<std::uint64_t>(spawns_per_window), std::string{hooks[index]} + " ran often enough to measure");
+            best_us[index] = std::min(best_us[index], (after.second - before[index].second) / runs / 1000U);
+        }
     }
     for (std::size_t index = 0U; index < hooks.size(); ++index) {
-        const auto after = bpf_run_time_stats::of(hooks[index]);
-        const auto runs = after.first - before[index].first;
-        require(runs >= 300U, std::string{hooks[index]} + " ran often enough to measure");
-        const auto average_us = (after.second - before[index].second) / runs / 1000U;
-        require(average_us < 100U, std::string{hooks[index]} + " costs " + std::to_string(average_us) + " us per call in the kernel over 300 back-to-back processes (bound 100 us)");
+        require(best_us[index] < 100U, std::string{hooks[index]} + " costs " + std::to_string(best_us[index]) +
+                                           " us per call in the kernel in its best window of " + std::to_string(spawns_per_window) +
+                                           " back-to-back processes (bound 100 us)");
     }
 }
 
