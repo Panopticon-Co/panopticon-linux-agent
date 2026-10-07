@@ -6,6 +6,8 @@ include(CTest)
 
 option(PANOPTICON_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(PANOPTICON_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+# libFuzzer harnesses for the hostile-input parsers (tests/fuzz). Needs clang; use with ASAN and UBSAN.
+option(PANOPTICON_ENABLE_FUZZ "Build the libFuzzer parser harnesses" OFF)
 
 add_library(panopticon-linux-core STATIC
     src/identity.cpp
@@ -55,6 +57,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     if(PANOPTICON_ENABLE_UBSAN)
         target_compile_options(panopticon-linux-core PUBLIC -fsanitize=undefined -fno-omit-frame-pointer)
         target_link_options(panopticon-linux-core PUBLIC -fsanitize=undefined)
+    endif()
+    if(PANOPTICON_ENABLE_FUZZ)
+        # Coverage instrumentation in the code under test; the fuzz binaries add the engine itself.
+        target_compile_options(panopticon-linux-core PUBLIC -fsanitize=fuzzer-no-link)
     endif()
 endif()
 
@@ -140,6 +146,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_options(panopticon-ctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_link_libraries(panopticon-ctl PRIVATE panopticon-sensor-core)
     install(TARGETS panopticon-ctl RUNTIME DESTINATION bin COMPONENT sensord)
+
+    if(PANOPTICON_ENABLE_FUZZ)
+        if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            message(FATAL_ERROR "PANOPTICON_ENABLE_FUZZ needs clang (libFuzzer)")
+        endif()
+        foreach(fuzz_name json commands config policy auth_line audit dns fanotify sockdiag proc_event ebpf_sample procfs cgroup hostfiles fim wal)
+            string(TOUPPER ${fuzz_name} fuzz_define)
+            add_executable(fuzz-${fuzz_name} tests/fuzz/fuzz_parsers.cpp)
+            target_compile_definitions(fuzz-${fuzz_name} PRIVATE FUZZ_${fuzz_define})
+            target_link_libraries(fuzz-${fuzz_name} PRIVATE panopticon-sensor-core)
+            target_link_options(fuzz-${fuzz_name} PRIVATE -fsanitize=fuzzer)
+        endforeach()
+    endif()
 
     if(BUILD_TESTING)
         add_executable(panopticon-sensor-tests tests/sensor_tests.cpp)
