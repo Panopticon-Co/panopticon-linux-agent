@@ -560,13 +560,29 @@ result<bool> ebpf_process_provider::start(record_queue& queue) {
 }
 
 void ebpf_process_provider::run() {
-    // The kernel wakes this poll as soon as a record is submitted (the programs submit with flags 0), so the
-    // timeout only bounds how long a stop request waits; a short one is 10 idle wake-ups a second per ring.
+    // The kernel wakes this poll only for the first record after an idle gap (PAN_WAKE_GAP_NS in the program);
+    // records during a burst are submitted without a wake-up, because a wake-up per record slows the
+    // producing task. So while records flow the loop polls on a short timer and consumes explicitly (a poll
+    // that times out consumes nothing), and it goes back to the long wait only after the ring has been
+    // silent for longer than the gap, so a record submitted from then on wakes it. The long timeout only
+    // bounds how long a stop request waits; a short one is 10 idle wake-ups a second per ring.
+    constexpr int idle_timeout_ms = 1000;
+    constexpr int burst_timeout_ms = 5;
+    constexpr int quiet_polls_before_idle = 6;  // 6 x 5 ms = 30 ms of silence, more than the 20 ms gap
+    int timeout_ms = idle_timeout_ms;
+    int quiet_polls = 0;
     while (!stop_.load(std::memory_order_relaxed)) {
-        const auto polled = ring_buffer__poll(ring_, 1000);
+        const auto polled = ring_buffer__poll(ring_, timeout_ms);
         if (polled < 0 && polled != -EINTR) {
             poll_failed_ = true;
             return;
+        }
+        const auto consumed = ring_buffer__consume(ring_);
+        if ((polled > 0) || (consumed > 0)) {
+            quiet_polls = 0;
+            timeout_ms = burst_timeout_ms;
+        } else if (timeout_ms == burst_timeout_ms && ++quiet_polls >= quiet_polls_before_idle) {
+            timeout_ms = idle_timeout_ms;
         }
     }
     (void)ring_buffer__consume(ring_);  // whatever the kernel queued before shutdown

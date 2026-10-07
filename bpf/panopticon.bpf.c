@@ -73,10 +73,43 @@ static __always_inline u64 leader_start_boot(struct task_struct *t)
     return BPF_CORE_READ(leader, start_boottime);
 }
 
+// When the reader is woken. A wake-up per record costs the producing task tens to hundreds of
+// microseconds (an irq_work and a scheduler wake-up of the reader on every fork, exec and exit; a
+// 22 % slowdown of an exec loop in the dev VM), so only the first record after an idle gap wakes the
+// reader. Records during a burst use BPF_RB_NO_WAKEUP and the reader, once awake, polls on a short
+// timer until it has seen the ring silent for longer than the gap (ebpf_process_provider::run).
+// `wake_last` is the time of a recent record, refreshed at most once a millisecond so a busy ring does
+// not bounce one cache line between CPUs; it can only lag the true last record, which makes the
+// computed gap larger and wakes the reader more often, never less.
+#define PAN_WAKE_GAP_NS 20000000ULL /* 20 ms; the reader must stay fast for longer than this */
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u64);
+} wake_last SEC(".maps");
+
+static __always_inline u64 wake_flags(u64 now)
+{
+    u32 zero = 0;
+    u64 *last = bpf_map_lookup_elem(&wake_last, &zero);
+    if (!last)
+        return 0;
+    u64 seen = *last;
+    if (now - seen >= PAN_WAKE_GAP_NS) {
+        *last = now;
+        return 0;
+    }
+    if (now - seen >= 1000000ULL)
+        *last = now;
+    return BPF_RB_NO_WAKEUP;
+}
+
 // Non-exec events end before `filename`: no stale bytes from earlier events leave the kernel.
 static __always_inline void submit(struct pan_event *e)
 {
-    if (bpf_ringbuf_output(&events, e, __builtin_offsetof(struct pan_event, filename), 0))
+    if (bpf_ringbuf_output(&events, e, __builtin_offsetof(struct pan_event, filename), wake_flags(e->time_boot_ns)))
         count_drop();
 }
 
@@ -84,7 +117,7 @@ static __always_inline void submit(struct pan_event *e)
 static __always_inline void submit_exec(struct pan_event *e)
 {
     u32 used = e->args_len & (PAN_ARGS_LEN - 1);
-    if (bpf_ringbuf_output(&events, e, __builtin_offsetof(struct pan_event, args) + used, 0))
+    if (bpf_ringbuf_output(&events, e, __builtin_offsetof(struct pan_event, args) + used, wake_flags(e->time_boot_ns)))
         count_drop();
 }
 
@@ -638,7 +671,7 @@ static __always_inline void dns_query(struct sock *sk, struct msghdr *msg, size_
     }
     e->dns_len = (u16)avail;
     net_actor(e);
-    if (bpf_ringbuf_output(&events, e, __builtin_offsetof(struct pan_event, filename) + avail, 0))
+    if (bpf_ringbuf_output(&events, e, __builtin_offsetof(struct pan_event, filename) + avail, wake_flags(e->time_boot_ns)))
         count_drop();
 }
 

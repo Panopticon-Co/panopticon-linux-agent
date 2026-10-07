@@ -172,3 +172,35 @@ by an A/B run, so the split between them is not known. Both configurations are n
 by a factor of 2 or more, with the kernel share 40 to 70 %. Not measured: 6.x kernels, other hardware, a
 host with many mounts (the 30 s mount rescan and the 15 s sensitive-file re-mark scale with mount and
 pattern counts).
+
+## 6. Sensor overhead on the hooked paths and the ring-buffer wake-up policy (S13.7)
+
+`tests/perf/run_overhead.sh` runs the same workload (`tests/perf/overhead_load.py`: `posix_spawn` of `/bin/true`,
+a loopback TCP connection with a 100-byte exchange, open+close of a file) alternately with no sensor and with
+`panopticon-sensord` running its default providers against a WAL (no Manager, records spooled). The load is pinned to
+one CPU (`taskset -c 1`); unpinned, a loopback connection varied 2x from run to run with no sensor at all. Median of 5
+rounds per sample, median over 4 off/on pairs, microseconds per operation. Ubuntu 22.04, kernel 5.15, x86_64,
+4 vCPU VirtualBox VM.
+
+| Build | exec (spawn+wait) | tcp loopback connection | open+close | sensor CPU during the load | peak RSS |
+| --- | --- | --- | --- | --- | --- |
+| Before: ring buffer woken on every record | 5422 us off, 6660 us on: **+22.8 %** | 199 us off, 669 us on: **+235 %** | +5.3 % | 16 to 22 % of one core | 52 MiB |
+| After: adaptive wake (ADR 029) | 5318 us off, 5447 us on: **+2.4 %** | 190 us off, 219 us on: +15 % | +8 % | 14 to 28 % of one core | 56 to 63 MiB |
+
+What the numbers do and do not say:
+
+- The cause was found with `bpftool prog show` (`kernel.bpf_stats_enabled=1`): `on_fork`, `on_exec` and `on_exit` took
+  500 to 850 us each in the kernel, because `bpf_ringbuf_output` with flags 0 wakes the reader (irq_work and a
+  scheduler wake) whenever it has caught up, which on a quiet reader is every record. With `BPF_RB_NO_WAKEUP` the same
+  programs take 3 to 5 us. The exec path crosses three of these hooks.
+- Exec overhead now meets the 5 % budget. The TCP figure is a ~29 us difference on a ~190 us operation whose own
+  baseline moved between 175 and 275 us across samples; the single clean sample before the fix was 2 %, so the
+  +15 % is within what this VM cannot resolve, and it is not claimed as a measurement of the sensor's cost.
+  The open+close difference is 0.4 us on 5 us and also inside the noise (the file-event provider is off in the
+  default configuration this ran with, so this path only pays for the in-kernel hooks).
+- The first "after" attempt (two of three pairs) was discarded: it overlapped a repository sync and the baseline
+  exec time swung between 5.3 and 14.9 ms. The numbers above are from the later back-to-back run of both binaries,
+  4 pairs each, the VM otherwise idle.
+- Records spooled to the WAL without a Manager reach the WAL quota in this test (the quota drops the oldest
+  segments and says so: `quota: seq a-b`); `loss_records` in `status` counted none from the kernel or the pipeline.
+- Not measured: more than one heavy workload at once, other kernels or hardware, p99 added latency per call.

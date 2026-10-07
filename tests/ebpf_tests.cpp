@@ -12,6 +12,7 @@
 #include "panopticon_events.h"
 
 #include <fcntl.h>
+#include <linux/bpf.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -32,6 +33,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
@@ -1106,6 +1108,116 @@ void test_live_lifecycle_and_arguments() {
     require(live.provider().take_losses() == 0U, "no ring buffer losses");
 }
 
+// The programs wake the reader only for the first record after an idle gap and the reader polls on a
+// timer while records flow. A burst must be delivered whole, and a record that follows a pause of any
+// length (shorter and longer than the 20 ms gap, and the 30 ms the reader stays fast) must arrive long
+// before the 1 s idle timeout: a missed wake-up would show as a delay near a second.
+//
+// Delivery alone cannot tell "wake on every record" from the policy, so the test also reads what the kernel
+// measured for the hooks themselves: waking costs 500 to 850 us inside fork, exec and exit on the dev VM, the
+// policy 3 to 5 us. The bound is 100 us, well clear of both.
+class bpf_run_time_stats {
+public:
+    bpf_run_time_stats() {
+        union bpf_attr attr {};
+        attr.enable_stats.type = BPF_STATS_RUN_TIME;
+        fd_ = static_cast<int>(::syscall(SYS_bpf, BPF_ENABLE_STATS, &attr, sizeof(attr)));
+    }
+    ~bpf_run_time_stats() {
+        if (fd_ >= 0) ::close(fd_);
+    }
+    bpf_run_time_stats(const bpf_run_time_stats&) = delete;
+    bpf_run_time_stats& operator=(const bpf_run_time_stats&) = delete;
+    bool enabled() const { return fd_ >= 0; }
+
+    // Runs and nanoseconds of every loaded program with this name, summed.
+    static std::pair<std::uint64_t, std::uint64_t> of(const std::string& name) {
+        std::uint64_t runs = 0U;
+        std::uint64_t nanoseconds = 0U;
+        std::uint32_t id = 0U;
+        for (;;) {
+            union bpf_attr next {};
+            next.start_id = id;
+            if (::syscall(SYS_bpf, BPF_PROG_GET_NEXT_ID, &next, sizeof(next)) != 0) break;
+            id = next.next_id;
+            union bpf_attr open {};
+            open.prog_id = id;
+            const int fd = static_cast<int>(::syscall(SYS_bpf, BPF_PROG_GET_FD_BY_ID, &open, sizeof(open)));
+            if (fd < 0) continue;
+            struct bpf_prog_info info {};
+            union bpf_attr query {};
+            query.info.bpf_fd = static_cast<std::uint32_t>(fd);
+            query.info.info_len = sizeof(info);
+            query.info.info = reinterpret_cast<std::uint64_t>(&info);
+            if (::syscall(SYS_bpf, BPF_OBJ_GET_INFO_BY_FD, &query, sizeof(query)) == 0 && name == info.name) {
+                runs += info.run_cnt;
+                nanoseconds += info.run_time_ns;
+            }
+            ::close(fd);
+        }
+        return {runs, nanoseconds};
+    }
+
+private:
+    int fd_{-1};
+};
+
+void test_live_wake_policy_delivers_after_bursts_and_pauses() {
+    live_provider live;
+    if (!live.begin("live wake policy")) return;
+    bpf_run_time_stats stats;
+    records_t all;
+
+    std::vector<pid_t> burst;
+    for (int i = 0; i < 200; ++i) {
+        const auto pid = spawn_child("exit7");
+        reap(pid);
+        burst.push_back(pid);
+    }
+    require(collect(live.queue(), all,
+                    [&](const records_t& r) {
+                        return std::all_of(burst.begin(), burst.end(), [&](const pid_t pid) { return !exits_of(r, pid).empty(); });
+                    },
+                    std::chrono::milliseconds{10000}),
+            "every process of a burst is delivered");
+
+    for (const int pause_ms : {5, 15, 22, 28, 35, 45, 60, 120, 300, 1200}) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{pause_ms});
+        const auto started = std::chrono::steady_clock::now();
+        const auto pid = spawn_child("exit7");
+        reap(pid);
+        require(collect(live.queue(), all, [&](const records_t& r) { return !exits_of(r, pid).empty(); }, std::chrono::milliseconds{3000}),
+                "a record after a pause of " + std::to_string(pause_ms) + " ms is delivered");
+        const auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+        require(delay < 400, "a record after a pause of " + std::to_string(pause_ms) + " ms arrived in " + std::to_string(delay) + " ms");
+    }
+    require(live.provider().take_losses() == 0U, "no ring buffer losses");
+
+    if (!stats.enabled()) {
+        std::cout << "SKIP live_wake_policy hook cost: kernel run-time statistics unavailable\n";
+        return;
+    }
+    // Cost is measured over a dense workload only. When events are further apart than the gap every one of them
+    // is supposed to wake the reader (the sanitizer builds of this binary start children so slowly that their own
+    // processes are such a workload), so the earlier part of the test says nothing about it.
+    const std::array<const char*, 3U> hooks{"on_fork", "on_exec", "on_exit"};
+    std::array<std::pair<std::uint64_t, std::uint64_t>, 3U> before;
+    for (std::size_t index = 0U; index < hooks.size(); ++index) before[index] = bpf_run_time_stats::of(hooks[index]);
+    char* const argv[] = {const_cast<char*>("true"), nullptr};
+    for (int i = 0; i < 300; ++i) {
+        pid_t pid = 0;
+        require(::posix_spawn(&pid, "/bin/true", nullptr, nullptr, argv, environ) == 0, "spawn /bin/true");
+        reap(pid);
+    }
+    for (std::size_t index = 0U; index < hooks.size(); ++index) {
+        const auto after = bpf_run_time_stats::of(hooks[index]);
+        const auto runs = after.first - before[index].first;
+        require(runs >= 300U, std::string{hooks[index]} + " ran often enough to measure");
+        const auto average_us = (after.second - before[index].second) / runs / 1000U;
+        require(average_us < 100U, std::string{hooks[index]} + " costs " + std::to_string(average_us) + " us per call in the kernel over 300 back-to-back processes (bound 100 us)");
+    }
+}
+
 // Spawns the test binary as a child with `actions` applied before exec, so its standard descriptors
 // are exactly what the test wants the kernel to classify.
 pid_t spawn_with_actions(const std::string& mode, posix_spawn_file_actions_t* actions) {
@@ -1415,6 +1527,7 @@ int main(int argc, char** argv) {
     run("decode_rejects_malformed_samples", test_decode_rejects_malformed_samples);
     run("process_providers_share_a_family", test_process_providers_share_a_family);
     run("live_lifecycle_and_arguments", test_live_lifecycle_and_arguments);
+    run("live_wake_policy", test_live_wake_policy_delivers_after_bursts_and_pauses);
     run("live_exec_stdio_and_interpreter", test_live_exec_stdio_and_interpreter);
     run("live_signals_between_processes", test_live_signals_between_processes);
     run("live_raw_sockets", test_live_raw_sockets);
