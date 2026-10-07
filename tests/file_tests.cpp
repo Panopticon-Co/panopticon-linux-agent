@@ -189,6 +189,12 @@ bool has(const std::vector<raw_file_event>& events, const file_operation operati
 // Ground truth on a real kernel: the child's operations must appear with its pid, the parent's
 // own writes must not, and an excluded directory must stay silent.
 void test_live_file_events_match_ground_truth() {
+    // A filesystem-wide fanotify mark needs CAP_SYS_ADMIN, but newer kernels let an unprivileged process pass the
+    // probe (fanotify_init itself is allowed), so the probe alone would let this test fail instead of skip.
+    if (::geteuid() != 0) {
+        std::printf("SKIP live fanotify test: needs root for a filesystem mark\n");
+        return;
+    }
     {
         fanotify_file_provider probe_only;
         if (const auto reason = probe_only.probe(); !reason.empty()) {
