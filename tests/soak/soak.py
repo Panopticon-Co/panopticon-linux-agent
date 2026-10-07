@@ -16,6 +16,9 @@ What `run` does, all under DIR (default /var/tmp/soak):
   * faults on a schedule: a Manager outage of 90 s every 30 min, slow acks and dropped acks once an hour;
   * a signed command every 2 min against a long-lived victim, alternating COLLECT_PROCESS_INFO and KILL_PROCESS
     (dry run: the victim must still be alive at the end);
+  * a signed local policy (ADR 032, `--no-policy` to leave it out) whose rules match the workload, republished every
+    2 min as a new version, every fifth time as an older signed version that must be refused as a rollback; the report
+    accounts for each publish and checks that every match follows the record it is about;
   * a sample every 30 s to samples.ndjson: RSS, peak RSS, fds, threads, CPU, WAL bytes, the full status reply,
     and the workload's own counters.
 At the end it drains, stops the sensor gracefully, checks the store with tests/chaos/analyze.py and writes
@@ -43,6 +46,7 @@ PORT = 18563
 DNS_ADDRESS = "127.0.0.77"  # all of 127/8 is local on Linux; nothing leaves the host
 SAMPLE_SECONDS = 30
 COMMAND_SECONDS = 120
+POLICY_SECONDS = 120
 HEALTH_SECONDS = 10
 
 
@@ -313,8 +317,40 @@ class Soak:
             "response_mode=dry_run", "response_actions=KILL_PROCESS,COLLECT_PROCESS_INFO", "response_poll_seconds=5",
             "response_signing_keys=" + self.path("keyring"), "response_ledger_path=" + self.path("ledger"),
         ]
+        if self.args.policy:
+            policy_line = subprocess.run([self.args.signer, "keygen", self.path("policy.key")], check=True, capture_output=True, text=True).stdout.strip()
+            with open(self.path("policy.keys"), "w", encoding="utf-8") as handle:
+                handle.write(policy_line.rsplit(" ", 1)[0] + " soak-policy-key\n")
+            os.chmod(self.path("policy.keys"), 0o644)
+            self.policy_version = 0
+            self.publish_policy("good")
+            lines += ["policy_path=" + self.path("policy"), "policy_signing_keys=" + self.path("policy.keys"), "policy_check_seconds=10"]
         with open(self.path("sensor.conf"), "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")
+
+    # The policy is rewritten every few minutes under load: a new version (loaded as `updated`), and every fifth time an
+    # older, validly signed one (refused as `rollback`, the policy in force stays). Rules match the workload's real
+    # processes and DNS names, so match records are produced throughout. It never causes an action.
+    POLICY_RULES = ("rule soak-id process.exec exe prefix alert low /usr/bin/id\n"
+                    "rule soak-echo * cmdline contains alert low echo soak\n"
+                    "rule soak-dns dns.query dest_domain ioc alert low\n"
+                    "ioc dest_domain soak.test\n")
+
+    def publish_policy(self, kind):
+        if kind == "good":
+            self.policy_version += 1
+            version = self.policy_version
+        else:
+            version = max(1, self.policy_version - 1)
+        body = self.POLICY_RULES + ("rule soak-date process.exec exe prefix alert low /usr/bin/date\n" if version % 2 else "")
+        signed = subprocess.run([self.args.signer, "sign-policy", self.path("policy.key"), "soak-policy", str(version), str(int(time.time()) - 30), str(int(time.time()) + 1800), "all"],
+                                input=body, capture_output=True, text=True, check=True).stdout
+        with open(self.path("policy.new"), "w", encoding="utf-8") as handle:
+            handle.write(signed)
+        os.chmod(self.path("policy.new"), 0o644)
+        os.replace(self.path("policy.new"), self.path("policy"))
+        with open(self.path("policy.sent"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"t": time.time(), "version": version, "kind": kind}) + "\n")
 
     def start_manager(self):
         self.manager = subprocess.Popen(
@@ -456,6 +492,8 @@ class Soak:
         end = start + hours * 3600.0
         next_sample = start
         next_command = start + 60
+        next_policy = start + POLICY_SECONDS
+        publishes = 0
         commands = 0
         faults = []
         outage_until = None
@@ -489,6 +527,13 @@ class Soak:
             if mode_until and now >= mode_until:
                 self.set_mode("ok")
                 mode_until = None
+            if self.args.policy and now >= next_policy:
+                publishes += 1
+                rollback = publishes % 5 == 0
+                self.publish_policy("rollback" if rollback else "good")
+                if rollback:
+                    faults.append((now, "policy_reject"))  # health says degraded until the next accepted version
+                next_policy += POLICY_SECONDS
             if now >= next_command:
                 self.command(commands, victim, ticks)
                 commands += 1
@@ -700,12 +745,24 @@ def analyze(args):
     loss = {}
     health_times = []
     latency = {}
+    policy_changes, policy_matches, policy_misordered = {}, {}, 0
     for row in read_ndjson(os.path.join(work, "store.ndjson")):
         try:
             record = json.loads(row["line"])
         except (ValueError, KeyError):
             continue
         kind = record.get("record_type")
+        if kind == "event" and record.get("type") == "policy.change":
+            # A record without its body (None:None) is counted, not skipped: the policy verdict then fails loudly.
+            body = record.get("policy", {})
+            key = "%s:%s" % (body.get("outcome"), body.get("reason"))
+            policy_changes[key] = policy_changes.get(key, 0) + 1
+        elif kind == "event" and record.get("type") == "policy.match":
+            body = record.get("policy", {})
+            rule = body.get("rule_id")
+            policy_matches[rule] = policy_matches.get(rule, 0) + 1
+            if body.get("subject", {}).get("seq", 1 << 62) >= record.get("seq", 0):
+                policy_misordered += 1
         if kind == "loss":
             body = record.get("loss", {})
             stage = body.get("stage", "?")
@@ -755,6 +812,21 @@ def analyze(args):
                           "victim_alive_at_end": run.get("victim_alive_at_end")}
     lines.append("commands %s" % report["commands"])
 
+    # Every policy publish must be accounted for: a good version is loaded once (`updated`, or `no_previous_state` for the
+    # first), an older validly signed one is refused as `rollback`, nothing else happens, nothing expires, and every match
+    # comes after the record it is about.
+    published = read_ndjson(os.path.join(work, "policy.sent"))
+    if published:
+        good = sum(1 for row in published if row["kind"] == "good")
+        refused = sum(1 for row in published if row["kind"] == "rollback")
+        loaded = policy_changes.get("loaded:updated", 0) + policy_changes.get("loaded:no_previous_state", 0)
+        report["policy"] = {"published_good": good, "published_rollback": refused, "changes": policy_changes,
+                            "matches_by_rule": policy_matches, "matches_total": sum(policy_matches.values()),
+                            "matches_before_their_subject": policy_misordered, "last_version": published[-1]["version"]}
+        # A publish in the final seconds may not have been picked up before the sensor stopped.
+        report["policy"]["loaded_shortfall"] = good - loaded
+        report["policy"]["refused_shortfall"] = refused - policy_changes.get("rejected:rollback", 0)
+        lines.append("policy %s" % report["policy"])
     integrity_path = os.path.join(work, "integrity.json")
     if os.path.exists(integrity_path):
         try:
@@ -771,7 +843,13 @@ def analyze(args):
     verdicts = {}
     if "rss_mib" in report:
         r = report["rss_mib"]
-        verdicts["rss"] = "stable" if abs(r["slope_per_hour_second_half"]) < 1.0 and r["last"] - r["min"] < 16 else "GROWTH"
+        trend_hours = (steady[-1]["t"] - steady[0]["t"]) / 3600.0 if len(steady) > 1 else 0.0
+        if trend_hours < 2.0:
+            # A short run cannot show a leak or rule one out; say so instead of guessing from a few minutes of samples.
+            verdicts["rss"] = "NOT ENOUGH DATA (%.1f h after warm-up; need 2 h)" % trend_hours
+        else:
+            # Only a rising trend is growth; a falling slope is allocator give-back, not a leak.
+            verdicts["rss"] = "GROWTH" if r["slope_per_hour_second_half"] >= 1.0 or (r["slope_per_hour"] > 0 and r["last"] - r["min"] >= 16) else "stable"
     if "fds" in report:
         f = report["fds"]
         verdicts["fds"] = "stable" if f["max"] - f["min"] <= 8 and f["last"] <= f["first"] + 2 else "GROWTH"
@@ -782,6 +860,11 @@ def analyze(args):
     verdicts["providers"] = "active outside injected faults" if not report.get("provider_not_active") else "NOT ALWAYS ACTIVE"
     c = report["commands"]
     verdicts["commands"] = "all answered, victim alive" if c["sent"] and c["with_result"] == c["sent"] and c["victim_alive_at_end"] else "CHECK"
+    if "policy" in report:
+        p = report["policy"]
+        unexpected = {key: count for key, count in p["changes"].items() if key not in ("loaded:updated", "loaded:no_previous_state", "rejected:rollback")}
+        verdicts["policy"] = ("every publish accounted for, matches ordered" if 0 <= p["loaded_shortfall"] <= 1 and 0 <= p["refused_shortfall"] <= 1
+                              and not unexpected and p["matches_total"] > 0 and not p["matches_before_their_subject"] else "CHECK")
     if "integrity" in report:
         verdicts["store"] = "consistent" if not report["integrity"].get("problems") else "PROBLEMS"
     verdicts["sensor"] = "ran to the end" if not run.get("stopped_early") and run.get("sensor_exit_code") == 0 else "CHECK"
@@ -805,6 +888,7 @@ def main():
     run_parser.add_argument("--signer", required=True)
     run_parser.add_argument("--scale", type=float, default=1.0)
     run_parser.add_argument("--warmup-minutes", type=int, default=20)
+    run_parser.add_argument("--no-policy", dest="policy", action="store_false", help="run without a signed local policy")
     load_parser = sub.add_parser("load")
     load_parser.add_argument("--scale", type=float, default=1.0)
     analyze_parser = sub.add_parser("analyze")
