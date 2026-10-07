@@ -20,6 +20,7 @@
 #include "panopticon/linux_agent/sensor/persistence.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 #include "panopticon/linux_agent/sensor/policy.hpp"
+#include "panopticon/linux_agent/sensor/policy_bundle.hpp"
 #include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
 #include "panopticon/linux_agent/sensor/wal.hpp"
 
@@ -77,7 +78,23 @@ static void fuzz(const std::uint8_t* data, const std::size_t size) {
 static void fuzz(const std::uint8_t* data, const std::size_t size) { (void)parse_sensor_config(as_text(data, size)); }
 
 #elif defined(FUZZ_POLICY)
-static void fuzz(const std::uint8_t* data, const std::size_t size) { (void)policy_engine::parse(as_text(data, size)); }
+// A policy body (ADR 016) and a signed bundle (ADR 032). A body that loads is also evaluated, with the input
+// itself as every attacker-chosen fact, so matching runs on hostile text as well.
+static void fuzz(const std::uint8_t* data, const std::size_t size) {
+    const auto text = as_text(data, size);
+    auto engine = policy_engine::parse(text);
+    if (succeeded(engine)) {
+        policy_input input;
+        input.kind = "process.exec";
+        input.exe = "/tmp/" + std::string{text.substr(0U, 256U)};
+        input.cmdline = std::string{text};
+        input.file_path = input.exe;
+        input.dest_domain = std::string{text.substr(0U, 253U)};
+        (void)std::get<policy_engine>(engine).evaluate(input);
+        (void)std::get<policy_engine>(engine).evaluate(input, policy_field::sha256);
+    }
+    (void)parse_policy_bundle(text);
+}
 
 #elif defined(FUZZ_AUTH_LINE)
 // A line of auth.log or the journal: written by users (a user name is attacker text).

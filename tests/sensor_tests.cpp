@@ -13,6 +13,7 @@
 #include "panopticon/linux_agent/sensor/serializer.hpp"
 #include "panopticon/linux_agent/sensor/systemd_notify.hpp"
 #include "panopticon/linux_agent/sensor/wal.hpp"
+#include "policy_test_support.hpp"
 
 #include <linux/cn_proc.h>
 
@@ -21,6 +22,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -876,6 +878,112 @@ void test_pipeline_end_to_end_with_scripted_provider() {
     // This provider did not capture stdio at exec; the record says so rather than staying silent.
     require(!contains(*exec, "\"stdio\":") && contains(*exec, "{\"field\":\"process.stdio\",\"reason\":\"not_supported_by_provider\"}"),
             "an exec without kernel-captured stdio says it is unavailable: " + *exec);
+}
+
+// ADR 032: a signed policy decides about an exec, the decision is a policy.match after the exec record, the policy is
+// named in every later record, and nothing acts.
+std::vector<std::string> run_policy_pipeline(const fs::path& cfg, const std::string& name, std::uint64_t& matches) {
+    const auto root = fresh_directory(name + "proc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "bash", 500U, "/usr/bin/bash", {"-bash"}}.write(root);
+    fake_process{200U, 100U, "curl", 900U, "/usr/bin/curl", {"curl", "-s", "http://198.51.100.7/x"}}.write(root);
+    std::vector<raw_record> script{record_of(raw_fork{100U, 100U, 200U, 200U, std::nullopt}),
+                                   record_of(raw_exec{200U, 200U, std::nullopt, std::nullopt, std::nullopt}),
+                                   record_of(raw_exit{200U, 200U, 0U, 17U})};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    config.wal_path = cfg / "wal";
+    config.policy_path = cfg / "policy";
+    config.policy_signing_keys = cfg / "keys";
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+        matches = pipeline.metrics().policy_matches;
+    }
+    auto lines = lines_of(stream);
+    std::fclose(stream);
+    return lines;
+}
+
+fs::path policy_directory(const std::string& name) {
+    const auto cfg = fresh_directory(name);
+    fs::permissions(cfg, fs::perms::owner_all, fs::perm_options::replace);
+    fs::permissions(cfg.parent_path(), fs::perms::owner_all, fs::perm_options::replace);
+    return cfg;
+}
+
+void put_private(const fs::path& path, const std::string& contents) {
+    write_file(path, contents);
+    fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
+}
+
+const std::string exfil_policy =
+    "rule curl-exfil process.exec cmdline contains recommend_terminate high 198.51.100.7\n"
+    "rule never process.exec exe equals alert low /nonexistent\n";
+
+void test_pipeline_policy_match_is_a_record_not_an_action() {
+    const auto cfg = policy_directory("policycfg");
+    const auto key = policy_test_support::make_key();
+    put_private(cfg / "keys", policy_test_support::key_line(key));
+    policy_test_support::bundle_fields fields;
+    fields.version = 3U;
+    fields.issued_unix = static_cast<std::int64_t>(std::time(nullptr)) - 10;
+    fields.expires_unix = fields.issued_unix + 3600;
+    put_private(cfg / "policy", policy_test_support::signed_bundle(key, fields, exfil_policy));
+    std::uint64_t matches = 0U;
+    const auto lines = run_policy_pipeline(cfg, "policyok", matches);
+    require(matches == 1U, "one decision");
+    for (std::size_t index = 0U; index < lines.size(); ++index) {
+        require(contains(lines[index], "\"seq\":" + std::to_string(index + 1U) + ","), "seq stays contiguous with policy records");
+        require(!contains(lines[index], "response.action"), "a decision never becomes an action");
+    }
+    require(contains(lines[0], "\"type\":\"policy.change\"") && contains(lines[0], "\"outcome\":\"loaded\"") &&
+                contains(lines[0], "\"reason\":\"no_previous_state\"") && contains(lines[0], "\"version\":3"),
+            "the load is recorded first: " + lines[0]);
+    require(contains(lines[1], "\"record_type\":\"health\"") && contains(lines[1], "\"name\":\"policy\",\"state\":\"active\"") &&
+                contains(lines[1], "\"policy_version\":\"test-policy/3\""),
+            "health names the policy in force: " + lines[1]);
+    const auto exec = std::find_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"type\":\"process.exec\""); });
+    require(exec != lines.end() && exec + 1 != lines.end(), "exec and a following record");
+    const auto exec_seq = static_cast<std::size_t>(exec - lines.begin()) + 1U;
+    const auto& match = *(exec + 1);
+    require(contains(match, "\"type\":\"policy.match\"") && contains(match, "\"rule_id\":\"curl-exfil\"") &&
+                contains(match, "\"action\":\"recommend_terminate\"") && contains(match, "\"severity\":\"high\"") &&
+                contains(match, "\"subject\":{\"type\":\"process.exec\",\"seq\":" + std::to_string(exec_seq) + "}") &&
+                contains(match, "\"confidence\":\"inferred\"") && contains(match, "\"path\":\"/usr/bin/curl\""),
+            "the match follows its exec and names it: " + match);
+    require(std::count_if(lines.begin(), lines.end(), [](const std::string& line) { return contains(line, "\"type\":\"policy.match\""); }) == 1,
+            "exactly one match");
+    require(fs::exists(cfg / "wal.policy"), "the accepted version is kept durably");
+}
+
+void test_pipeline_refused_policy_decides_nothing() {
+    const auto cfg = policy_directory("policybad");
+    const auto key = policy_test_support::make_key();
+    const auto stranger = policy_test_support::make_key();
+    put_private(cfg / "keys", policy_test_support::key_line(key));
+    policy_test_support::bundle_fields fields;
+    fields.issued_unix = static_cast<std::int64_t>(std::time(nullptr)) - 10;
+    fields.expires_unix = fields.issued_unix + 3600;
+    put_private(cfg / "policy", policy_test_support::signed_bundle(stranger, fields, exfil_policy));
+    std::uint64_t matches = 0U;
+    const auto lines = run_policy_pipeline(cfg, "policybadrun", matches);
+    require(matches == 0U, "an unverified policy decides nothing");
+    require(contains(lines[0], "\"type\":\"policy.change\"") && contains(lines[0], "\"outcome\":\"rejected\"") &&
+                contains(lines[0], "\"reason\":\"unknown_key\""),
+            "the refusal is recorded: " + lines[0]);
+    require(contains(lines[1], "\"status\":\"degraded\"") && contains(lines[1], "\"name\":\"policy\",\"state\":\"degraded\"") &&
+                contains(lines[1], "\"policy_version\":\"none\""),
+            "health is degraded and no policy is named: " + lines[1]);
 }
 
 void test_pipeline_exec_stdio_and_interpreter() {
@@ -1984,6 +2092,13 @@ void test_sensor_config_is_strict() {
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nqueue_capacity=1\n")), "out of range rejected");
     require(!succeeded(parse_sensor_config("sensor_id=s\nsensor_id=t\nhost_id=h\n")), "duplicate rejected");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nwal_path=relative\n")), "relative path rejected");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\npolicy_path=/etc/p/policy\n")), "a policy without signing keys is refused");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\npolicy_signing_keys=/etc/p/keys\n")), "signing keys without a policy are refused");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\npolicy_path=p\npolicy_signing_keys=/etc/p/keys\n")), "a relative policy path is refused");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\npolicy_path=/etc/../p\npolicy_signing_keys=/etc/p/keys\n")), "'..' is refused");
+    require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\npolicy_check_seconds=1\n")), "a policy check under 5 s is refused");
+    const auto& policy = value_of(parse_sensor_config("sensor_id=s\nhost_id=h\npolicy_path=/etc/p/policy\npolicy_signing_keys=/etc/p/keys\n"), "policy keys");
+    require(policy.policy_path == "/etc/p/policy" && policy.policy_signing_keys == "/etc/p/keys" && policy.policy_check_seconds == 30U, "policy keys parse");
     require(!value_of(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_ebpf=false\n"), "ebpf off").enable_ebpf, "enable_ebpf=false");
     require(value_of(parse_sensor_config("sensor_id=s\nhost_id=h\n"), "defaults").enable_ebpf, "eBPF is on by default");
     require(!succeeded(parse_sensor_config("sensor_id=s\nhost_id=h\nenable_ebpf=maybe\n")), "non-boolean enable_ebpf rejected");
@@ -2508,6 +2623,8 @@ int main() {
     run("wal_runtime_corruption_is_isolated", test_wal_runtime_corruption_is_isolated);
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
     run("pipeline_exec_stdio_and_interpreter", test_pipeline_exec_stdio_and_interpreter);
+    run("pipeline_policy_match_is_a_record_not_an_action", test_pipeline_policy_match_is_a_record_not_an_action);
+    run("pipeline_refused_policy_decides_nothing", test_pipeline_refused_policy_decides_nothing);
     run("pipeline_signal_event", test_pipeline_signal_event);
     run("pipeline_raw_socket_event", test_pipeline_raw_socket_event);
     run("pipeline_tcp_close_event", test_pipeline_tcp_close_event);

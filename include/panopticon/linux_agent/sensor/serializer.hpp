@@ -6,6 +6,7 @@
 #include "panopticon/linux_agent/sensor/fim.hpp"
 #include "panopticon/linux_agent/sensor/host_state.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
+#include "panopticon/linux_agent/sensor/policy_bundle.hpp"
 #include "panopticon/linux_agent/sensor/provider.hpp"
 #include "panopticon/linux_agent/sensor/state_diff.hpp"
 
@@ -166,6 +167,19 @@ struct kernel_record {
     raw_kernel_event kernel;
 };
 
+// policy.match (ADR 032): one decision of the local policy about one event. A recommendation for an analyst or
+// the Manager; nothing on the endpoint acts on it.
+struct policy_match_record {
+    std::uint64_t time_unix_ns{};  // the time of the event that matched
+    entity_ptr actor;              // the process the event is about, when known
+    std::uint32_t pid{};           // reported on its own when the process is no longer known
+    std::string policy_id;
+    std::uint64_t policy_version{};
+    policy_decision decision;
+    std::string subject_type;     // the type of the record that matched
+    std::uint64_t subject_seq{};  // its seq
+};
+
 class record_serializer {
 public:
     record_serializer(sensor_identity identity, const clock_domain& clock);
@@ -218,6 +232,10 @@ public:
     [[nodiscard]] std::string hash_computed(const hash_result& result, std::uint64_t seq, std::uint64_t now_unix_ns) const;
     // fim.baseline: what the monitor started from and how many offline changes it found.
     [[nodiscard]] std::string fim_baseline_record(const fim_start_result& start, std::uint64_t seq, std::uint64_t now_unix_ns) const;
+
+    // policy.match and policy.change (ADR 032).
+    [[nodiscard]] std::string policy_match(const policy_match_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+    [[nodiscard]] std::string policy_change_event(const policy_change& change, std::uint64_t seq, std::uint64_t now_unix_ns) const;
 
     // state.<object> snapshot part for host-state inventory objects (catalog §5). `items` are
     // already-serialised JSON objects; `unavailable` is carried on part 1 only.

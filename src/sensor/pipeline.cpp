@@ -68,7 +68,8 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
             return error{error_code::invalid_input, "configuration contains an empty or duplicate key"};
         }
     }
-    constexpr std::array<std::string_view, 44U> allowed{
+    constexpr std::array<std::string_view, 47U> allowed{
+        "policy_path", "policy_signing_keys", "policy_check_seconds",
         "sensor_id", "host_id", "wal_path", "wal_quota_bytes", "wal_segment_bytes", "queue_capacity",
         "reconcile_interval_seconds", "health_interval_seconds", "state_interval_seconds", "collect_environment",
         "maximum_args", "maximum_args_bytes", "maximum_entities", "proc_root", "enable_ebpf", "enable_file_events",
@@ -151,6 +152,15 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
         config.response_signing_keys = *value;
         if (!config.response_signing_keys.is_absolute() || value->find("..") != std::string::npos) valid = false;
     }
+    // A policy without pinned keys could never be accepted, and keys without a policy are a mistake: both or neither.
+    for (const auto& [key, target] : {std::pair{"policy_path", &config.policy_path}, std::pair{"policy_signing_keys", &config.policy_signing_keys}}) {
+        if (const auto value = text(key); value.has_value()) {
+            *target = *value;
+            if (!target->is_absolute() || value->find("..") != std::string::npos) valid = false;
+        }
+    }
+    if (config.policy_path.empty() != config.policy_signing_keys.empty()) valid = false;
+    number("policy_check_seconds", config.policy_check_seconds, 5U, 3600U);
     if (const auto value = text("enable_ebpf"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.enable_ebpf = *value == "true";
@@ -343,7 +353,43 @@ result<bool> sensor_pipeline::emit(const std::function<std::string(std::uint64_t
     }
     write_failed_ = false;
     ++metrics_.records;
+    last_emitted_seq_ = seq;
     return true;
+}
+
+void sensor_pipeline::refresh_policy(const std::uint64_t unix_now_ns) {
+    if (!policy_) return;
+    const auto now = static_cast<std::int64_t>(unix_now_ns / ns_per_second);
+    for (const auto& change : policy_->refresh(now)) {
+        (void)emit([&](const std::uint64_t seq) { return serializer_.policy_change_event(change, seq, unix_now_ns); });
+    }
+    const auto* active = policy_->active(now);
+    policy_expires_unix_ = active != nullptr ? active->header.expires_unix : 0;
+    // Every record names the policy that decided about it, or "none" (none accepted, or the one accepted expired).
+    serializer_.set_policy_version(active != nullptr ? active->header.policy_id + "/" + std::to_string(active->header.version) : "none");
+}
+
+void sensor_pipeline::evaluate_policy(const policy_input& input, const entity_ptr& actor, const std::uint32_t pid, const std::uint64_t time_unix_ns,
+                                      const std::string_view subject_type, const std::uint64_t observed_ns, const std::optional<policy_field> only) {
+    if (!policy_) return;
+    const auto* active = policy_->active(static_cast<std::int64_t>(observed_ns / ns_per_second));
+    if (active == nullptr) return;
+    const auto subject_seq = last_emitted_seq_;
+    for (auto& decision : active->engine.evaluate(input, only)) {
+        policy_match_record record;
+        record.time_unix_ns = time_unix_ns;
+        record.actor = actor;
+        record.pid = pid;
+        record.policy_id = active->header.policy_id;
+        record.policy_version = active->header.version;
+        record.decision = std::move(decision);
+        record.subject_type = std::string{subject_type};
+        record.subject_seq = subject_seq;
+        if (succeeded(emit([&](const std::uint64_t seq) { return serializer_.policy_match(record, seq, observed_ns); }))) {
+            ++metrics_.events;
+            ++metrics_.policy_matches;
+        }
+    }
 }
 
 process_event sensor_pipeline::with_executable_hash(const process_event& event) {
@@ -372,6 +418,7 @@ process_event sensor_pipeline::with_executable_hash(const process_event& event) 
     subject.exec_gen = event.process->exec_gen;
     subject.path = image.path;
     subject.key = {image.dev, image.inode, image.size, image.mtime_ns};
+    subject.event_type = event.type;
     copy.executable_hash = hashes_->submit(std::move(subject), fd);
     return copy;
 }
@@ -381,8 +428,22 @@ result<bool> sensor_pipeline::emit_hash_results(const std::uint64_t observed_ns)
     if (!hashes_) return outcome;
     for (const auto& finished : hashes_->drain()) {
         auto emitted = emit([&](const std::uint64_t seq) { return serializer_.hash_computed(finished, seq, observed_ns); });
-        if (succeeded(emitted)) ++metrics_.events;
-        else outcome = emitted;
+        if (!succeeded(emitted)) {
+            outcome = emitted;
+            continue;
+        }
+        ++metrics_.events;
+        if (policy_ && finished.hash.status == "computed" && !finished.hash.sha256.empty()) {
+            // Decided as part of the event that asked for the hash (so `allow exe` applies), but only on the hash:
+            // its executable and command line were decided when that event was written.
+            policy_input input;
+            input.kind = finished.subject.event_type.empty() ? std::string{"process.exec"} : finished.subject.event_type;
+            input.exe = finished.subject.path;
+            input.sha256 = finished.hash.sha256;
+            entity_ptr actor = graph_.find(finished.subject.pid);
+            if (actor && (actor->entity_id != finished.subject.entity_id || actor->exec_gen != finished.subject.exec_gen)) actor = nullptr;
+            evaluate_policy(input, actor, finished.subject.pid, observed_ns, "hash.computed", observed_ns, policy_field::sha256);
+        }
     }
     return outcome;
 }
@@ -394,8 +455,24 @@ result<bool> sensor_pipeline::emit_events(const std::vector<process_event>& even
         const process_event hashed = hashable ? with_executable_hash(original) : process_event{};
         const auto& event = hashable ? hashed : original;
         auto emitted = emit([&](const std::uint64_t seq) { return serializer_.event(event, seq, observed_ns); });
-        if (succeeded(emitted)) ++metrics_.events;
-        else outcome = emitted;
+        if (!succeeded(emitted)) {
+            outcome = emitted;
+            continue;
+        }
+        ++metrics_.events;
+        if (policy_ && event.process && (event.type == "process.exec" || event.type == "process.discovered")) {
+            const auto& info = event.process->info;
+            policy_input input;
+            input.kind = event.type;
+            input.exe = info.executable.path;
+            for (const auto& arg : info.args) {
+                if (!input.cmdline.empty()) input.cmdline += ' ';
+                input.cmdline += arg;
+            }
+            // A hash already known (cache) is decided now; one still being computed when hash.computed arrives.
+            if (event.executable_hash && event.executable_hash->status == "computed") input.sha256 = event.executable_hash->sha256;
+            evaluate_policy(input, event.process, info.pid, event.time_unix_ns, event.type, observed_ns);
+        }
     }
     for (const auto& lifecycle : containers_.observe(events)) {
         auto emitted = emit([&](const std::uint64_t seq) { return serializer_.container_event(lifecycle, seq, observed_ns); });
@@ -484,7 +561,15 @@ result<bool> sensor_pipeline::emit_dns_event(const raw_record& record, const raw
     out.actor = dns.pid != 0U ? graph_.find(dns.pid) : nullptr;
     out.dns = dns;
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.dns_event(out, seq, observed_ns); });
-    if (succeeded(emitted)) ++metrics_.events;
+    if (!succeeded(emitted)) return emitted;
+    ++metrics_.events;
+    if (policy_ && !dns.name.empty()) {
+        policy_input input;
+        input.kind = "dns.query";
+        if (out.actor) input.exe = out.actor->info.executable.path;
+        input.dest_domain = dns.name.back() == '.' ? dns.name.substr(0U, dns.name.size() - 1U) : dns.name;
+        evaluate_policy(input, out.actor, dns.pid, record.time_unix_ns, "dns.query", observed_ns);
+    }
     return emitted;
 }
 
@@ -554,7 +639,18 @@ result<bool> sensor_pipeline::emit_network_event(const raw_record& record, const
     out.actor = network.pid != 0U ? graph_.find(network.pid) : nullptr;
     out.network = network;
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.network_event(out, seq, observed_ns); });
-    if (succeeded(emitted)) ++metrics_.events;
+    if (!succeeded(emitted)) return emitted;
+    ++metrics_.events;
+    // The far end of a connection in either direction; a listener has none, and a close repeats its open.
+    const bool has_peer = network.operation == network_operation::connect || network.operation == network_operation::accept ||
+                          network.operation == network_operation::udp_flow;
+    if (policy_ && has_peer && !network.remote_address.empty()) {
+        policy_input input;
+        input.kind = std::string{"network."} + to_string(network.operation);
+        if (out.actor) input.exe = out.actor->info.executable.path;
+        input.dest_ip = network.remote_address;
+        evaluate_policy(input, out.actor, network.pid, record.time_unix_ns, input.kind, observed_ns);
+    }
     return emitted;
 }
 
@@ -582,7 +678,16 @@ result<bool> sensor_pipeline::emit_file_event(const raw_record& record, const ra
         }
     }
     auto emitted = emit([&](const std::uint64_t seq) { return serializer_.file_event(out, seq, observed_ns); });
-    if (succeeded(emitted)) ++metrics_.events;
+    if (succeeded(emitted)) {
+        ++metrics_.events;
+        if (policy_ && !file.path.empty()) {
+            policy_input input;
+            input.kind = out.type;
+            if (out.actor) input.exe = out.actor->info.executable.path;
+            input.file_path = file.path;
+            evaluate_policy(input, out.actor, file.pid, record.time_unix_ns, out.type, observed_ns);
+        }
+    }
     if (fim_ && file.pid != 0U && file.operation != file_operation::open_sensitive) (void)fim_->note(file.path, file.old_path, file.pid, record.time_unix_ns, clock_domain::now_monotonic_ns());
     return emitted;
 }
@@ -694,6 +799,13 @@ health_snapshot sensor_pipeline::health_now() const {
     snapshot.providers.push_back({"procfs", "active", "", {"process.discovered", "process.exit", "state.processes"},
                                   graph_.metrics().discovered + graph_.metrics().reconciled_exits, 0U});
     snapshot.status = metrics_.sink_errors > 0U ? "degraded" : (active == expected ? "healthy" : "degraded");
+    if (policy_) {
+        // A configured policy that is not in force (refused, expired, missing keys) is lost protection, not a detail.
+        const auto policy = policy_->health(static_cast<std::int64_t>(clock_domain::now_unix_ns() / ns_per_second));
+        snapshot.providers.push_back({"policy", policy.state, policy.reason, {"policy.match"}, metrics_.policy_matches, 0U});
+        snapshot.coverage["policy.match"] = policy.state == "active" ? "policy" : "";
+        if (policy.state != "active") snapshot.status = "degraded";
+    }
 
     const auto statm = read_small_file("/proc/self/statm");
     unsigned long long size_pages = 0U;
@@ -953,6 +1065,15 @@ result<bool> sensor_pipeline::start() {
     containers_.seed(graph_.live_entities());  // already running: followed, not reported as started
     (void)collect_losses(now);  // recovery losses from the WAL
     begin_instance(unix_now);
+    if (!config_.policy_path.empty()) {
+        policy_store_options options;
+        options.policy_path = config_.policy_path;
+        options.keys_path = config_.policy_signing_keys;
+        options.state_path = config_.wal_path.string() + ".policy";
+        options.host_id = serializer_.identity().host_id;
+        policy_ = std::make_unique<policy_store>(std::move(options));
+        refresh_policy(unix_now);
+    }
     (void)emit_health(unix_now);
     (void)emit_process_state(unix_now);
     (void)emit_host_state(unix_now);
@@ -965,7 +1086,7 @@ result<bool> sensor_pipeline::start() {
         (void)emit([&](const std::uint64_t seq) { return serializer_.fim_baseline_record(begun, seq, unix_now); });
         (void)emit_fim_changes(begun.changes, unix_now);
     }
-    last_reconcile_ns_ = last_health_ns_ = last_state_ns_ = last_resample_ns_ = last_fim_ns_ = now;
+    last_reconcile_ns_ = last_health_ns_ = last_state_ns_ = last_resample_ns_ = last_fim_ns_ = last_policy_ns_ = now;
     refresh_status(now);
     started_ns_ = clock_domain::now_monotonic_ns();
     started_ = true;
@@ -991,6 +1112,16 @@ result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono
     const auto observed = clock_domain::now_unix_ns();
     for (const auto& record : batch_) process_record(record, observed);
     (void)collect_losses(now_ns);
+    if (policy_) {
+        // On schedule, and at once when the policy in force reaches its expiry (decisions already stopped then:
+        // policy_store::active() checks the time; this records the expiry and stops naming the policy).
+        const auto unix_now = clock_domain::now_unix_ns();
+        const bool expired = policy_expires_unix_ != 0 && static_cast<std::int64_t>(unix_now / ns_per_second) >= policy_expires_unix_;
+        if (expired || now_ns - last_policy_ns_ >= config_.policy_check_seconds * ns_per_second) {
+            refresh_policy(unix_now);
+            last_policy_ns_ = now_ns;
+        }
+    }
     if (delivery_probe_) {
         // The Manager said these records can never be valid. Say so in the stream, with the
         // sequence numbers, so the gap at the Manager is explained rather than anonymous.

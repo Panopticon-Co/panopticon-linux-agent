@@ -354,7 +354,23 @@ PATH] <command>` is the client (default `/run/panopticon/sensord.sock`).
   of the newest health record is the total.
 * The `procfs` provider always appears in `providers[]`: it is the reconciler that backs every
   process capability when no kernel provider is active.
-* `policy`: `policy {version, applied, errors[]}`.
+* `policy.match` and `policy.change` (ADR 016, ADR 032; only with `policy_path` and `policy_signing_keys` set):
+  the local policy's decisions and the life of the policy file. A policy decides, it never acts: no record
+  here causes a response action.
+
+| Type | Emitted when | `policy` body |
+| --- | --- | --- |
+| `policy.match` | a rule of the policy in force matches an observed event. Evaluated at `process.exec` and `process.discovered` (exe, cmdline, cached sha256), `hash.computed` (sha256 only, reported under the original event kind), `file.*`, `network.connect`, `network.accept`, `network.udp_flow` (remote address) and `dns.query` (trailing dot stripped) | `outcome: "match"`, `policy_id`, `version`, `rule_id`, `action` (a recommendation, never an executed action), `severity`, `field`, `matched`, `subject {type, seq}` |
+| `policy.change` | a policy loads, updates or resumes, or an update is refused, or the policy in force expires or its file goes missing | `outcome`, `reason`, and when the file parsed: `policy_id`, `version`, `key_id`, `rules`, `indicators`, `expires_at`; `previous_version` when one was in force; `detail` (at most 1,024 bytes) |
+
+* `policy.match` carries provenance `{policy, POLICY, inferred}` and the actor `process` when the sensor still knows it
+  (a bare `pid` plus an `unavailable` entry otherwise). The `subject` names the record the decision is about by type
+  and `seq`; the match is always written after its subject, and its own `seq` is never reused.
+* `policy.change` carries provenance `{policy, POLICY-FILE, observed}`. `reason` is one of `no_previous_state`,
+  `updated`, `resumed`, `state_unreadable` (accepted), or `malformed`, `bad_signature`, `unknown_key`, `no_keys`,
+  `out_of_scope`, `not_yet_valid`, `already_expired`, `rollback`, `untrusted_file`, `too_large`, `unreadable`,
+  `file_missing`, `expired`. A refused update leaves the policy in force (fail-safe); expiry unloads it (fail-closed).
+  A `health` record shows the policy provider and `sensor.policy_version` (`<id>/<version>` or `none`).
 
 ## 7. Detection, evidence, response
 

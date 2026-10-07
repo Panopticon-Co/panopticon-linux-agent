@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -12,8 +13,9 @@
 namespace panopticon::linux_agent::sensor {
 
 // Local policy: indicators of compromise and simple rules evaluated against facts about one event
-// (ADR 016). It decides; it never acts. A decision names a recommended action and the caller (the
-// response module, behind its own dry-run default) is the only thing that can carry one out.
+// (ADR 016). It decides; it never acts. A decision names a recommended action and becomes a
+// policy.match record (ADR 032); nothing on the endpoint carries it out. Acting on it takes a
+// Manager-authorized, signed command.
 //
 // There are no regular expressions: matching is equals, prefix, suffix, contains or set membership,
 // so evaluation cost is linear in the input and cannot be driven into backtracking by an attacker
@@ -75,8 +77,9 @@ public:
     [[nodiscard]] static result<policy_engine> parse(std::string_view text, const policy_limits& limits = {});
 
     // Rules that match, in rule order, at most `maximum_decisions`. Empty when the executable is
-    // allow-listed.
-    [[nodiscard]] std::vector<policy_decision> evaluate(const policy_input& input) const;
+    // allow-listed. With `only`, rules on other fields are skipped: a fact that arrives late (the
+    // hash of an executed image) is decided on its own, without deciding the event's other facts again.
+    [[nodiscard]] std::vector<policy_decision> evaluate(const policy_input& input, std::optional<policy_field> only = std::nullopt) const;
 
     [[nodiscard]] std::size_t rule_count() const noexcept { return rules_.size(); }
     [[nodiscard]] std::size_t ioc_count() const noexcept;

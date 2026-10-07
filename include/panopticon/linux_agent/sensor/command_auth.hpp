@@ -61,10 +61,14 @@ class command_keyring {
 public:
     // Fails when the file cannot be read or any line is not a valid key. A file with no keys loads (every
     // command is then refused: that is how all keys are revoked).
-    [[nodiscard]] static result<std::unique_ptr<command_keyring>> load(const std::filesystem::path& path);
+    // `label` names the file in errors; policy signing keys (ADR 032) use the same format in a file of their own.
+    [[nodiscard]] static result<std::unique_ptr<command_keyring>> load(const std::filesystem::path& path,
+                                                                       const std::string& label = "command signing key file");
     [[nodiscard]] static std::unique_ptr<command_keyring> from_points(const std::vector<ec_public_key_point>& points);
 
     [[nodiscard]] authorization_verdict check(const endpoint_command& command) const;
+    // An ES256 signature over `data` by the pinned key `key_id`: valid, unknown_key or bad_signature.
+    [[nodiscard]] authorization_verdict verify(std::string_view key_id, std::string_view data, const ec_raw_signature& signature) const;
 
     // Re-reads the file when it changed since the last load (size or modification time). A changed file that is
     // invalid keeps the previous keys and reports why through last_error(); a missing file does the same, so
@@ -76,10 +80,11 @@ public:
 
 private:
     command_keyring() = default;
-    static result<std::map<std::string, ec_public_key_point>> read_file(const std::filesystem::path& path);
+    static result<std::map<std::string, ec_public_key_point>> read_file(const std::filesystem::path& path, const std::string& label);
 
     mutable std::mutex mutex_;
     std::filesystem::path path_;
+    std::string label_{"command signing key file"};
     std::map<std::string, ec_public_key_point> keys_;
     std::int64_t file_size_{-1};
     std::int64_t file_mtime_ns_{-1};

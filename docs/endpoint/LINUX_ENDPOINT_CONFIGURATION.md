@@ -80,6 +80,22 @@ Cross-key rules, all enforced at start:
 * `ISOLATE_HOST` and `RELEASE_HOST_ISOLATION` are listed together, and if and only if `response_isolation_socket`
   is set.
 
+## Local policy (ADR 016, ADR 032)
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `policy_path` | empty | Absolute path of the signed policy bundle. Without it no policy is evaluated. |
+| `policy_signing_keys` | empty | Absolute path of the pinned policy keyring, the same line format as `response_signing_keys` but a separate file: the authority to change detection is not the authority to act. |
+| `policy_check_seconds` | 30 | 5 to 3600; how often the file is checked. Expiry is acted on at once. |
+
+`policy_path` and `policy_signing_keys` are set together or not at all, and neither may contain `..`. Both
+files must pass the trusted-path check above, or the policy is refused as `untrusted_file` (a key file that
+fails it is reported in health). The accepted version is recorded in `<wal_path>.policy`; deleting that file
+lets the next valid policy load at any version and the `policy.change` record says so (`no_previous_state`).
+A policy never causes an action: its decisions are `policy.match` records. A bundle is produced with
+`panopticon-command-signer sign-policy <key> <policy_id> <version> <issued_at> <expires_at> <scope>` (body on
+stdin).
+
 ## Installing and running as a service
 
 `cpack -G DEB` (in the build directory) produces `panopticon-sensord_<version>_amd64.deb` with `/usr/bin/panopticon-sensord`,

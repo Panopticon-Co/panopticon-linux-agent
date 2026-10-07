@@ -23,8 +23,9 @@ be able to turn a typo into a kill.
    else. Hashes compare case-insensitively.
 3. The policy text format is strict and line based (`rule`, `ioc`, `allow`). Unknown directives,
    duplicate ids, bad enumerations, control characters, oversize lines and counts over the limits
-   (1024 rules, 100000 indicators) reject the whole file. A policy that half loads would silently
-   stop protecting, so it never half loads.
+   (1024 rules, 100000 indicators) reject the whole file. So do indicators on a field that no
+   `rule ... <field> ioc ...` consults: they would load and never match. A policy that half loads
+   would silently stop protecting, so it never half loads.
 4. An `allow exe <prefix>` entry suppresses every decision for that executable. Decisions per
    event are capped at 16 and matched text at 256 bytes.
 5. The engine produces recommendations only. Carrying one out is the responder's job, behind its

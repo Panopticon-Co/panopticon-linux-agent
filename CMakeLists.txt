@@ -112,6 +112,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/audit_netlink.cpp
         src/sensor/kernel_change.cpp
         src/sensor/policy.cpp
+        src/sensor/policy_bundle.cpp
         src/sensor/ebpf_process.cpp
         src/sensor/host_state.cpp
         src/sensor/state_diff.cpp

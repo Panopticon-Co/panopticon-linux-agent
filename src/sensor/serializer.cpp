@@ -1036,4 +1036,66 @@ std::string record_serializer::host_state(const state_snapshot& snapshot, const 
     return out.take();
 }
 
+std::string record_serializer::policy_match(const policy_match_record& record, const std::uint64_t seq, const std::uint64_t observed_unix_ns) const {
+    json_writer out;
+    // The policy's conclusion about an observed event, not an observation of its own.
+    begin(out, "event", "policy.match", seq, record.time_unix_ns, observed_unix_ns, {"policy", "POLICY", confidence::inferred});
+    std::vector<unavailable_field> unavailable;
+    if (record.actor) {
+        out.key("process");
+        write_process(out, *record.actor);
+        out.end_object();
+    } else if (record.pid != 0U) {
+        out.key("process").begin_object();
+        out.field("pid", record.pid);
+        out.end_object();
+        unavailable.push_back({"process", unavailable_reason::process_exited});
+    } else {
+        unavailable.push_back({"process", unavailable_reason::not_supported_by_provider});
+    }
+    const auto& decision = record.decision;
+    out.key("policy").begin_object();
+    out.field("outcome", "match");
+    out.field("policy_id", record.policy_id);
+    out.field("version", record.policy_version);
+    out.field("rule_id", decision.rule_id);
+    out.field("action", to_string(decision.action));
+    out.field("severity", to_string(decision.severity));
+    out.field("field", decision.field);
+    out.field("matched", decision.matched);
+    out.key("subject").begin_object();
+    out.field("type", record.subject_type);
+    out.field("seq", record.subject_seq);
+    out.end_object();
+    out.end_object();
+    write_unavailable(out, unavailable);
+    out.end_object();
+    return out.take();
+}
+
+std::string record_serializer::policy_change_event(const policy_change& change, const std::uint64_t seq, const std::uint64_t now_unix_ns) const {
+    constexpr std::size_t maximum_detail_bytes = 1024U;
+    json_writer out;
+    begin(out, "event", "policy.change", seq, now_unix_ns, now_unix_ns, {"policy", "POLICY-FILE", confidence::observed});
+    out.key("policy").begin_object();
+    out.field("outcome", change.outcome);
+    out.field("reason", change.reason);
+    // Identity of the policy concerned; absent when the file could not be parsed.
+    if (!change.policy_id.empty()) {
+        out.field("policy_id", change.policy_id);
+        out.field("version", change.version);
+        out.field("key_id", change.key_id);
+        out.field("rules", static_cast<std::uint64_t>(change.rules));
+        out.field("indicators", static_cast<std::uint64_t>(change.indicators));
+        // parse_policy_bundle bounds expires_at, so the nanosecond value fits.
+        out.field("expires_at", format_rfc3339_ns(static_cast<std::uint64_t>(std::max<std::int64_t>(change.expires_unix, 0)) * 1'000'000'000ULL));
+    }
+    if (change.previous_version) out.field("previous_version", *change.previous_version);
+    out.field("detail", std::string_view{change.detail}.substr(0U, maximum_detail_bytes));
+    out.end_object();
+    write_unavailable(out, {});
+    out.end_object();
+    return out.take();
+}
+
 }  // namespace panopticon::linux_agent::sensor

@@ -25,3 +25,9 @@ wal_quota_bytes=268435456
 # response_mode=dry_run
 # response_signing_keys=/etc/panopticon/command-keys
 # response_actions=KILL_PROCESS,COLLECT_PROCESS_INFO,COLLECT_NETWORK_CONNECTIONS
+
+# Signed local policy (ADR 032): indicators and rules that produce policy.match records, never actions. Both or
+# neither. The policy keys are a separate file from the command keys.
+# policy_path=/etc/panopticon/policy
+# policy_signing_keys=/etc/panopticon/policy-keys
+# policy_check_seconds=30

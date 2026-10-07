@@ -50,6 +50,7 @@ struct hash_subject {
     std::uint32_t exec_gen{};
     std::string path;
     hash_key key;
+    std::string event_type;  // the event that asked for the hash (process.exec, process.discovered); policy evaluates it as that event
 };
 
 struct hash_result {

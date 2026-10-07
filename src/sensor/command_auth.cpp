@@ -112,14 +112,14 @@ const char* to_string(const authorization_verdict verdict) noexcept {
     return "missing";
 }
 
-result<std::map<std::string, ec_public_key_point>> command_keyring::read_file(const std::filesystem::path& path) {
+result<std::map<std::string, ec_public_key_point>> command_keyring::read_file(const std::filesystem::path& path, const std::string& label) {
     // The key list is the trust anchor for every enforcement command: a file another user can edit lets them
     // authorise their own commands. An untrusted file is refused as a whole (at a reload the previous keys stay).
     if (const auto reason = untrusted_path_reason(path); !reason.empty()) {
-        return error{error_code::invalid_input, "the command signing key file is not trustworthy: " + reason};
+        return error{error_code::invalid_input, "the " + label + " is not trustworthy: " + reason};
     }
     std::ifstream input{path};
-    if (!input) return error{error_code::io_failure, "cannot read the command signing key file " + path.string()};
+    if (!input) return error{error_code::io_failure, "cannot read the " + label + " " + path.string()};
     std::map<std::string, ec_public_key_point> keys;
     std::string line;
     std::size_t number = 0U;
@@ -139,11 +139,12 @@ result<std::map<std::string, ec_public_key_point>> command_keyring::read_file(co
     return keys;
 }
 
-result<std::unique_ptr<command_keyring>> command_keyring::load(const std::filesystem::path& path) {
-    auto keys = read_file(path);
+result<std::unique_ptr<command_keyring>> command_keyring::load(const std::filesystem::path& path, const std::string& label) {
+    auto keys = read_file(path, label);
     if (!succeeded(keys)) return std::get<error>(keys);
     std::unique_ptr<command_keyring> ring{new command_keyring{}};
     ring->path_ = path;
+    ring->label_ = label;
     ring->keys_ = std::move(std::get<std::map<std::string, ec_public_key_point>>(keys));
     struct stat info {};
     if (::stat(path.c_str(), &info) == 0) {
@@ -179,12 +180,24 @@ authorization_verdict command_keyring::check(const endpoint_command& command) co
     return succeeded(verified) && std::get<bool>(verified) ? authorization_verdict::valid : authorization_verdict::bad_signature;
 }
 
+authorization_verdict command_keyring::verify(const std::string_view key_id, const std::string_view data, const ec_raw_signature& signature) const {
+    ec_public_key_point point{};
+    {
+        const std::lock_guard lock{mutex_};
+        const auto found = keys_.find(std::string{key_id});
+        if (found == keys_.end()) return authorization_verdict::unknown_key;
+        point = found->second;
+    }
+    const auto verified = verify_raw(point, std::vector<std::uint8_t>(data.begin(), data.end()), signature);
+    return succeeded(verified) && std::get<bool>(verified) ? authorization_verdict::valid : authorization_verdict::bad_signature;
+}
+
 void command_keyring::refresh() {
     if (path_.empty()) return;
     struct stat info {};
     if (::stat(path_.c_str(), &info) != 0) {
         const std::lock_guard lock{mutex_};
-        last_error_ = "the command signing key file is not readable; the previous keys stay in force";
+        last_error_ = "the " + label_ + " is not readable; the previous keys stay in force";
         return;
     }
     const auto size = static_cast<std::int64_t>(info.st_size);
@@ -193,7 +206,7 @@ void command_keyring::refresh() {
         const std::lock_guard lock{mutex_};
         if (size == file_size_ && mtime == file_mtime_ns_) return;
     }
-    auto keys = read_file(path_);
+    auto keys = read_file(path_, label_);
     const std::lock_guard lock{mutex_};
     file_size_ = size;
     file_mtime_ns_ = mtime;

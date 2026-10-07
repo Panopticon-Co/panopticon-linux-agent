@@ -218,16 +218,29 @@ result<policy_engine> policy_engine::parse(const std::string_view text, const po
             return fail("unknown directive");
         }
     }
+    // An indicator only matters through an `ioc` rule on its field. Indicators no rule consults would load and
+    // never match, a policy that looks in force while part of it is dead, so the whole policy is refused.
+    for (std::size_t index = 0U; index < std::size(engine.iocs_); ++index) {
+        if (engine.iocs_[index].empty()) continue;
+        const bool used = std::any_of(engine.rules_.begin(), engine.rules_.end(), [&](const policy_rule& rule) {
+            return rule.op == policy_operator::ioc && static_cast<std::size_t>(rule.field) == index;
+        });
+        if (!used) {
+            return error{error_code::invalid_input,
+                         "policy: " + std::string{to_string(static_cast<policy_field>(index))} + " indicators have no ioc rule on that field"};
+        }
+    }
     return engine;
 }
 
-std::vector<policy_decision> policy_engine::evaluate(const policy_input& input) const {
+std::vector<policy_decision> policy_engine::evaluate(const policy_input& input, const std::optional<policy_field> only) const {
     std::vector<policy_decision> decisions;
     for (const auto& prefix : allow_exe_) {
         if (!input.exe.empty() && path_prefix(input.exe, prefix)) return decisions;
     }
     for (const auto& rule : rules_) {
         if (decisions.size() >= limits_.maximum_decisions) break;
+        if (only && rule.field != *only) continue;
         if (rule.kind != "*" && rule.kind != input.kind) continue;
         const auto& value = field_of(input, rule.field);
         if (value.empty()) continue;

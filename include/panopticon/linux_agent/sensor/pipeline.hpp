@@ -81,6 +81,11 @@ struct sensor_config {
     // The privileged isolation helper's AF_UNIX socket (ADR 004, ADR 027). Required to list ISOLATE_HOST and
     // RELEASE_HOST_ISOLATION, which must be listed together.
     std::filesystem::path response_isolation_socket;
+    // Signed local policy (ADR 032): the bundle and the pinned policy-signing keys, both or neither. Its decisions
+    // become policy.match records only; the accepted version is kept durably in <wal_path>.policy.
+    std::filesystem::path policy_path;
+    std::filesystem::path policy_signing_keys;
+    std::uint64_t policy_check_seconds{30U};
     std::size_t maximum_args{64U};
     std::size_t maximum_args_bytes{4096U};
     std::size_t maximum_entities{65536U};
@@ -144,6 +149,7 @@ struct pipeline_metrics {
     std::uint64_t oversize_dropped{};
     std::uint64_t clock_steps{};        // wall-clock steps detected; offsets were re-sampled at once
     std::uint64_t records_unwritten{};  // records the sink refused (full or failing disk); reported as a wal loss
+    std::uint64_t policy_matches{};     // policy.match records written
 };
 
 class sensor_pipeline {
@@ -210,6 +216,13 @@ private:
     // Compares the previous instance's marker with now, reports an unclean end, and writes this instance's marker.
     void begin_instance(std::uint64_t unix_now);
     void write_instance_marker(std::uint64_t unix_now, bool clean);
+    // Signed local policy (ADR 032): re-reads the policy and key files, records what changed, and names the policy
+    // in force in every later record.
+    void refresh_policy(std::uint64_t unix_now_ns);
+    // Writes a policy.match for each decision about the record just written (seq last_emitted_seq_). Decides only:
+    // nothing here can reach the command processor or any response action.
+    void evaluate_policy(const policy_input& input, const entity_ptr& actor, std::uint32_t pid, std::uint64_t time_unix_ns,
+                         std::string_view subject_type, std::uint64_t observed_ns, std::optional<policy_field> only = std::nullopt);
 
     sensor_config config_;
     clock_domain& clock_;
@@ -252,6 +265,10 @@ private:
     bool write_failed_{false};
     std::uint64_t started_ns_{};
     bool started_{false};
+    std::unique_ptr<policy_store> policy_;
+    std::uint64_t last_policy_ns_{};
+    std::int64_t policy_expires_unix_{};  // of the policy in force; 0 when none
+    std::uint64_t last_emitted_seq_{};    // seq of the last record the sink accepted
 };
 
 }  // namespace panopticon::linux_agent::sensor

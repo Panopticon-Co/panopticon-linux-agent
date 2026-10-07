@@ -4,6 +4,13 @@
 `panopticon-contracts` (which the Linux endpoint does not own). Each item says what the sensor can emit today, what
 is missing from the contract, and what the sensor would do once the contract allows it.
 
+**Update (2026-10-07):** the `policy.match` and `policy.change` records (ADR 032) and the S13 records the sensor
+already wrote (process `stdio`, `interpreter` and `script`, `process.signal`, `network.raw_socket`, `network.close`
+byte counts, `container.started` and `container.stopped`) were adopted into the schema in `panopticon-contracts`
+`d81b6f1` (branch `feat/linux-endpoint-record`) with valid and invalid fixtures made from real captures, and the
+Manager accepts them in `68be0e8` (branch `feat/linux-command-signing`). Items below that name these types are
+done; the rest are still proposals.
+
 Read against `feat/linux-endpoint-record` of `panopticon-contracts`
 (`schema/linux-endpoint/1.0.schema.json`, `docs/LINUX_ENDPOINT_RECORD_1.md`, head `241e315`).
 
