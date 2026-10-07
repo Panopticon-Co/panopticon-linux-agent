@@ -126,6 +126,12 @@ result<sensor_config> parse_sensor_config(const std::string_view contents) {
     if (const auto value = text("response_allow_unsigned"); value.has_value()) {
         if (*value != "true" && *value != "false") valid = false;
         config.response_allow_unsigned = *value == "true";
+#ifndef PANOPTICON_LAB_UNSIGNED_COMMANDS
+        // Not a configuration mistake to be tolerated: this binary has no unsigned mode at all (ADR 034).
+        if (config.response_allow_unsigned) {
+            return error{error_code::invalid_input, "response_allow_unsigned=true is not available: this sensor was built without lab unsigned-command support"};
+        }
+#endif
     }
     if (const auto value = text("response_file_roots"); value.has_value()) {
         std::istringstream stream{*value};

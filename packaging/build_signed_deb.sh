@@ -30,6 +30,10 @@ SIGNER=$BUILD/panopticon-command-signer
 for f in "$SIGNER" "$BUILD/panopticon-sensord" "$BUILD/panopticon-ctl" "$KEY"; do
   [ -e "$f" ] || { echo "missing $f" >&2; exit 2; }
 done
+# ADR 034: a package never carries the lab unsigned-command mode. The refusal message exists in the binary only when
+# the option was compiled out.
+grep -aq 'built without lab unsigned-command support' "$BUILD/panopticon-sensord" ||
+  { echo "refusing to package $BUILD/panopticon-sensord: it was built with PANOPTICON_LAB_UNSIGNED_COMMANDS=ON (ADR 034)" >&2; exit 2; }
 for tool in cpack dpkg-deb; do command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 2; }; done
 
 WORK=$(mktemp -d)

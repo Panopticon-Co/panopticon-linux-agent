@@ -267,7 +267,7 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "panopticon-sensord: command channel disabled: %s\n", std::get<error>(keyring).message.c_str());
                 }
             } else {
-                std::fprintf(stderr, "panopticon-sensord: WARNING command signing is off (response_allow_unsigned=true): commands are trusted on the TLS identity alone\n");
+                std::fprintf(stderr, "panopticon-sensord: WARNING LAB BUILD: command signing is off (response_allow_unsigned=true): commands are trusted on the TLS identity alone\n");
             }
             channel.processor.policy.mode = mode;
             channel.processor.policy.allowed.clear();

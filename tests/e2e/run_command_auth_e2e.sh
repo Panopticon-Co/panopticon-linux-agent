@@ -312,15 +312,25 @@ check "dry_run verifies QUARANTINE_FILE and moves nothing" "rejected:dry_run" "$
 check "the file is still there after the dry run" "second" "$(cat "$VICT/sample")"
 stop_sensor; write_conf keys enforce; start_sensor
 
-# 7. An unsigned-allowed sensor (explicit opt-in) runs unsigned commands, and warns at start.
+# 7. The unsigned opt-in (ADR 034). A lab build (-DPANOPTICON_LAB_UNSIGNED_COMMANDS=ON) accepts it, warns at start
+#    and runs unsigned commands. Any other build, which is every packaged one, refuses to start with it.
 stop_sensor
 write_conf unsigned
 : >"$W/sensord.log"
-start_sensor
-check "unsigned mode warns at start" yes "$(grep -q WARNING "$W/sensord.log" && echo yes || echo no)"
-mk unsigned-ok COLLECT_PROCESS_INFO "{\"pid\":$P5,\"start_time_ticks\":$T5}" | enqueue
-R=$(result_of unsigned-ok); check "opted-in unsigned sensor runs an unsigned command" "succeeded" "${R%%:*}"
-stop_sensor
+if grep -aq 'built without lab unsigned-command support' "$SENSORD"; then
+  start_sensor
+  check "packaged build: response_allow_unsigned=true is refused at start" yes "$(grep -q 'not available' "$W/sensord.log" && echo yes || echo no)"
+  mk unsigned-refused COLLECT_PROCESS_INFO "{\"pid\":$P5,\"start_time_ticks\":$T5}" | enqueue
+  sleep 4
+  check "packaged build: no unsigned command is processed" 0 "$(events result unsigned-refused)"
+  stop_sensor
+else
+  start_sensor
+  check "unsigned mode warns at start" yes "$(grep -q 'LAB BUILD' "$W/sensord.log" && echo yes || echo no)"
+  mk unsigned-ok COLLECT_PROCESS_INFO "{\"pid\":$P5,\"start_time_ticks\":$T5}" | enqueue
+  R=$(result_of unsigned-ok); check "lab build: an opted-in unsigned sensor runs an unsigned command" "succeeded" "${R%%:*}"
+  stop_sensor
+fi
 
 # 8. Fail closed: signing keys configured but the file is unusable at start, so the channel does not run.
 write_conf keys

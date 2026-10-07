@@ -66,7 +66,7 @@ The channel is **off** unless `response_mode` says otherwise, and it needs `mana
 | `response_ledger_path` | `<wal_path>.commands` | Durable command ledger, absolute. |
 | `response_require_boot_binding` | `false` | Refuse process commands that are not bound to a boot (schema 1). |
 | `response_signing_keys` | empty | Absolute path of the pinned keyring (ADR 025). |
-| `response_allow_unsigned` | `false` | Explicit opt-in to acting without signatures (labs). |
+| `response_allow_unsigned` | `false` | Lab builds only (`-DPANOPTICON_LAB_UNSIGNED_COMMANDS=ON`): act without signatures. A packaged build refuses to start when this is `true` (ADR 034). |
 | `response_file_roots` | empty | Comma-separated absolute directories, never `/`, no duplicates. Quarantine acts only under these (ADR 026). |
 | `response_quarantine_dir` | `<wal_path>.quarantine` | Quarantine store, absolute; used only with roots. |
 | `response_isolation_socket` | empty | Absolute AF_UNIX path of the privileged isolation helper, shorter than 108 bytes (ADR 027). |

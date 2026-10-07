@@ -8,6 +8,10 @@ option(PANOPTICON_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(PANOPTICON_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 # ThreadSanitizer: cannot be combined with ASAN; libbpf, libcurl and OpenSSL stay uninstrumented.
 option(PANOPTICON_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+# Lab builds only: accept `response_allow_unsigned=true`, i.e. act on commands trusted on the TLS identity alone
+# (ADR 034). OFF means the option does not exist in the binary: a configuration that asks for it is refused, so a
+# packaged sensor cannot be told to skip command signatures by editing its config file.
+option(PANOPTICON_LAB_UNSIGNED_COMMANDS "Lab build: allow response_allow_unsigned=true" OFF)
 # libFuzzer harnesses for the hostile-input parsers (tests/fuzz). Needs clang; use with ASAN and UBSAN.
 option(PANOPTICON_ENABLE_FUZZ "Build the libFuzzer parser harnesses" OFF)
 
@@ -140,6 +144,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
     if(CURL_FOUND)
         target_compile_definitions(panopticon-sensor-core PRIVATE PANOPTICON_HAVE_CURL=1)
+    endif()
+    if(PANOPTICON_LAB_UNSIGNED_COMMANDS)
+        target_compile_definitions(panopticon-sensor-core PUBLIC PANOPTICON_LAB_UNSIGNED_COMMANDS=1)
+        message(WARNING "PANOPTICON_LAB_UNSIGNED_COMMANDS=ON: this build can be configured to act on unsigned commands; do not package it")
     endif()
     target_compile_features(panopticon-sensor-core PUBLIC cxx_std_20)
     target_link_libraries(panopticon-sensor-core PUBLIC panopticon-linux-core Threads::Threads)

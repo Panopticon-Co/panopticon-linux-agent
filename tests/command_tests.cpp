@@ -1551,16 +1551,18 @@ void test_signature_covers_values_not_json_text() {
 
 void test_configuration() {
     const std::string base = "sensor_id=s1\nhost_id=h1\nmanager_url=https://manager.example:8553\nidentity_path=/etc/panopticon/identity.json\n";
+    // Pinned keys satisfy the trust requirement in every build; the unsigned opt-in exists only in lab builds.
+    const std::string trust = "response_signing_keys=/etc/panopticon/command-keys\n";
     auto config = parse_sensor_config(base);
     require(succeeded(config) && std::get<sensor_config>(config).response_mode == "off", "the channel is off by default");
-    config = parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=COLLECT_PROCESS_INFO\nresponse_poll_seconds=2\nresponse_max_changes_per_minute=3\n");
+    config = parse_sensor_config(base + trust + "response_mode=dry_run\nresponse_actions=COLLECT_PROCESS_INFO\nresponse_poll_seconds=2\nresponse_max_changes_per_minute=3\n");
     require(succeeded(config), "dry_run parses");
     const auto& parsed = std::get<sensor_config>(config);
     require(parsed.response_mode == "dry_run" && parsed.response_actions == std::vector<std::string>{"COLLECT_PROCESS_INFO"} && parsed.response_poll_seconds == 2U,
             "values");
     require(!succeeded(parse_sensor_config(base + "response_mode=yes\n")), "a mode outside the vocabulary");
     require(!succeeded(parse_sensor_config(base + "response_actions=NO_SUCH_ACTION\n")), "an action outside the vocabulary cannot be listed");
-    const std::string signed_base = base + "response_allow_unsigned=true\nresponse_mode=dry_run\n";
+    const std::string signed_base = base + trust + "response_mode=dry_run\n";
     const std::string both = "response_actions=ISOLATE_HOST,RELEASE_HOST_ISOLATION\n";
     require(succeeded(parse_sensor_config(signed_base + both + "response_isolation_socket=/run/panopticon/isolation.sock\n")),
             "isolation with a helper socket, both directions");
@@ -1575,21 +1577,21 @@ void test_configuration() {
     require(!succeeded(parse_sensor_config(signed_base + both + "response_isolation_socket=/run/../x.sock\n")), "a socket path with ..");
     require(!succeeded(parse_sensor_config(signed_base + both + "response_isolation_socket=/" + std::string(120U, 'a') + "\n")),
             "a socket path longer than sun_path");
-    require(succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=COLLECT_NETWORK_CONNECTIONS,COLLECT_FILE\n")),
+    require(succeeded(parse_sensor_config(base + trust + "response_mode=dry_run\nresponse_actions=COLLECT_NETWORK_CONNECTIONS,COLLECT_FILE\n")),
             "the implemented collections can be listed by name");
-    require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=QUARANTINE_FILE\n")),
+    require(!succeeded(parse_sensor_config(base + trust + "response_mode=dry_run\nresponse_actions=QUARANTINE_FILE\n")),
             "QUARANTINE_FILE needs the directories it may act in");
-    require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=dry_run\nresponse_actions=COLLECT_FILE\nresponse_file_roots=/tmp\n")),
+    require(!succeeded(parse_sensor_config(base + trust + "response_mode=dry_run\nresponse_actions=COLLECT_FILE\nresponse_file_roots=/tmp\n")),
             "directories without the action are a contradiction");
-    auto file_config = parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=enforce\nresponse_actions=QUARANTINE_FILE,COLLECT_FILE\nresponse_file_roots=/tmp, /var/tmp\nresponse_quarantine_dir=/var/lib/panopticon/q\n");
+    auto file_config = parse_sensor_config(base + trust + "response_mode=enforce\nresponse_actions=QUARANTINE_FILE,COLLECT_FILE\nresponse_file_roots=/tmp, /var/tmp\nresponse_quarantine_dir=/var/lib/panopticon/q\n");
     require(succeeded(file_config) && std::get<sensor_config>(file_config).response_file_roots.size() == 2U &&
                 std::get<sensor_config>(file_config).response_quarantine_dir == "/var/lib/panopticon/q",
             "quarantine with its roots and store parses");
     for (const char* bad : {"/", "relative", "/a/../b", "/tmp,/tmp", ""}) {
-        require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=enforce\nresponse_actions=QUARANTINE_FILE\nresponse_file_roots=" + bad + "\n")),
+        require(!succeeded(parse_sensor_config(base + trust + "response_mode=enforce\nresponse_actions=QUARANTINE_FILE\nresponse_file_roots=" + bad + "\n")),
                 "an unsafe root list is refused");
     }
-    require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=enforce\nresponse_actions=QUARANTINE_FILE\nresponse_file_roots=/tmp\nresponse_quarantine_dir=store\n")),
+    require(!succeeded(parse_sensor_config(base + trust + "response_mode=enforce\nresponse_actions=QUARANTINE_FILE\nresponse_file_roots=/tmp\nresponse_quarantine_dir=store\n")),
             "a relative store path is refused");
     require(!succeeded(parse_sensor_config(base + "response_actions=KILL_PROCESS,KILL_PROCESS\n")), "a duplicate");
     require(!succeeded(parse_sensor_config(base + "response_actions=rm\n")), "an arbitrary name");
@@ -1598,7 +1600,7 @@ void test_configuration() {
     require(!succeeded(parse_sensor_config(base + "response_ledger_path=/var/../etc/ledger\n")), "a traversing ledger path");
     require(!succeeded(parse_sensor_config("sensor_id=s1\nhost_id=h1\nresponse_mode=enforce\n")), "commands need a Manager to come from");
     require(succeeded(parse_sensor_config("sensor_id=s1\nhost_id=h1\n")), "a collection-only sensor is unchanged");
-    config = parse_sensor_config(base + "response_allow_unsigned=true\nresponse_mode=enforce\nresponse_require_boot_binding=true\n");
+    config = parse_sensor_config(base + trust + "response_mode=enforce\nresponse_require_boot_binding=true\n");
     require(succeeded(config) && std::get<sensor_config>(config).response_require_boot_binding, "boot binding can be required");
     require(!succeeded(parse_sensor_config(base + "response_require_boot_binding=yes\n")), "a boolean is true or false");
     // Command authorization: a response mode needs pinned keys or an explicit unsigned opt-in, never neither.
@@ -1610,6 +1612,15 @@ void test_configuration() {
     require(!succeeded(parse_sensor_config(base + "response_mode=enforce\nresponse_signing_keys=keys\n")), "a relative key path");
     require(!succeeded(parse_sensor_config(base + "response_mode=enforce\nresponse_signing_keys=/etc/../tmp/keys\n")), "a traversing key path");
     require(!succeeded(parse_sensor_config(base + "response_allow_unsigned=maybe\n")), "a boolean is true or false");
+#ifdef PANOPTICON_LAB_UNSIGNED_COMMANDS
+    require(succeeded(parse_sensor_config(base + "response_mode=dry_run\nresponse_allow_unsigned=true\n")), "the lab build accepts the unsigned opt-in");
+#else
+    // ADR 034: a packaged build has no unsigned mode, so asking for it is an error that names the cause, not a no-op.
+    const auto unsigned_lab = parse_sensor_config(base + "response_mode=dry_run\nresponse_allow_unsigned=true\n");
+    require(!succeeded(unsigned_lab), "a non-lab build refuses response_allow_unsigned=true");
+    require(std::get<error>(unsigned_lab).message.find("lab") != std::string::npos, "and says why");
+    require(succeeded(parse_sensor_config(base + "response_mode=dry_run\nresponse_allow_unsigned=false\n" + trust)), "false is harmless");
+#endif
     require(succeeded(parse_sensor_config(base)), "off needs neither");
 }
 
