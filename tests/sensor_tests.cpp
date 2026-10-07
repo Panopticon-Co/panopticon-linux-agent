@@ -233,11 +233,14 @@ void reap(const pid_t pid) {
     ::waitpid(pid, &status, 0);
 }
 
-// Waits until the child has exec'd (its comm differs from ours).
+// Waits until the child has exec'd (its comm differs from ours). The kernel sets comm before it publishes the
+// argument range, so a fast machine can see the new comm with an empty command line; wait for both.
 process_info wait_for_exec(const pid_t pid, const std::string& expected_comm) {
     for (int attempt = 0; attempt < 200; ++attempt) {
         auto info = read_process("/proc", static_cast<std::uint32_t>(pid), procfs_limits{});
-        if (succeeded(info) && std::get<process_info>(info).comm == expected_comm) return std::get<process_info>(info);
+        if (succeeded(info) && std::get<process_info>(info).comm == expected_comm && !std::get<process_info>(info).args.empty()) {
+            return std::get<process_info>(info);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     throw std::runtime_error{"child did not exec " + expected_comm};
