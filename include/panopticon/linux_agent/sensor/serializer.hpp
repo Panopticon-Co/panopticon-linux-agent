@@ -1,6 +1,7 @@
 #pragma once
 
 #include "panopticon/linux_agent/sensor/clock.hpp"
+#include "panopticon/linux_agent/sensor/container_tracker.hpp"
 #include "panopticon/linux_agent/sensor/entity_graph.hpp"
 #include "panopticon/linux_agent/sensor/fim.hpp"
 #include "panopticon/linux_agent/sensor/host_state.hpp"
@@ -204,6 +205,9 @@ public:
 
     // kernel.module_load / kernel.module_unload / mount.changed (catalog 4.5).
     [[nodiscard]] std::string kernel_event(const kernel_record& record, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
+
+    // container.started / container.stopped (catalog 4.11), derived from process events.
+    [[nodiscard]] std::string container_event(const container_lifecycle& lifecycle, std::uint64_t seq, std::uint64_t observed_unix_ns) const;
 
     // fim.changed (catalog §4.2). `actor` is the acting process when a file event named the path
     // and the process was still known; otherwise the process is reported as unavailable.

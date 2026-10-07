@@ -1,6 +1,7 @@
 #pragma once
 
 #include "panopticon/linux_agent/error.hpp"
+#include "panopticon/linux_agent/sensor/container_tracker.hpp"
 #include "panopticon/linux_agent/sensor/entity_graph.hpp"
 #include "panopticon/linux_agent/sensor/provider.hpp"
 #include "panopticon/linux_agent/sensor/serializer.hpp"
@@ -201,6 +202,7 @@ private:
     record_sink& sink_;
     record_serializer serializer_;
     entity_graph graph_;
+    container_tracker containers_;
     record_queue queue_;
     std::vector<std::unique_ptr<provider>> providers_;
     std::vector<std::string> standby_;  // per provider: name of the family member that superseded it, else empty

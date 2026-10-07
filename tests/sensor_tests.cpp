@@ -3,6 +3,7 @@
 
 #include "panopticon/linux_agent/sensor/clock.hpp"
 #include "panopticon/linux_agent/sensor/container_identity.hpp"
+#include "panopticon/linux_agent/sensor/container_tracker.hpp"
 #include "panopticon/linux_agent/sensor/dns_message.hpp"
 #include "panopticon/linux_agent/sensor/entity_graph.hpp"
 #include "panopticon/linux_agent/sensor/json.hpp"
@@ -93,6 +94,7 @@ struct fake_process {
     std::string exe;
     std::vector<std::string> args;
     std::uint32_t uid{1000};
+    std::string cgroup{"/system.slice/ssh.service"};
 
     void write(const fs::path& root) const {
         const auto base = root / std::to_string(pid);
@@ -108,7 +110,7 @@ struct fake_process {
         for (const auto& arg : args) cmdline.append(arg).push_back('\0');
         write_file(base / "cmdline", cmdline);
         write_file(base / "environ", std::string{"PATH=/usr/bin\0SECRET=hunter2\0", 29U});
-        write_file(base / "cgroup", "0::/system.slice/ssh.service\n");
+        write_file(base / "cgroup", "0::" + cgroup + "\n");
         write_file(base / "loginuid", "1000");
         write_file(base / "sessionid", "4294967295");
         fs::create_symlink(exe, base / "exe");
@@ -1844,6 +1846,159 @@ void test_pipeline_emits_lsm_and_firewall_events() {
             "an exited iptables is reported as exited, not invented");
 }
 
+const std::string container_a = std::string(64, 'a');
+const std::string container_b = std::string(64, 'b');
+const std::string container_c = std::string(64, 'c');
+
+entity_ptr tracked_process(const std::string& entity_id, const std::uint32_t pid, const std::string& cgroup) {
+    auto entity = std::make_shared<process_entity>();
+    entity->entity_id = entity_id;
+    entity->info.pid = pid;
+    entity->info.cgroup = cgroup;
+    entity->first_seen_unix_ns = 1000U;
+    return entity;
+}
+
+process_event tracked_event(const std::string& type, const entity_ptr& process, const std::uint64_t time) {
+    process_event event;
+    event.type = type;
+    event.process = process;
+    event.time_unix_ns = time;
+    return event;
+}
+
+std::string docker_cgroup(const std::string& id) { return "/system.slice/docker-" + id + ".scope"; }
+
+void test_container_tracker_lifecycle() {
+    container_tracker tracker;
+    const auto init = tracked_process("p-init", 10U, docker_cgroup(container_a));
+    const auto worker = tracked_process("p-worker", 11U, docker_cgroup(container_a));
+    const auto host = tracked_process("p-host", 12U, "/system.slice/ssh.service");
+
+    auto changes = tracker.observe({tracked_event("process.fork", host, 100U), tracked_event("process.fork", init, 200U)});
+    require(changes.size() == 1U && changes[0].started && changes[0].identity.id == container_a && changes[0].identity.runtime == "docker" &&
+                changes[0].process == init && changes[0].time_unix_ns == 200U,
+            "the first process in a new container cgroup is the start; a host process is not");
+    require(tracker.containers() == 1U && tracker.processes() == 1U, "one container, one process followed");
+
+    changes = tracker.observe({tracked_event("process.exec", init, 210U), tracked_event("process.fork", worker, 300U)});
+    require(changes.empty() && tracker.processes() == 2U, "an exec of a known process and a second process join silently");
+
+    changes = tracker.observe({tracked_event("process.exit", worker, 400U), tracked_event("process.exit", host, 410U)});
+    require(changes.empty() && tracker.processes() == 1U, "a process leaving while another remains is not a stop, nor is a host process");
+
+    changes = tracker.observe({tracked_event("process.exit", init, 700U)});
+    require(changes.size() == 1U && !changes[0].started && changes[0].identity.id == container_a && changes[0].start_observed &&
+                changes[0].lifetime_ns == 500U && changes[0].peak_processes == 2U && changes[0].process == init,
+            "the last exit is the stop, with lifetime from the observed start and the peak process count");
+    require(tracker.containers() == 0U && tracker.processes() == 0U, "nothing is kept for a stopped container");
+
+    changes = tracker.observe({tracked_event("process.exit", init, 800U)});
+    require(changes.empty(), "a duplicate exit reports nothing");
+
+    changes = tracker.observe({tracked_event("process.fork", tracked_process("p-again", 20U, docker_cgroup(container_a)), 900U)});
+    require(changes.size() == 1U && changes[0].started, "the same id appearing again is a new start");
+}
+
+void test_container_tracker_preexisting_and_discovered() {
+    container_tracker tracker;
+    const auto seeded = tracked_process("p-seeded", 30U, docker_cgroup(container_b));
+    tracker.seed({seeded, tracked_process("p-host", 31U, "/")});
+    require(tracker.containers() == 1U && tracker.processes() == 1U, "seeding follows container processes only");
+    auto changes = tracker.observe({tracked_event("process.fork", tracked_process("p-more", 32U, docker_cgroup(container_b)), 100U)});
+    require(changes.empty(), "a process joining a container that predates the sensor is not a start");
+    changes = tracker.observe({tracked_event("process.exit", seeded, 200U),
+                               tracked_event("process.exit", tracked_process("p-more", 32U, docker_cgroup(container_b)), 300U)});
+    require(changes.size() == 1U && !changes[0].started && !changes[0].start_observed && changes[0].lifetime_ns == 0U &&
+                changes[0].peak_processes == 2U,
+            "its stop says the start was not observed instead of inventing a lifetime");
+
+    const auto late = tracked_process("p-late", 40U, docker_cgroup(container_c));
+    changes = tracker.observe({tracked_event("process.discovered", late, 400U)});
+    require(changes.empty(), "a process found by reconcile says nothing about when its container started");
+    changes = tracker.observe({tracked_event("process.exit", late, 500U)});
+    require(changes.size() == 1U && !changes[0].start_observed, "and its container's stop is marked the same way");
+}
+
+void test_container_tracker_moves_and_limits() {
+    container_tracker tracker;
+    const auto mover = tracked_process("p-mover", 50U, docker_cgroup(container_a));
+    (void)tracker.observe({tracked_event("process.fork", mover, 100U)});
+    const auto moved = tracked_process("p-mover", 50U, docker_cgroup(container_b));
+    auto changes = tracker.observe({tracked_event("process.exec", moved, 200U)});
+    require(changes.size() == 2U && !changes[0].started && changes[0].identity.id == container_a && changes[1].started &&
+                changes[1].identity.id == container_b,
+            "a process that moves to another container stops the old one if it was the last and starts the new one");
+
+    container_tracker small{2U, 3U};
+    changes = small.observe({tracked_event("process.fork", tracked_process("a1", 1U, docker_cgroup(container_a)), 1U),
+                             tracked_event("process.fork", tracked_process("b1", 2U, docker_cgroup(container_b)), 2U),
+                             tracked_event("process.fork", tracked_process("c1", 3U, docker_cgroup(container_c)), 3U)});
+    require(changes.size() == 2U && small.containers() == 2U && small.untracked() == 1U, "containers past the limit are counted, not followed");
+    changes = small.observe({tracked_event("process.fork", tracked_process("a2", 4U, docker_cgroup(container_a)), 4U),
+                             tracked_event("process.fork", tracked_process("a3", 5U, docker_cgroup(container_a)), 5U)});
+    require(small.processes() == 3U && small.untracked() == 2U, "processes past the limit are counted, not followed");
+    changes = small.observe({tracked_event("process.exit", tracked_process("c1", 3U, docker_cgroup(container_c)), 6U)});
+    require(changes.empty(), "an untracked container never reports a stop");
+}
+
+void test_pipeline_container_events() {
+    const auto root = fresh_directory("containerproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "containerd-shim", 500U, "/usr/bin/containerd-shim-runc-v2", {"containerd-shim"}}.write(root);
+    const auto cgroup = docker_cgroup(container_a);
+    constexpr std::uint64_t base = 1'700'000'000'000'000'000ULL;
+    // What a container runtime does: the shim forks a process that is still in the host cgroup, the
+    // process is moved into the container's cgroup and executes the entrypoint, which forks a worker.
+    // The fork copies the shim's cgroup; the exec is where the container is first visible.
+    raw_exec entrypoint;
+    entrypoint.tgid = 200U;
+    entrypoint.pid = 200U;
+    std::vector<raw_record> script{record_of(raw_fork{100U, 100U, 200U, 200U, std::nullopt}, base),
+                                   record_of(entrypoint, base + 1'000'000ULL),
+                                   record_of(raw_fork{200U, 200U, 201U, 201U, std::nullopt}, base + 2'000'000ULL),
+                                   record_of(raw_exit{201U, 201U, 0U, 0U}, base + 3'000'000ULL),
+                                   record_of(raw_exit{200U, 200U, 0U, 0U}, base + 6'000'000ULL)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        // The container appears after the sensor began: processes already running at start are followed silently.
+        fake_process{200U, 100U, "app", 900U, "/usr/bin/app", {"app"}, 0U, cgroup}.write(root);
+        fake_process{201U, 200U, "worker", 910U, "/usr/bin/worker", {"worker"}, 0U, cgroup}.write(root);
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::vector<std::string> started;
+    std::vector<std::string> stopped;
+    for (const auto& line : lines) {
+        if (contains(line, "\"type\":\"container.started\"")) started.push_back(line);
+        if (contains(line, "\"type\":\"container.stopped\"")) stopped.push_back(line);
+    }
+    std::string types;
+    for (const auto& line : lines) {
+        const auto at = line.find("\"type\":\"");
+        if (at != std::string::npos) types += line.substr(at + 8U, line.find('"', at + 8U) - at - 8U) + " ";
+    }
+    require(started.size() == 1U && stopped.size() == 1U, "one container.started and one container.stopped; records: " + types);
+    require(contains(started[0], "\"container\":{\"id\":\"" + container_a + "\",\"runtime\":\"docker\",\"cgroup\":\"" + cgroup + "\"}") &&
+                contains(started[0], "\"provenance\":{\"provider\":\"sensor\",\"mechanism\":\"container_tracker\",\"confidence\":\"inferred\"}") &&
+                contains(started[0], "\"name\":\"app\""),
+            "the start names the container, says it is inferred, and carries the first process: " + started[0]);
+    require(contains(stopped[0], "\"start_observed\":true,\"lifetime_ns\":5000000,\"peak_processes\":2}") && contains(stopped[0], "\"name\":\"app\""),
+            "the stop carries the lifetime, the peak process count and the last process: " + stopped[0]);
+}
+
 void test_parse_container_cgroup() {
     const std::string id = "a350fac50ee37dc176158ed8c5be13204c6fb12b56a3cf6d20b9fcb51cce40e2";
     const std::string pod_dashes = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
@@ -1884,6 +2039,10 @@ void test_parse_container_cgroup() {
 int main() {
     std::cout << std::unitbuf;
     run("parse_container_cgroup", test_parse_container_cgroup);
+    run("container_tracker_lifecycle", test_container_tracker_lifecycle);
+    run("container_tracker_preexisting_and_discovered", test_container_tracker_preexisting_and_discovered);
+    run("container_tracker_moves_and_limits", test_container_tracker_moves_and_limits);
+    run("pipeline_container_events", test_pipeline_container_events);
     run("parse_dns_query", test_parse_dns_query);
     run("pipeline_emits_dns_queries", test_pipeline_emits_dns_queries);
     run("pipeline_emits_lsm_and_firewall_events", test_pipeline_emits_lsm_and_firewall_events);

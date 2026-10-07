@@ -139,7 +139,7 @@ before this exec), `previous_name` (`process.rename`), `creds_before` (`process.
 | `mount.changed` | process, `mount {source, target, fstype, operation}` | ebpf | mountinfo diff |
 | `device.attached`, `device.removed` | `device {subsystem, vendor_id, product_id, devpath}` | uevent | sysfs diff |
 | `posture.changed` | `posture {item, before, after}` | sysfs/procfs poll | – |
-| `container.started`, `container.stopped` | container | cgroup-derived | runtime poll |
+| `container.started`, `container.stopped` | container | cgroup-derived (tracker over process events) | none |
 | `tamper.*` | process (actor), `tamper {target, technique}` | ebpf | file events |
 
 Process images: when procfs can no longer be read at exec time (short-lived processes), `process.executable.path` is the string given to `execve` (it may be relative, or a symlink such as `/bin/true`), `kind` is `file`, and the file metadata (`dev`, `inode`, `size`) is absent; `process.name` is its basename. The pre-exec image is never carried over.
@@ -281,6 +281,24 @@ SOCKDIAG+PROCFS, observed}`; the `response.action` record follows and its detail
 
 Not reported: command contents beyond the target, file contents (`COLLECT_FILE` reports metadata and a SHA-256 in the bounded detail, ADR 026), and
 any command that failed authentication at the TLS layer.
+
+### 4.11 `container.started` and `container.stopped` events as emitted today (M2)
+
+Derived from process events: there is no runtime event behind them and the provenance says so
+(`{sensor, container_tracker, inferred}`). A container is identified by the id the runtime put in
+the process's cgroup path (Docker, containerd, CRI-O and Podman layouts, systemd or cgroupfs). A
+Kubernetes pod slice without a container id is not a container.
+
+| Type | Emitted when | Fields |
+| --- | --- | --- |
+| `container.started` | the first process the sensor sees in a container's cgroup, as a fork or exec | `process` (that process), `container {id, runtime, pod_uid?, cgroup}` |
+| `container.stopped` | the last process followed in that container exits | `process` (the last one), `container` as above plus `start_observed`, `lifetime_ns` (only when the start was observed) and `peak_processes` (most processes followed at once) |
+
+* A container already running when the sensor starts is followed silently and never reported as started. Its stop says `start_observed: false` and carries no lifetime, rather than a short one the sensor did not measure. The same holds for a process the sensor only found later by reconciliation (a missed fork).
+* A container runtime forks into the host cgroup and moves the process into the container before the entrypoint runs, so the container is first visible at the entrypoint's `exec`, which re-reads the cgroup from procfs. A fork alone does not reveal it.
+* `docker exec` and similar processes joining a running container produce nothing. A process that moves from one container's cgroup to another's stops the old container if it was the last member and starts the new one.
+* An id that reappears after a stop is a new start. Bounds: 4,096 containers and 262,144 followed processes; anything past them is counted and not followed, so its stop is never reported.
+* The cgroup is a claim by whoever set it up, not proof of isolation: a process can place itself in a cgroup it owns, so a container record is evidence of a cgroup, not of a runtime. The record keeps the cgroup path for that reason.
 
 ## 5. State records
 

@@ -386,6 +386,11 @@ result<bool> sensor_pipeline::emit_events(const std::vector<process_event>& even
         if (succeeded(emitted)) ++metrics_.events;
         else outcome = emitted;
     }
+    for (const auto& lifecycle : containers_.observe(events)) {
+        auto emitted = emit([&](const std::uint64_t seq) { return serializer_.container_event(lifecycle, seq, observed_ns); });
+        if (succeeded(emitted)) ++metrics_.events;
+        else outcome = emitted;
+    }
     return outcome;
 }
 
@@ -849,6 +854,7 @@ result<bool> sensor_pipeline::start() {
     }
     (void)graph_.reconcile(unix_now, false);
     ++metrics_.reconciles;
+    containers_.seed(graph_.live_entities());  // already running: followed, not reported as started
     (void)collect_losses(now);  // recovery losses from the WAL
     (void)emit_health(unix_now);
     (void)emit_process_state(unix_now);

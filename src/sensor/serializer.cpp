@@ -845,6 +845,33 @@ std::string record_serializer::kernel_event(const kernel_record& record, const s
     return out.take();
 }
 
+std::string record_serializer::container_event(const container_lifecycle& lifecycle, const std::uint64_t seq,
+                                               const std::uint64_t observed_unix_ns) const {
+    json_writer out;
+    // Derived from process events, not reported by a runtime: the record says so.
+    begin(out, "event", lifecycle.started ? "container.started" : "container.stopped", seq, lifecycle.time_unix_ns, observed_unix_ns,
+          provenance{"sensor", "container_tracker", confidence::inferred});
+    if (lifecycle.process) {
+        out.key("process");
+        write_process(out, *lifecycle.process);
+        out.end_object();
+    }
+    out.key("container").begin_object();
+    out.field("id", lifecycle.identity.id);
+    out.field("runtime", lifecycle.identity.runtime);
+    if (!lifecycle.identity.pod_uid.empty()) out.field("pod_uid", lifecycle.identity.pod_uid);
+    out.field("cgroup", lifecycle.cgroup);
+    if (!lifecycle.started) {
+        out.field("start_observed", lifecycle.start_observed);
+        if (lifecycle.start_observed) out.field("lifetime_ns", lifecycle.lifetime_ns);
+        out.field("peak_processes", lifecycle.peak_processes);
+    }
+    out.end_object();
+    write_unavailable(out, {});
+    out.end_object();
+    return out.take();
+}
+
 std::string record_serializer::hash_computed(const hash_result& result, const std::uint64_t seq, const std::uint64_t now_unix_ns) const {
     json_writer out;
     begin(out, "event", "hash.computed", seq, now_unix_ns, now_unix_ns, {"hash", "FSSCAN", confidence::observed});
