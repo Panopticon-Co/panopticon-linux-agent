@@ -1622,6 +1622,59 @@ void test_pipeline_reports_inputs_a_provider_refused() {
     require(reports == 1U, "exactly one refused loss record is written: " + std::to_string(reports));
 }
 
+// An unclean end of the sensor (kill, crash, power loss) is reported by the next start as a `sensor_gap` loss; a clean
+// stop and a first start report nothing.
+void test_pipeline_reports_an_unclean_previous_instance() {
+    const auto root = fresh_directory("instancegap");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    const auto marker = fresh_directory("instancegap-state") / "instance";
+    auto run_instance = [&](const std::string& boot_id, const std::function<void()>& while_running) {
+        sensor_config config;
+        config.sensor_id = "sensor-test";
+        config.host_id = "host-test";
+        config.proc_root = root;
+        config.instance_state_path = marker;
+        clock_domain clock;
+        std::FILE* stream = std::tmpfile();
+        stream_sink sink{stream};
+        std::vector<std::unique_ptr<provider>> providers;
+        providers.push_back(std::make_unique<scripted_provider>(std::vector<raw_record>{}, 0U));
+        {
+            sensor_pipeline pipeline{config, {"host-test", boot_id, "testhost", "sensor-test", "0.1.0", "none"}, clock, sink, std::move(providers)};
+            value_of(pipeline.start(), "pipeline start");
+            while_running();
+        }
+        const auto lines = lines_of(stream);
+        std::fclose(stream);
+        std::vector<std::string> gaps;
+        for (const auto& line : lines) {
+            if (contains(line, R"("stage":"sensor_gap")")) gaps.push_back(line);
+        }
+        return gaps;
+    };
+    auto marker_text = [&] { std::ifstream in{marker}; return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}}; };
+
+    require(run_instance("boot-a", [&] { require(contains(marker_text(), "clean=0"), "a running sensor's marker says it is not finished"); }).empty(),
+            "a first start has no previous instance to report");
+    require(contains(marker_text(), "clean=1"), "a clean shutdown marks the marker clean");
+    require(run_instance("boot-a", [] {}).empty(), "a clean stop is not reported as a gap");
+
+    // The previous process died: its marker still says it was running, last seen 30 s ago, on another boot.
+    const auto last_alive = clock_domain::now_unix_ns() - 30ULL * 1'000'000'000ULL;
+    { std::ofstream out{marker, std::ios::trunc};
+      out << "panopticon-instance 1\nboot_id=boot-before\nstarted_unix_ns=1\nalive_unix_ns=" << last_alive << "\nclean=0\n"; }
+    const auto killed = run_instance("boot-a", [] {});
+    require(killed.size() == 1U, "exactly one gap is reported after an unclean end: " + std::to_string(killed.size()));
+    require(contains(killed[0], R"("count":1)") && contains(killed[0], "did not shut down cleanly") && contains(killed[0], "rebooted"),
+            "the gap says what happened and that the host rebooted: " + killed[0]);
+    require(contains(killed[0], "up to 3"), "the gap says how long the blind interval was (about 30 s): " + killed[0]);
+    require(run_instance("boot-a", [] {}).empty(), "the gap is reported once, not on every later start");
+
+    { std::ofstream out{marker, std::ios::trunc}; out << "garbage"; }
+    const auto unreadable = run_instance("boot-a", [] {});
+    require(unreadable.size() == 1U && contains(unreadable[0], "length of the gap is unknown"), "an unreadable marker is a gap of unknown length, not silence");
+}
+
 void test_pipeline_rebases_event_times_after_a_clock_step() {
     const auto root = fresh_directory("clockstepproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
@@ -2303,6 +2356,7 @@ int main() {
     run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
     run("pipeline_reports_records_the_queue_refused", test_pipeline_reports_records_the_queue_refused);
     run("pipeline_reports_inputs_a_provider_refused", test_pipeline_reports_inputs_a_provider_refused);
+    run("pipeline_reports_an_unclean_previous_instance", test_pipeline_reports_an_unclean_previous_instance);
     run("pipeline_rebases_event_times_after_a_clock_step", test_pipeline_rebases_event_times_after_a_clock_step);
     run("pipeline_reports_delivery_and_turns_rejections_into_loss", test_pipeline_reports_delivery_and_turns_rejections_into_loss);
     run("pipeline_enriches_file_events", test_pipeline_enriches_file_events);

@@ -30,6 +30,11 @@ struct sensor_config {
     std::string manager_url;                // https:// only
     std::filesystem::path identity_path;    // enrolled identity file (agent id, host id, bearer token)
     std::filesystem::path ca_bundle;        // optional private CA for the Manager certificate
+    // Marker of whether the previous sensor process ended cleanly (empty: not kept). A sensor that is killed or
+    // loses power cannot say so itself, and its sequence numbers continue unbroken afterwards, so the next
+    // start reports the blind interval as a loss from this file.
+    std::filesystem::path instance_state_path;
+    std::uint64_t instance_heartbeat_seconds{10U};
     std::uint64_t wal_quota_bytes{256ULL * 1024U * 1024U};
     std::uint64_t wal_segment_bytes{8ULL * 1024U * 1024U};
     std::size_t queue_capacity{65536U};
@@ -199,6 +204,9 @@ private:
     result<bool> emit_hash_results(std::uint64_t observed_ns);
     result<bool> emit_fim_changes(const std::vector<fim_change>& changes, std::uint64_t observed_ns);
     result<bool> collect_losses(std::uint64_t now_ns);
+    // Compares the previous instance's marker with now, reports an unclean end, and writes this instance's marker.
+    void begin_instance(std::uint64_t unix_now);
+    void write_instance_marker(std::uint64_t unix_now, bool clean);
 
     sensor_config config_;
     clock_domain& clock_;
@@ -233,6 +241,9 @@ private:
     std::uint64_t unwritten_reported_{};
     std::uint64_t last_loss_retry_ns_{};
     std::uint64_t last_storage_check_ns_{};
+    std::uint64_t last_instance_marker_ns_{};
+    std::uint64_t instance_started_unix_ns_{};
+    std::string boot_id_;
     std::string last_write_error_;
     bool write_failed_{false};
     std::uint64_t started_ns_{};

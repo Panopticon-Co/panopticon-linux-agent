@@ -1,5 +1,6 @@
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 
+#include "panopticon/linux_agent/durable_file.hpp"
 #include "panopticon/linux_agent/identity.hpp"
 #include "panopticon/linux_agent/sensor/command_channel.hpp"
 
@@ -314,7 +315,8 @@ sensor_pipeline::sensor_pipeline(const sensor_config& config, sensor_identity id
              clock},
       queue_{config.queue_capacity},
       providers_{std::move(providers)},
-      standby_(providers_.size()) {}
+      standby_(providers_.size()),
+      boot_id_{identity.boot_id} {}
 
 sensor_pipeline::~sensor_pipeline() { shutdown(); }
 
@@ -590,6 +592,58 @@ result<bool> sensor_pipeline::emit_loss(loss_report report) {
     if (pending_losses_.size() < maximum_pending) pending_losses_.push_back(std::move(report));
     else pending_losses_.back().count += report.count;
     return emitted;
+}
+
+void sensor_pipeline::write_instance_marker(const std::uint64_t unix_now, const bool clean) {
+    if (config_.instance_state_path.empty()) return;
+    const std::string content = "panopticon-instance 1\nboot_id=" + boot_id_ + "\nstarted_unix_ns=" + std::to_string(instance_started_unix_ns_) +
+                                "\nalive_unix_ns=" + std::to_string(unix_now) + "\nclean=" + (clean ? "1" : "0") + "\n";
+    // Durable on purpose: a marker that still says "clean" after a power loss would hide the very gap it exists
+    // to report. The cost is one small fsync every heartbeat interval.
+    (void)write_file_durably(config_.instance_state_path, content, 0600U);
+}
+
+void sensor_pipeline::begin_instance(const std::uint64_t unix_now) {
+    if (config_.instance_state_path.empty()) return;
+    instance_started_unix_ns_ = unix_now;
+    std::error_code ignored;
+    if (std::filesystem::exists(config_.instance_state_path, ignored)) {
+        const auto text = read_small_file(config_.instance_state_path);
+        std::map<std::string, std::string> fields;
+        std::istringstream lines{text};
+        std::string line;
+        std::getline(lines, line);
+        const bool recognised = line == "panopticon-instance 1";
+        while (std::getline(lines, line)) {
+            if (const auto equals = line.find('='); equals != std::string::npos) fields[line.substr(0U, equals)] = line.substr(equals + 1U);
+        }
+        const auto clean = fields.find("clean");
+        if (!recognised || clean == fields.end() || clean->second != "1") {
+            // Not "clean=1": the previous process was killed, crashed, lost power, or its marker is unreadable.
+            // All of those are unobserved intervals the sequence numbers do not show.
+            std::uint64_t last_alive_ns = 0U;
+            bool alive_known = false;
+            if (recognised) {
+                if (const auto parsed = integer<std::uint64_t>(fields["alive_unix_ns"])) {
+                    last_alive_ns = *parsed;
+                    alive_known = true;
+                }
+            }
+            std::string detail = "the previous sensor process did not shut down cleanly (killed, crashed, or lost power)";
+            if (alive_known) {
+                detail += "; it was last known to be running at unix time " + std::to_string(last_alive_ns / ns_per_second) + " s and this instance started at " +
+                          std::to_string(unix_now / ns_per_second) + " s";
+                if (unix_now >= last_alive_ns) detail += ", so up to " + std::to_string((unix_now - last_alive_ns) / ns_per_second) + " s of activity were not observed";
+            } else {
+                detail += "; its state marker could not be read, so the length of the gap is unknown";
+            }
+            if (recognised && fields["boot_id"] != boot_id_) detail += "; the host rebooted in between";
+            detail += ". The count is 1 interval, not a number of events";
+            (void)emit_loss({"sensor_gap", 1U, {}, detail});
+        }
+    }
+    write_instance_marker(unix_now, false);
+    last_instance_marker_ns_ = clock_domain::now_monotonic_ns();
 }
 
 health_snapshot sensor_pipeline::health_now() const {
@@ -874,6 +928,7 @@ result<bool> sensor_pipeline::start() {
     ++metrics_.reconciles;
     containers_.seed(graph_.live_entities());  // already running: followed, not reported as started
     (void)collect_losses(now);  // recovery losses from the WAL
+    begin_instance(unix_now);
     (void)emit_health(unix_now);
     (void)emit_process_state(unix_now);
     (void)emit_host_state(unix_now);
@@ -951,6 +1006,10 @@ result<bool> sensor_pipeline::step(const std::uint64_t now_ns, const std::chrono
         if (fim_->pending() > 0U) (void)emit_fim_changes(fim_->take_due(now_ns), clock_domain::now_unix_ns());
     }
     if (now_ns - last_status_ns_ >= ns_per_second) refresh_status(now_ns);
+    if (!config_.instance_state_path.empty() && now_ns - last_instance_marker_ns_ >= config_.instance_heartbeat_seconds * ns_per_second) {
+        write_instance_marker(clock_domain::now_unix_ns(), false);
+        last_instance_marker_ns_ = now_ns;
+    }
     return sink_.flush(now_ns, false);
 }
 
@@ -978,7 +1037,8 @@ void sensor_pipeline::shutdown() {
         for (const auto& record : batch_) process_record(record, observed);
     }
     (void)emit_health(clock_domain::now_unix_ns());
-    (void)sink_.flush(clock_domain::now_monotonic_ns(), true);
+    // Only a shutdown whose records reached the sink may say "clean"; otherwise the next start reports the gap.
+    if (succeeded(sink_.flush(clock_domain::now_monotonic_ns(), true))) write_instance_marker(clock_domain::now_unix_ns(), true);
 }
 
 }  // namespace panopticon::linux_agent::sensor

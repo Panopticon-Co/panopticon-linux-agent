@@ -62,7 +62,7 @@ write_conf() { # extra lines on stdin
 
 reset_run() { # fresh store, WAL and mode
   stop_sensor; stop_manager
-  rm -rf "$W/wal" "$W/store.ndjson" "$W/mode" "$W/sensord.log"
+  rm -rf "$W/wal" "$W/wal.instance" "$W/store.ndjson" "$W/mode" "$W/sensord.log"
   echo ok >"$W/mode"
 }
 
@@ -172,10 +172,14 @@ scenario_kill9() {
   done
   wait_load; wait_drained 60
   local out; out=$(analyze); local rc=$?
+  # Every kill -9 must be reported by the next start as exactly one sensor_gap; a clean stop and restart adds none.
+  local gaps; gaps=$(echo "$out" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["other_loss_reported"].get("sensor_gap", 0))')
+  stop_sensor; start_sensor || return; sleep 3; wait_drained 30
+  local after; after=$(analyze | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["other_loss_reported"].get("sensor_gap", 0))')
   stop_sensor
   say "kill9 detail: $(echo "$out" | jfield loss_records)"
-  verdict kill9 "$([ $rc = 0 ] && echo PASS || echo FAIL)" \
-    "kills=$kills stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported) conflicts=$(echo "$out" | jfield conflicts)"
+  verdict kill9 "$([ $rc = 0 ] && [ "$gaps" = "$kills" ] && [ "$after" = "$kills" ] && echo PASS || echo FAIL)" \
+    "kills=$kills sensor_gap=$gaps after_clean_restart=$after stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported) conflicts=$(echo "$out" | jfield conflicts)"
 }
 
 scenario_outage() {

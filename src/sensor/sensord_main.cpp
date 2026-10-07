@@ -161,6 +161,8 @@ int main(int argc, char** argv) {
     if (to_stdout) {
         sink = std::make_unique<sensor::stream_sink>(stdout);
     } else {
+        // Beside the WAL, not inside it: the WAL directory belongs to the log, and a wiped log must not hide a crash.
+        if (config.instance_state_path.empty()) config.instance_state_path = config.wal_path.string() + ".instance";
         sensor::wal_options options;
         options.directory = config.wal_path;
         options.quota_bytes = config.wal_quota_bytes;
