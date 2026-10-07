@@ -64,7 +64,8 @@ constexpr std::size_t maximum_manifest_bytes = 64U * 1024U;
 struct integrity_finding {
     // binary_modified (content differs from the manifest, or the running image is not a listed build),
     // binary_missing, binary_replaced (the file at the running binary's path is no longer the running image),
-    // manifest_invalid (does not verify), manifest_missing.
+    // manifest_invalid (does not verify), manifest_missing, manifest_rollback (verifies, but is older than the newest
+    // build this endpoint has run: ADR 036).
     std::string technique;
     std::string target;
     std::string expected_sha256;
@@ -86,6 +87,10 @@ struct integrity_options {
     std::filesystem::path keys_path;
     // The image that is running: "/proc/self/exe" (the default when empty) or, for tests, a file standing in for it.
     std::filesystem::path running_image;
+    // Where the newest manifest build time (`built_at`) this endpoint has run is kept (ADR 036). A verified manifest
+    // built earlier than it is reported as manifest_rollback. Empty: no rollback check. Deleting the file accepts an
+    // older build on purpose.
+    std::filesystem::path state_path;
     // A file whose content is not read again unless it changed (size, mtime, ctime, inode) is still re-hashed at this
     // interval, because an attacker can restore the timestamps.
     std::uint64_t full_check_seconds{900U};
@@ -131,6 +136,9 @@ private:
     };
 
     void load_keys();
+    // ADR 036: compares the manifest that just verified with the newest build time this endpoint has run, remembers a
+    // newer one durably, and sets or clears rollback_.
+    void note_build(const build_manifest& manifest, const std::string& manifest_path);
     // Reads and verifies the manifest if it changed; fills `findings` for a manifest that cannot be trusted.
     void refresh_manifest(std::int64_t now_unix, std::map<std::string, integrity_finding>& findings);
     [[nodiscard]] cached_hash hash_of(const std::string& path, std::int64_t now_unix);
@@ -147,6 +155,10 @@ private:
     std::optional<fingerprint> manifest_identity_;
     std::unique_ptr<build_manifest> manifest_;  // the last one that verified
     std::optional<integrity_finding> manifest_problem_;
+    std::optional<integrity_finding> rollback_;  // the manifest in force is older than the newest build run
+    bool high_water_loaded_{false};
+    std::int64_t high_water_built_{};   // newest `built_at` this endpoint has run; 0 when unknown
+    std::string high_water_version_;
     std::map<std::string, cached_hash> hashes_;
     std::map<std::string, integrity_finding> pending_;   // seen once, not yet reported
     std::map<std::string, integrity_finding> reported_;  // in violation and reported

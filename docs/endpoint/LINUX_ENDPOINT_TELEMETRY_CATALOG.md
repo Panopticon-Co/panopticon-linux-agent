@@ -391,7 +391,7 @@ PATH] <command>` is the client (default `/run/panopticon/sensord.sock`).
 
 | Type | Emitted when | `tamper` body |
 | --- | --- | --- |
-| `tamper.integrity` | a finding is confirmed (`status: violated`) or clears (`status: restored`) | `status`, `technique` (`binary_modified`, `binary_missing`, `binary_replaced`, `manifest_missing`, `manifest_invalid`), `target` (absolute path), `expected_sha256?`, `observed_sha256?`, `manifest_version?`, `key_id?`, `files_checked`, `files_in_violation`, `last_change {operation, time}?`, `detail` (at most 1,024 bytes) |
+| `tamper.integrity` | a finding is confirmed (`status: violated`) or clears (`status: restored`) | `status`, `technique` (`binary_modified`, `binary_missing`, `binary_replaced`, `manifest_missing`, `manifest_invalid`, `manifest_rollback`), `target` (absolute path), `expected_sha256?`, `observed_sha256?`, `manifest_version?`, `key_id?`, `files_checked`, `files_in_violation`, `last_change {operation, time}?`, `detail` (at most 1,024 bytes) |
 
 * The acting `process` is the last writer fanotify reported for the target (`file.create/modify/delete/rename/attrib`,
   and the old path of a rename), or a bare `pid` with `unavailable.process = process_exited`; with no writer seen the

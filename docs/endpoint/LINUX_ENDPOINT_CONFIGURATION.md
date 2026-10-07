@@ -113,11 +113,14 @@ why.
 `integrity_manifest` and `integrity_keys` are set together or not at all, absolute, without `..`, and both files
 must pass the trusted-path check above. A package built with `packaging/build_signed_deb.sh` ships the manifest
 and its key under `/usr/share/panopticon/` and the post-install script sets both keys at first install. A
-violation (`binary_modified`, `binary_missing`, `binary_replaced`, `manifest_missing`, `manifest_invalid`) is a
+violation (`binary_modified`, `binary_missing`, `binary_replaced`, `manifest_missing`, `manifest_invalid`,
+`manifest_rollback`) is a
 `tamper.integrity` record, names the process that last wrote the file when file events saw it, and turns health
 `degraded` until it clears. A manifest is produced by `panopticon-command-signer sign-manifest <key> <package>
 <version> <built_at>` (the files on stdin). The pinned key sits on the same host as the files: see ADR 033 for what
-that does and does not stop.
+that does and does not stop. The newest manifest build time the endpoint has run is kept in `<wal_path>.integrity`
+(0600); a verified manifest older than it is `manifest_rollback` (ADR 036). To accept an intended downgrade, delete
+that file and restart the sensor.
 
 ## Installing and running as a service
 

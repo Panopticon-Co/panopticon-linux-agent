@@ -41,5 +41,5 @@ A flagship endpoint should not have an unsigned production path that the configu
 ## Not decided here
 
 * Rollback: the sensor does not refuse an older signed manifest version. A signed apt repository plus apt's
-  refusal to downgrade is the current protection (ADR 033). A high-water-mark check would need a design for
-  where the mark lives and what a legitimate downgrade looks like.
+  refusal to downgrade is the first protection (ADR 033). Detection of an older build is ADR 036 (a signed
+  build-time high-water mark; detection only).

@@ -62,7 +62,9 @@ replaces the same files.
      manifest's. This is what an attacker's swap with a copy of the same build, or a package upgrade in
      progress, looks like. The detail says a restart is pending;
    * `manifest_missing`, `manifest_invalid` with a named reason (`untrusted_file`, `too_large`, `unreadable`,
-     `malformed`, `no_keys`, `unknown_key`, `bad_signature`).
+     `malformed`, `no_keys`, `unknown_key`, `bad_signature`);
+   * `manifest_rollback`: a manifest that verifies but is older than the newest build this endpoint has run
+     (added by ADR 036).
 5. **Debounce, then report once.** A finding is reported after two consecutive looks, except at the first look
    after start, which is immediate (a sensor that starts from a bad install should say so at once). It is
    reported as `violated`, once, and as `restored` when the condition clears. A package upgrade replaces the

@@ -55,7 +55,7 @@ std::string slurp(const fs::path& path) {
 std::int64_t now_s() { return static_cast<std::int64_t>(std::time(nullptr)); }
 
 // A signed manifest for these files as they are now.
-std::string manifest_for(const ec_keypair& key, const std::vector<fs::path>& files, const std::string& version = "0.1.0") {
+std::string manifest_for(const ec_keypair& key, const std::vector<fs::path>& files, const std::string& version = "0.1.0", const std::int64_t built = 0) {
     std::vector<manifest_entry> entries;
     for (const auto& file : files) {
         const auto content = slurp(file);
@@ -64,7 +64,7 @@ std::string manifest_for(const ec_keypair& key, const std::vector<fs::path>& fil
     build_manifest header;
     header.package = "panopticon-sensord";
     header.version = version;
-    header.built_unix = now_s();
+    header.built_unix = built != 0 ? built : now_s();
     header.key_id = signing_key_id(key.public_point);
     const auto body = render_manifest_body(entries);
     const auto input = manifest_signing_input(header, sha256_hex(body));
@@ -91,10 +91,12 @@ struct install {
         sign();
     }
     void sign(const std::vector<fs::path>& files = {}) { put(manifest, manifest_for(key, files.empty() ? std::vector<fs::path>{sensord, helper} : files)); }
+    fs::path state() const { return dir / "integrity.state"; }
     integrity_options options() const {
         integrity_options o;
         o.manifest_path = manifest;
         o.keys_path = keys;
+        o.state_path = state();
         o.running_image = sensord;
         o.full_check_seconds = 600U;
         return o;
@@ -421,6 +423,88 @@ void test_a_same_size_manifest_rewrite_in_the_same_tick_is_seen() {
     require(monitor.health().reason.find("version 0.2.0") != std::string::npos, "the rewrite was seen: " + monitor.health().reason);
 }
 
+// ADR 036: a manifest that verifies but was built before the newest one this endpoint has run is a rollback.
+void test_an_older_signed_build_is_reported_as_a_rollback() {
+    install fx{"rollback"};
+    const std::int64_t base = now_s() - 100000;
+    // The first manifest seen is the starting point (trust on first use), and it is remembered durably.
+    put(fx.manifest, manifest_for(fx.key, {fx.sensord, fx.helper}, "0.2.0", base + 2000));
+    {
+        integrity_monitor monitor{fx.options()};
+        require(monitor.refresh(now_s() + 10).empty(), "the first build is the starting point");
+        require(fs::exists(fx.state()), "and is written down");
+    }
+    // A newer build moves the mark forward; nothing to report.
+    put(fx.manifest, manifest_for(fx.key, {fx.sensord, fx.helper}, "0.3.0", base + 4000));
+    {
+        integrity_monitor monitor{fx.options()};
+        require(monitor.refresh(now_s() + 20).empty(), "a newer build is an upgrade");
+    }
+    // An older signed build, in place while the sensor was stopped: reported at once on the first look.
+    put(fx.manifest, manifest_for(fx.key, {fx.sensord, fx.helper}, "0.2.5", base + 3000));
+    {
+        integrity_monitor monitor{fx.options()};
+        const auto first = monitor.refresh(now_s() + 30);
+        const auto* rollback = find(first, "manifest_rollback", "violated");
+        require(rollback != nullptr, "an older build is reported: " + describe(first));
+        require(rollback->finding.detail.find("0.2.5") != std::string::npos && rollback->finding.detail.find("0.3.0") != std::string::npos &&
+                    rollback->finding.detail.find(fx.state().string()) != std::string::npos,
+                "the record names both builds and how to accept it: " + rollback->finding.detail);
+        require(rollback->manifest_version == "0.2.5", "the manifest in force is the older one");
+        require(monitor.health().state == "degraded" && monitor.health().reason.find("manifest_rollback") != std::string::npos, "health is degraded");
+        require(monitor.refresh(now_s() + 40).empty(), "reported once while it lasts");
+        // Rolling forward again clears it.
+        // A longer version string: the size differs, so the rewrite is noticed whatever the timestamp granularity.
+        put(fx.manifest, manifest_for(fx.key, {fx.sensord, fx.helper}, "0.3.10", base + 5000));
+        const auto after = monitor.refresh(now_s() + 50);
+        require(find(after, "manifest_rollback", "restored") != nullptr, "a newer build clears it: " + describe(after));
+        require(monitor.health().state == "active", "and health recovers");
+    }
+    // The mark moved with the newer build, so the older one is still a rollback after a restart.
+    put(fx.manifest, manifest_for(fx.key, {fx.sensord, fx.helper}, "0.3.0", base + 4000));
+    {
+        integrity_monitor monitor{fx.options()};
+        require(find(monitor.refresh(now_s() + 60), "manifest_rollback", "violated") != nullptr, "the mark survives a restart");
+    }
+    // Deleting the state file accepts an older build on purpose.
+    fs::remove(fx.state());
+    {
+        integrity_monitor monitor{fx.options()};
+        require(monitor.refresh(now_s() + 70).empty(), "with the mark gone the manifest in place is the starting point");
+    }
+}
+
+void test_a_rollback_is_also_reported_while_the_sensor_runs_after_two_looks() {
+    install fx{"rollback-live"};
+    const std::int64_t base = now_s() - 100000;
+    put(fx.manifest, manifest_for(fx.key, {fx.sensord, fx.helper}, "0.5.0", base + 5000));
+    integrity_monitor monitor{fx.options()};
+    auto t = now_s() + 10;
+    require(monitor.refresh(t).empty(), "start clean");
+    put(fx.manifest, manifest_for(fx.key, {fx.sensord, fx.helper}, "0.4.0-rc1", base + 1000));
+    require(monitor.refresh(t += 60).empty(), "seen once: not yet reported");
+    const auto second = monitor.refresh(t += 60);
+    require(find(second, "manifest_rollback", "violated") != nullptr, "seen twice: reported: " + describe(second));
+}
+
+void test_an_unusable_state_file_is_a_fresh_start_and_an_unsigned_older_manifest_is_not_a_rollback() {
+    install fx{"rollback-state"};
+    put(fx.state(), "garbage\n");
+    put(fx.manifest, manifest_for(fx.key, {fx.sensord, fx.helper}, "0.1.0", now_s() - 5000));
+    {
+        integrity_monitor monitor{fx.options()};
+        require(monitor.refresh(now_s() + 10).empty(), "a corrupt state file is replaced, not trusted");
+    }
+    {
+        integrity_monitor monitor{fx.options()};
+        const auto stranger = policy_test_support::make_key();
+        put(fx.manifest, manifest_for(stranger, {fx.sensord, fx.helper}, "0.0.9", now_s() - 9000));
+        const auto changes = monitor.refresh(now_s() + 20);
+        require(find(changes, "manifest_invalid", "violated") != nullptr && find(changes, "manifest_rollback", "violated") == nullptr,
+                "an unverified manifest is invalid, never a rollback: " + describe(changes));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -442,6 +526,9 @@ int main() {
         {"verified_manifest_stays_in_force", test_a_verified_manifest_stays_in_force_when_it_is_replaced_by_garbage},
         {"new_signed_manifest_is_adopted", test_a_new_signed_manifest_is_adopted},
         {"same_size_manifest_rewrite_in_the_same_tick_is_seen", test_a_same_size_manifest_rewrite_in_the_same_tick_is_seen},
+        {"older_signed_build_is_a_rollback", test_an_older_signed_build_is_reported_as_a_rollback},
+        {"rollback_while_running_needs_two_looks", test_a_rollback_is_also_reported_while_the_sensor_runs_after_two_looks},
+        {"unusable_state_is_a_fresh_start", test_an_unusable_state_file_is_a_fresh_start_and_an_unsigned_older_manifest_is_not_a_rollback},
     };
     ::umask(022);
     int failures = 0;

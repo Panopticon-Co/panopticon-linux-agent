@@ -129,8 +129,16 @@ OUT=$(apt install --allow-downgrades panopticon-sensord="$V1")
 check "rollback: version" "$V1" "$(installed)"
 wait_active; sleep 20
 check "rollback: the service is active" active "$(systemctl is-active panopticon-sensord)"
-check "rollback: no violated record after it" 0 "$(count "sum(1 for r in rows if r['kind']=='tamper' and r['status']=='violated' and r['seq']>$BEFORE)")"
-check "rollback: the integrity provider is active" active "$(count "[r['integrity']['state'] for r in rows if r['kind']=='health' and r['integrity']][-1]")"
+wait_for 60 "any(r['kind']=='tamper' and r['status']=='violated' and r['technique']=='manifest_rollback' and r['seq']>$BEFORE for r in rows)"
+check "rollback: reported as manifest_rollback (ADR 036)" 1 "$(count "sum(1 for r in rows if r['kind']=='tamper' and r['status']=='violated' and r['technique']=='manifest_rollback' and r['seq']>$BEFORE)")"
+check "rollback: nothing else is reported as violated" 0 "$(count "sum(1 for r in rows if r['kind']=='tamper' and r['status']=='violated' and r['technique']!='manifest_rollback' and r['seq']>$BEFORE)")"
+check "rollback: the integrity provider says so" degraded "$(count "[r['integrity']['state'] for r in rows if r['kind']=='health' and r['integrity']][-1]")"
+# An intended downgrade is acknowledged by deleting the state file and restarting (the mark is read at start).
+rm -f "$WAL.integrity"
+systemctl restart panopticon-sensord
+wait_active; sleep 20
+check "rollback acknowledged: the service is active" active "$(systemctl is-active panopticon-sensord)"
+check "rollback acknowledged: the integrity provider is active" active "$(count "[r['integrity']['state'] for r in rows if r['kind']=='health' and r['integrity']][-1]")"
 
 say "6. an installed file is edited on the running system"
 cp /usr/bin/panopticon-ctl "$W/ctl.orig"

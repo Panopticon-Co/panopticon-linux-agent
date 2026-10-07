@@ -1248,6 +1248,7 @@ result<bool> sensor_pipeline::start() {
         integrity_options options;
         options.manifest_path = config_.integrity_manifest;
         options.keys_path = config_.integrity_keys;
+        options.state_path = config_.wal_path.string() + ".integrity";  // newest build run, for the rollback check (ADR 036)
         integrity_ = std::make_unique<integrity_monitor>(std::move(options));
         refresh_integrity(unix_now);
     }

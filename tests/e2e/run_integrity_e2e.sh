@@ -8,7 +8,8 @@
 # process that wrote it, then restored); the running binary is replaced by another copy of the same build
 # (binary_replaced, with the process that renamed it); the manifest is edited (manifest_invalid); a listed file is
 # deleted (binary_missing); a restart from the replaced binary verifies clean; a restart with a manifest signed by a
-# key this endpoint does not pin reports manifest_invalid at once and degrades health.
+# key this endpoint does not pin reports manifest_invalid at once and degrades health; a restart with the manifest of
+# an older build, signed by the right key, reports manifest_rollback (ADR 036) until a newer build's manifest is in place.
 # The tamper.integrity records are written to $W/tamper.ndjson for the contract validator.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -38,8 +39,8 @@ LINE=$("$SIGNER" keygen "$W/release.key") || exit 2
 "$SIGNER" keygen "$W/stranger.key" >/dev/null || exit 2
 echo "$LINE" >"$W/integrity.keys"; chmod 644 "$W/integrity.keys"
 
-sign_manifest() { # <key> <out>
-  printf '%s\n%s\n' "$SENSOR_BIN" "$CTL_BIN" | "$SIGNER" sign-manifest "$1" panopticon-sensord 0.0.1-e2e "$(date +%s)" >"$2.new" || return 1
+sign_manifest() { # <key> <out> [built_at]
+  printf '%s\n%s\n' "$SENSOR_BIN" "$CTL_BIN" | "$SIGNER" sign-manifest "$1" panopticon-sensord 0.0.1-e2e "${3:-$(date +%s)}" >"$2.new" || return 1
   chmod 644 "$2.new"; mv "$2.new" "$2"
 }
 sign_manifest "$W/release.key" "$W/build-manifest" || { say "cannot sign the manifest"; exit 2; }
@@ -138,6 +139,21 @@ start
 sleep 16
 check "stranger manifest: reported at once, as unknown_key" 1 "$(count "sum(1 for r in rows if r['kind']=='tamper' and r['status']=='violated' and r['technique']=='manifest_invalid' and 'unknown_key' in r['detail'] and r['seq']>$BEFORE)")"
 check "stranger manifest: health degraded" degraded "$(count "[r['status'] for r in rows if r['kind']=='health'][-1]")"
+stop
+
+say "8. restart with an older build's manifest, signed by the right key (a rollback, ADR 036)"
+check "the newest build time is remembered" yes "$([ -s "$W/wal.integrity" ] && grep -q '^built_at ' "$W/wal.integrity" && echo yes || echo no)"
+sign_manifest "$W/release.key" "$W/build-manifest" $(($(date +%s) - 100000))
+BEFORE=$(count "max([r['seq'] for r in rows] or [0])")
+start
+sleep 16
+check "rollback: reported at once, as manifest_rollback" 1 "$(count "sum(1 for r in rows if r['kind']=='tamper' and r['status']=='violated' and r['technique']=='manifest_rollback' and r['seq']>$BEFORE)")"
+check "rollback: the detail says how to accept it on purpose" 1 "$(count "sum(1 for r in rows if r['kind']=='tamper' and r['technique']=='manifest_rollback' and 'wal.integrity' in r['detail'])")"
+check "rollback: health degraded" degraded "$(count "[r['status'] for r in rows if r['kind']=='health'][-1]")"
+check "rollback: the files still verify against the older manifest" 0 "$(count "sum(1 for r in rows if r['kind']=='tamper' and r['technique']=='binary_modified' and r['seq']>$BEFORE)")"
+sign_manifest "$W/release.key" "$W/build-manifest"
+wait_for 40 "any(r['kind']=='tamper' and r['status']=='restored' and r['technique']=='manifest_rollback' for r in rows)"
+check "a newer build clears the rollback" 1 "$(count "sum(1 for r in rows if r['kind']=='tamper' and r['status']=='restored' and r['technique']=='manifest_rollback')")"
 stop
 
 dump | python3 -c "import sys, json

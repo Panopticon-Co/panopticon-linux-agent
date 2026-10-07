@@ -14,6 +14,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <sstream>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -284,6 +285,58 @@ void integrity_monitor::load_keys() {
     }
 }
 
+void integrity_monitor::note_build(const build_manifest& manifest, const std::string& manifest_path) {
+    if (options_.state_path.empty()) return;
+    constexpr std::string_view state_magic = "panopticon-integrity-state 1";
+    if (!high_water_loaded_) {
+        high_water_loaded_ = true;
+        bool too_large = false;
+        bool unreadable = false;
+        const auto text = read_bounded(options_.state_path, 1024U, too_large, unreadable);
+        // A state file that is not ours, not readable or not well formed is as good as none: the next verified manifest
+        // is taken as the starting point (the same trust on first use as a fresh install).
+        if (!too_large && !unreadable && !text.empty() && untrusted_path_reason(options_.state_path).empty()) {
+            std::istringstream lines{text};
+            std::string magic;
+            std::string built_line;
+            std::string version_line;
+            std::getline(lines, magic);
+            std::getline(lines, built_line);
+            std::getline(lines, version_line);
+            constexpr std::string_view built_prefix = "built_at ";
+            constexpr std::string_view version_prefix = "version ";
+            if (magic == state_magic && built_line.rfind(built_prefix, 0U) == 0U && version_line.rfind(version_prefix, 0U) == 0U) {
+                if (const auto built = decimal<std::int64_t>(std::string_view{built_line}.substr(built_prefix.size())); built.has_value()) {
+                    high_water_built_ = *built;
+                    high_water_version_ = version_line.substr(version_prefix.size());
+                }
+            }
+        }
+    }
+    if (manifest.built_unix > high_water_built_) {
+        high_water_built_ = manifest.built_unix;
+        high_water_version_ = manifest.version;
+        rollback_.reset();
+        // Durable before it can matter: written beside the old one and renamed over it. A failure leaves the value in
+        // memory only, which still protects this run.
+        const auto temporary = options_.state_path.string() + ".tmp";
+        const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd >= 0) {
+            const std::string body = std::string{state_magic} + "\nbuilt_at " + std::to_string(high_water_built_) + "\nversion " + high_water_version_ + "\n";
+            const bool written = ::write(fd, body.data(), body.size()) == static_cast<ssize_t>(body.size()) && ::fsync(fd) == 0;
+            ::close(fd);
+            if (!written || ::rename(temporary.c_str(), options_.state_path.c_str()) != 0) ::unlink(temporary.c_str());
+        }
+    } else if (manifest.built_unix < high_water_built_) {
+        rollback_ = integrity_finding{"manifest_rollback", manifest_path, {}, {},
+                                      clip("build manifest version " + manifest.version + " (built at " + std::to_string(manifest.built_unix) + ") is older than version " +
+                                           high_water_version_ + " (built at " + std::to_string(high_water_built_) + "), the newest this endpoint has run; delete " +
+                                           options_.state_path.string() + " to accept an older build on purpose")};
+    } else {
+        rollback_.reset();
+    }
+}
+
 void integrity_monitor::refresh_manifest(const std::int64_t now_unix, std::map<std::string, integrity_finding>& findings) {
     load_keys();
     std::string keys_now;
@@ -330,11 +383,14 @@ void integrity_monitor::refresh_manifest(const std::int64_t now_unix, std::map<s
                 } else {
                     manifest_ = std::make_unique<build_manifest>(std::move(candidate));
                     manifest_problem_.reset();
+                    note_build(*manifest_, path);
                 }
             }
         }
     }
     if (manifest_problem_) findings[manifest_problem_->technique + "|" + manifest_problem_->target] = *manifest_problem_;
+    // Only while the manifest in force is the older one; a manifest that fails verification does not clear it.
+    if (rollback_ && manifest_) findings[rollback_->technique + "|" + rollback_->target] = *rollback_;
 }
 
 integrity_monitor::cached_hash integrity_monitor::hash_of(const std::string& path, const std::int64_t now_unix) {
@@ -455,6 +511,8 @@ std::vector<integrity_change> integrity_monitor::refresh(const std::int64_t now_
             integrity_finding settled = entry->second;
             if (settled.technique == "manifest_missing" || settled.technique == "manifest_invalid") {
                 settled.detail = "the build manifest " + settled.target + " is present and verifies again";
+            } else if (settled.technique == "manifest_rollback") {
+                settled.detail = clip("the build manifest " + settled.target + " is as new as the newest build this endpoint has run again");
             } else if (settled.technique == "binary_replaced") {
                 settled.detail = clip(settled.target + " is the file the sensor is running from again");
             } else {
