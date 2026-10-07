@@ -17,7 +17,8 @@ std::uint64_t read_clock(const clockid_t id) noexcept {
 }
 
 std::uint64_t apply(const std::uint64_t value, const std::int64_t offset) noexcept {
-    const auto adjusted = static_cast<std::int64_t>(value) + offset;
+    // Modular unsigned addition: a timestamp near 2^63 from a hostile or corrupt sample must not be signed overflow.
+    const auto adjusted = static_cast<std::int64_t>(value + static_cast<std::uint64_t>(offset));
     return adjusted < 0 ? 0U : static_cast<std::uint64_t>(adjusted);
 }
 

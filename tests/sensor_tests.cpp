@@ -157,6 +157,20 @@ void test_clock_formats_rfc3339_and_converts_ticks() {
     require(started <= now + tick_ns && now - started < 600ULL * 1'000'000'000ULL, "own start time is recent");
 }
 
+// Found by the proc_event and ebpf_sample fuzzers: a timestamp near 2^63 plus the clock offset was signed overflow.
+// The assertions are weak on purpose (no crash, a sane clamp); the sanitized build is what proves there is no UB.
+void test_clock_conversion_survives_hostile_timestamps() {
+    clock_domain clock;
+    const std::uint64_t extremes[] = {0U, 1U, 0x7FFFFFFFFFFFFFFFULL, 0x8000000000000000ULL, 0xFFFFFFFFFFFFFFFFULL, 8699188362578823865ULL};
+    for (const auto value : extremes) {
+        (void)clock.boottime_to_unix_ns(value);
+        (void)clock.monotonic_to_unix_ns(value);
+        (void)clock.ticks_to_unix_ns(value);
+        (void)clock.unix_ns_to_ticks(value);
+    }
+    require(clock.boottime_to_unix_ns(0x8000000000000000ULL) == 0U, "a timestamp beyond the signed range clamps to zero");
+}
+
 // ---- procfs parsing -----------------------------------------------------------------------
 
 void test_parse_stat_handles_hostile_comm() {
@@ -2427,6 +2441,7 @@ int main() {
     run("pipeline_emits_response_evidence_first", test_pipeline_emits_response_evidence_first);
     run("json_escapes_and_replaces_invalid_utf8", test_json_escapes_and_replaces_invalid_utf8);
     run("clock_formats_rfc3339_and_converts_ticks", test_clock_formats_rfc3339_and_converts_ticks);
+    run("clock_conversion_survives_hostile_timestamps", test_clock_conversion_survives_hostile_timestamps);
     run("parse_stat_handles_hostile_comm", test_parse_stat_handles_hostile_comm);
     run("parse_status_reads_credentials_and_capabilities", test_parse_status_reads_credentials_and_capabilities);
     run("split_cmdline_bounds", test_split_cmdline_bounds);

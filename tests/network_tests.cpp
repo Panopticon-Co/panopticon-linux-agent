@@ -14,6 +14,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -141,6 +142,10 @@ void test_decoder_reports_kernel_errors() {
     const std::uint32_t shorter = sizeof(nlmsghdr) + 2U;
     std::memcpy(short_error.data(), &shorter, sizeof(shorter));
     require(decode_sock_diag(short_error.data(), shorter, IPPROTO_TCP).malformed, "truncated error body");
+    // Found by the sockdiag fuzzer: a reply whose errno is INT_MIN made the sign flip overflow.
+    const auto extreme = control_message(NLMSG_ERROR, std::numeric_limits<int>::min());
+    const auto clamped = decode_sock_diag(extreme.data(), extreme.size(), IPPROTO_TCP);
+    require(clamped.done && clamped.error > 0, "INT_MIN errno is clamped to a positive value");
 }
 
 socket_entry tcp(const std::uint8_t state, const char* local, const std::uint16_t local_port, const char* remote, const std::uint16_t remote_port,

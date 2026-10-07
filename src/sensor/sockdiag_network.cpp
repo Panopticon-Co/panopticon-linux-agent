@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -93,7 +94,9 @@ sockdiag_decode_result decode_sock_diag(const unsigned char* data, const std::si
             } else {
                 nlmsgerr failure{};
                 std::memcpy(&failure, payload, sizeof(failure));
-                result.error = failure.error < 0 ? -failure.error : failure.error;
+                // INT_MIN has no positive counterpart; a hostile reply must not make the negation overflow.
+                result.error = failure.error == std::numeric_limits<int>::min() ? std::numeric_limits<int>::max()
+                                                                                : (failure.error < 0 ? -failure.error : failure.error);
                 result.done = true;
             }
             return result;
