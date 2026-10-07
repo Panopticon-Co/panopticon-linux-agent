@@ -28,7 +28,9 @@ verdict() { # name status detail
 }
 
 setup() {
-  pkill -INT -f panopticon-sensord 2>/dev/null; sleep 1; pkill -9 -f panopticon-sensord 2>/dev/null
+  # By process name, not command line: a wrapper such as `sudo env SENSORD=.../panopticon-sensord bash run_chaos.sh`
+  # contains the daemon's name and `pkill -f` would kill the runner itself (comm is cut to 15 characters).
+  pkill -INT -x panopticon-sens 2>/dev/null; sleep 1; pkill -9 -x panopticon-sens 2>/dev/null
   pkill -9 -f fake_manager.py 2>/dev/null
   umount "$W/small" 2>/dev/null
   rm -rf "$W"; mkdir -p "$W"; chmod 755 "$W"
