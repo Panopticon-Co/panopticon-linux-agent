@@ -17,6 +17,14 @@ if [ "$1" = configure ]; then
             echo "host_id=$host"
             echo
             grep -v '^# sensor_id and host_id are filled in' "$example"
+            # A package built with packaging/build_signed_deb.sh carries a signed build manifest (ADR 033). A plain
+            # cpack build has none, and the check stays off rather than reporting a manifest that cannot exist.
+            if [ -f /usr/share/panopticon/build-manifest ] && [ -f /usr/share/panopticon/integrity.keys ]; then
+                echo
+                echo "# Self-integrity (ADR 033): the files of this package against its signed build manifest."
+                echo "integrity_manifest=/usr/share/panopticon/build-manifest"
+                echo "integrity_keys=/usr/share/panopticon/integrity.keys"
+            fi
         } > "$conf.new"
         chown root:root "$conf.new"
         chmod 0644 "$conf.new"

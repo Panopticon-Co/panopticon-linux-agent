@@ -31,3 +31,10 @@ wal_quota_bytes=268435456
 # policy_path=/etc/panopticon/policy
 # policy_signing_keys=/etc/panopticon/policy-keys
 # policy_check_seconds=30
+
+# Self-integrity (ADR 033): the installed files and the running binary against a signed build manifest. Both or
+# neither. A package built with packaging/build_signed_deb.sh sets these at first install. A violation is a
+# tamper.integrity record and turns health degraded.
+# integrity_manifest=/usr/share/panopticon/build-manifest
+# integrity_keys=/usr/share/panopticon/integrity.keys
+# integrity_check_seconds=60
