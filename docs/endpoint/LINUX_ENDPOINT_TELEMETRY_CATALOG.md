@@ -118,6 +118,7 @@ before this exec), `previous_name` (`process.rename`), `creds_before` (`process.
 | `process.cred_change` | process, `creds_before`, `caps_before` | ebpf `commit_creds` | netlink_proc uid/gid |
 | `process.ns_change` | process, `ns_before` | ebpf | reconcile |
 | `process.inject` | process (actor), `target`, `technique` (`ptrace_attach` from netlink_proc; `ptrace_access` from eBPF, which also covers `process_vm_*` and `/proc/<pid>/mem` access checks; `vm_writev`, `proc_mem_write` later) | ebpf | netlink_proc ptrace |
+| `process.signal` | process (the sender), `target` (the receiver), `signal` object: `number`, `name`, `via` (`kill`, `tgkill`, `sigqueue`, `other`), `result` (`delivered`, `ignored`, `already_pending`, `overflow`, `info_lost`), `target_is_sensor` | ebpf `signal_generate` | none (the capability is simply uncovered without eBPF) |
 | `process.signal` | process (sender), `target`, `signal` | ebpf `signal_generate` | – |
 | `memory.exec_mapping` | process, `prot`, `flags`, file, `technique` (`anon_exec`, `mprotect_exec`, `wx`) | ebpf | procfs maps |
 | `library.load` | process, file | ebpf `security_mmap_file` | procfs maps diff |
@@ -203,7 +204,7 @@ carries the requesting `process` (full entity, or a `{pid}` stub with `process` 
 had exited) and one body.
 
 - `memory`: `operation` (`mmap` | `mprotect`), `backing` (`anonymous` | `memfd` | `file`),
-  `write_exec`, and for `mprotect` the `address` and `length` of the mapping touched. For `mmap` the
+  `write_exec`, and for `mprotect` the `address` and `length` of the virtual memory area that holds the range (the whole VMA, which is larger than the range given to `mprotect` when the range is part of it or the kernel had merged it with an adjacent anonymous mapping). For `mmap` the
   address is not known at the hook and `memory.range` is listed as unavailable.
 - `bpf`: `command` (`prog_load` | `prog_attach` | `raw_tracepoint_open` | `link_create`),
   `program_type` (`prog_load`), `attach_type` (attach, link), `name`.

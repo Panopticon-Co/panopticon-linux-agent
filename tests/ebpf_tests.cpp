@@ -195,6 +195,40 @@ void test_decode_exec_stdio_and_interpreter() {
     require(std::get<raw_exec>(records[0].payload).interpreter->size() == wire::PAN_INTERP_LEN, "the interpreter is bounded by its field");
 }
 
+void test_decode_signal() {
+    clock_domain clock;
+    auto event = base_event(wire::PAN_EVENT_SIGNAL);
+    event.pid = 700U;
+    event.tid = 701U;
+    event.sig_sender = 650U;
+    event.sig_number = 9U;
+    event.sig_code = static_cast<std::uint32_t>(-6);
+    event.sig_result = 0U;
+    bool malformed = true;
+    auto records = decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed);
+    require(!malformed && records.size() == 1U, "a signal decodes");
+    const auto& signal = std::get<raw_signal>(records[0].payload);
+    require(signal.sender_tgid == 650U && signal.target_tgid == 700U && signal.target_pid == 701U && signal.number == 9U && signal.code == -6 &&
+                signal.result == "delivered",
+            "sender, target thread, number, tgkill code and result");
+    require(!signal.target_is_sensor, "only the provider knows its own pid, the decoder never claims the target is the sensor");
+    require(records[0].source.mechanism == "signal_generate", "provenance");
+
+    event.sig_result = 1U;
+    records = decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed);
+    require(std::get<raw_signal>(records[0].payload).result == "ignored", "an ignored signal says so");
+
+    for (const std::uint32_t bad_number : {0U, 65U, 4000000000U}) {
+        event.sig_number = bad_number;
+        malformed = false;
+        require(decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed).empty() && malformed, "a signal number outside 1..64 is malformed");
+    }
+    event.sig_number = 9U;
+    event.sig_result = 5U;
+    malformed = false;
+    require(decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed).empty() && malformed, "an unknown result code is malformed");
+}
+
 void test_decode_network() {
     clock_domain clock;
     auto connect = base_event(wire::PAN_EVENT_NET_CONNECT);
@@ -416,6 +450,10 @@ int child_main(const std::string& mode) {
         // Raw thread exit: pthread_exit on the main thread would hang sanitizer runtimes at shutdown.
         ::syscall(SYS_exit, 0);
         ::_exit(95);
+    }
+    if (mode == "signal_parent") {
+        ::kill(::getppid(), SIGTERM);
+        ::_exit(0);
     }
     if (mode == "sleep") {
         ::usleep(1'500'000);
@@ -644,8 +682,13 @@ void test_live_executable_memory_and_bpf() {
     require(std::get<raw_security_event>(anonymous[0]->payload).write_exec, "an rwx mapping is flagged writable and executable");
     const auto protects = mine(all, "mprotect", "anonymous");
     const auto& protection = std::get<raw_security_event>(protects[0]->payload);
-    require(protection.address == reinterpret_cast<std::uint64_t>(staged) && protection.length == 8192U && !protection.write_exec,
-            "mprotect reports the exact mapping that became executable");
+    // The hook sees the whole VMA that holds the range, so when the kernel has merged the test's pages with a
+    // neighbouring anonymous mapping (the sanitizer builds do this some of the time) it is larger than 8192 bytes.
+    const auto staged_address = reinterpret_cast<std::uint64_t>(staged);
+    require(protection.address <= staged_address && staged_address + 8192U <= protection.address + protection.length && !protection.write_exec,
+            "mprotect reports a mapping that covers the range that became executable: expected " + std::to_string(reinterpret_cast<std::uint64_t>(staged)) +
+                "+8192, got " + std::to_string(protection.address) + "+" + std::to_string(protection.length) + " write_exec=" +
+                std::to_string(protection.write_exec) + " among " + std::to_string(protects.size()) + " anonymous mprotect reports");
     require(mine(all, "mmap", "file").empty(), "a file-backed executable mapping is never reported");
     const auto program_load = std::get<raw_security_event>(loads(all)[0]->payload);
     require(program_load.program_type == "socket_filter", "the program type is named");
@@ -981,6 +1024,73 @@ void test_live_exec_stdio_and_interpreter() {
     require(live.provider().take_losses() == 0U, "no ring buffer losses");
 }
 
+std::vector<const raw_record*> signals_to(const records_t& records, const pid_t target) {
+    return select<raw_signal>(records, [target](const raw_signal& s) { return s.target_tgid == static_cast<std::uint32_t>(target); });
+}
+
+void test_live_signals_between_processes() {
+    live_provider live;
+    if (!live.begin("live signals")) return;
+    records_t all;
+    const auto started = [&](const pid_t pid) {
+        return collect(live.queue(), all, [&](const records_t& r) { return !execs_of(r, pid).empty(); });
+    };
+
+    const auto killed = spawn_child("sleep");
+    require(started(killed), "first child started");
+    require(::kill(killed, SIGTERM) == 0, "kill(2) of a running child");
+    reap(killed);
+
+    const auto tkilled = spawn_child("sleep");
+    require(started(tkilled), "second child started");
+    require(::syscall(SYS_tgkill, tkilled, tkilled, SIGKILL) == 0, "tgkill of a running child");
+    reap(tkilled);
+
+    // Not in the reported set, and a process ending itself: neither is a process acting on another.
+    const auto usr = spawn_child("sleep");
+    require(started(usr), "third child started");
+    ::kill(usr, SIGUSR1);
+    reap(usr);
+    const auto self_kill = spawn_child("sigkill");
+    reap(self_kill);
+
+    // A child signals this process, which ignores SIGTERM for the moment: this process stands in for the sensor.
+    struct sigaction ignore {};
+    ignore.sa_handler = SIG_IGN;
+    struct sigaction previous {};
+    require(::sigaction(SIGTERM, &ignore, &previous) == 0, "SIGTERM ignored for the test");
+    const auto nudger = spawn_child("signal_parent");
+    reap(nudger);
+    ::sigaction(SIGTERM, &previous, nullptr);
+
+    require(collect(live.queue(), all,
+                    [&](const records_t& r) {
+                        return !exits_of(r, nudger).empty() && !exits_of(r, self_kill).empty() && !exits_of(r, usr).empty() &&
+                               !exits_of(r, killed).empty() && !exits_of(r, tkilled).empty();
+                    }),
+            "every child exit is observed, so absence below means no event");
+
+    const auto to_killed = signals_to(all, killed);
+    require(to_killed.size() == 1U, "exactly one signal to the first child");
+    const auto& one = std::get<raw_signal>(to_killed[0]->payload);
+    require(one.sender_tgid == static_cast<std::uint32_t>(::getpid()) && one.number == 15U && one.code == 0 && one.result == "delivered" &&
+                !one.target_is_sensor,
+            "SIGTERM by kill(2), sent by this process, delivered, not aimed at the sensor");
+    const auto to_tkilled = signals_to(all, tkilled);
+    require(to_tkilled.size() == 1U, "exactly one signal to the second child");
+    const auto& two = std::get<raw_signal>(to_tkilled[0]->payload);
+    require(two.number == 9U && two.code == -6 && two.target_pid == static_cast<std::uint32_t>(tkilled), "SIGKILL by tgkill names the thread");
+    require(signals_to(all, usr).empty(), "SIGUSR1 is outside the reported set");
+    require(signals_to(all, self_kill).empty(), "a process killing itself is not reported");
+
+    const auto from_nudger = select<raw_signal>(all, [nudger](const raw_signal& s) { return s.sender_tgid == static_cast<std::uint32_t>(nudger); });
+    require(from_nudger.size() == 1U, "exactly one signal from the child that signalled its parent");
+    const auto& three = std::get<raw_signal>(from_nudger[0]->payload);
+    require(three.target_tgid == static_cast<std::uint32_t>(::getpid()) && three.target_is_sensor && three.number == 15U && three.result == "ignored",
+            "a signal aimed at the sensor process is marked, and records that the sensor ignored it");
+    require(live.provider().take_losses() == 0U, "no ring buffer losses");
+}
+
 void test_live_start_ticks_match_procfs() {
     live_provider live;
     if (!live.begin("live start ticks")) return;
@@ -1089,6 +1199,7 @@ int main(int argc, char** argv) {
     run("decode_fork_exit_rename", test_decode_fork_exit_rename);
     run("decode_exec_arguments", test_decode_exec_arguments);
     run("decode_exec_stdio_and_interpreter", test_decode_exec_stdio_and_interpreter);
+    run("decode_signal", test_decode_signal);
     run("decode_network", test_decode_network);
     run("decode_security", test_decode_security);
     run("decode_namespace_change", test_decode_namespace_change);
@@ -1098,6 +1209,7 @@ int main(int argc, char** argv) {
     run("process_providers_share_a_family", test_process_providers_share_a_family);
     run("live_lifecycle_and_arguments", test_live_lifecycle_and_arguments);
     run("live_exec_stdio_and_interpreter", test_live_exec_stdio_and_interpreter);
+    run("live_signals_between_processes", test_live_signals_between_processes);
     run("live_start_ticks_match_procfs", test_live_start_ticks_match_procfs);
     run("live_signal_exit", test_live_signal_exit);
     run("live_rename_ignores_exec_rename", test_live_rename_ignores_exec_rename);

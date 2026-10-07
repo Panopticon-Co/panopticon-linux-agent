@@ -740,6 +740,58 @@ void test_pipeline_exec_stdio_and_interpreter() {
     require(!contains(*exec, "{\"field\":\"process.stdio\""), "and nothing is marked unavailable for it");
 }
 
+void test_pipeline_signal_event() {
+    const auto root = fresh_directory("signalproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "bash", 500U, "/usr/bin/bash", {"-bash"}}.write(root);
+    fake_process{200U, 1U, "panopticon-sens", 900U, "/usr/sbin/panopticon-sensord", {"panopticon-sensord"}}.write(root);
+    raw_signal to_sensor;
+    to_sensor.sender_tgid = 100U;
+    to_sensor.target_tgid = 200U;
+    to_sensor.target_pid = 200U;
+    to_sensor.number = 9U;
+    to_sensor.code = 0;
+    to_sensor.result = "delivered";
+    to_sensor.target_is_sensor = true;
+    raw_signal gone;  // the sender is not in the process table and not in procfs
+    gone.sender_tgid = 4040U;
+    gone.target_tgid = 100U;
+    gone.target_pid = 100U;
+    gone.number = 19U;
+    gone.code = -6;
+    gone.result = "ignored";
+    std::vector<raw_record> script{record_of(to_sensor), record_of(gone)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::vector<std::string> signals;
+    for (const auto& line : lines) {
+        if (contains(line, "\"type\":\"process.signal\"")) signals.push_back(line);
+    }
+    require(signals.size() == 2U, "two process.signal records");
+    require(contains(signals[0], "\"signal\":{\"number\":9,\"name\":\"SIGKILL\",\"via\":\"kill\",\"result\":\"delivered\",\"target_is_sensor\":true}") &&
+                contains(signals[0], "\"process\":{") && contains(signals[0], "\"target\":{"),
+            "sender, target and the signal, aimed at the sensor: " + signals[0]);
+    require(contains(signals[0], "\"name\":\"bash\"") && contains(signals[0], "\"name\":\"panopticon-sens\""), "both processes are described");
+    require(contains(signals[1], "\"name\":\"SIGSTOP\",\"via\":\"tgkill\",\"result\":\"ignored\",\"target_is_sensor\":false}") &&
+                contains(signals[1], "{\"field\":\"process\",\"reason\":\"process_exited\"}"),
+            "a sender that is gone is reported as unavailable, not invented: " + signals[1]);
+}
+
 void test_pipeline_enriches_file_events() {
     const auto root = fresh_directory("fileproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
@@ -1755,6 +1807,7 @@ int main() {
     run("wal_detects_corruption_and_enforces_quota", test_wal_detects_corruption_and_enforces_quota);
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
     run("pipeline_exec_stdio_and_interpreter", test_pipeline_exec_stdio_and_interpreter);
+    run("pipeline_signal_event", test_pipeline_signal_event);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
     run("pipeline_rebases_event_times_after_a_clock_step", test_pipeline_rebases_event_times_after_a_clock_step);

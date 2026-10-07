@@ -75,6 +75,17 @@ struct raw_ptrace {
     std::string technique{"ptrace_attach"};
 };
 
+// A process sent a terminating or stopping signal to another process (eBPF signal_generate).
+struct raw_signal {
+    std::uint32_t sender_tgid{};
+    std::uint32_t target_tgid{};
+    std::uint32_t target_pid{};  // the thread the signal was aimed at
+    std::uint32_t number{};
+    std::int32_t code{};         // si_code: 0 kill(2), -1 sigqueue, -6 tgkill
+    std::string result;          // delivered, ignored, already_pending, overflow, info_lost
+    bool target_is_sensor{false};
+};
+
 struct raw_comm_change {
     std::uint32_t tgid{};
     std::uint32_t pid{};
@@ -306,7 +317,7 @@ struct raw_response_action {
 using raw_payload = std::variant<raw_fork, raw_exec, raw_exit, raw_credential_change, raw_ptrace, raw_comm_change,
                                  raw_session_change, raw_file_event, raw_network_event, raw_auth_event, raw_kernel_event,
                                  raw_security_event, raw_namespace_change, raw_dns_query, raw_lsm_event, raw_firewall_change,
-                                 raw_response_action>;
+                                 raw_response_action, raw_signal>;
 
 struct raw_record {
     std::uint64_t time_unix_ns{};

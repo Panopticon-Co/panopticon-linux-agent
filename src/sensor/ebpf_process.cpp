@@ -39,13 +39,14 @@ struct hook {
     const char* capability;  // catalog capability it provides
     bool core;
 };
-constexpr std::array<hook, 6U> process_hooks{{
+constexpr std::array<hook, 7U> process_hooks{{
     {"on_fork", "process.fork", true},
     {"on_exec", "process.exec", true},
     {"on_exit", "process.exit", true},
     {"on_rename", "process.rename", false},
     {"on_commit_creds", "process.cred_change", false},
     {"on_ptrace", "process.inject", false},
+    {"on_signal", "process.signal", false},
 }};
 // Network hooks run in the calling process, so the actor is exact. Connect is the one that makes
 // the provider worth having; the rest are dropped (and reported) when the kernel cannot host them.
@@ -180,6 +181,22 @@ std::vector<raw_record> decode_ebpf_process_sample(const void* data, const std::
         records.push_back({time, observed("security_ptrace_access_check"),
                            raw_ptrace{event.pid, event.tid, event.tracer_pid, event.tracer_pid, "ptrace_access"}});
         break;
+    case wire::PAN_EVENT_SIGNAL: {
+        static constexpr std::array<const char*, 5U> results{"delivered", "ignored", "already_pending", "overflow", "info_lost"};
+        if (event.sig_number == 0U || event.sig_number > 64U || event.sig_result >= results.size()) {
+            if (malformed != nullptr) *malformed = true;
+            return {};
+        }
+        raw_signal signal;
+        signal.sender_tgid = event.sig_sender;
+        signal.target_tgid = event.pid;
+        signal.target_pid = event.tid;
+        signal.number = event.sig_number;
+        signal.code = static_cast<std::int32_t>(event.sig_code);
+        signal.result = results[event.sig_result];
+        records.push_back({time, observed("signal_generate"), std::move(signal)});
+        break;
+    }
     case wire::PAN_EVENT_NET_CONNECT:
     case wire::PAN_EVENT_NET_ACCEPT:
     case wire::PAN_EVENT_NET_LISTEN:
@@ -502,6 +519,8 @@ int ebpf_process_provider::on_sample(const void* data, const std::size_t size) {
         // The sensor's own connections (the uplink to the Manager) are not telemetry: reporting
         // them would make every delivered batch produce the next record.
         if (const auto* net = std::get_if<raw_network_event>(&record.payload); net != nullptr && options_.skip_own_network_events && net->pid == own_pid_) continue;
+        // A signal aimed at the sensor is the one signal that matters most: say so on the record.
+        if (auto* signal = std::get_if<raw_signal>(&record.payload); signal != nullptr) signal->target_is_sensor = signal->target_tgid == own_pid_;
         // The sensor loads its own BPF programs; reporting that would be noise about itself.
         if (const auto* load = std::get_if<raw_security_event>(&record.payload); load != nullptr && options_.skip_own_network_events && load->pid == own_pid_) continue;
         if (const auto* query = std::get_if<raw_dns_query>(&record.payload); query != nullptr && options_.skip_own_network_events && query->pid == own_pid_) continue;

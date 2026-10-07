@@ -42,6 +42,15 @@ std::string systemd_unit(const std::string_view cgroup) {
     return std::string{unit};
 }
 
+std::string signal_name(const std::uint32_t number) {
+    static constexpr const char* names[] = {"",        "SIGHUP",  "SIGINT",   "SIGQUIT", "SIGILL",    "SIGTRAP", "SIGABRT", "SIGBUS",
+                                            "SIGFPE",  "SIGKILL", "SIGUSR1",  "SIGSEGV", "SIGUSR2",   "SIGPIPE", "SIGALRM", "SIGTERM",
+                                            "SIGSTKFLT", "SIGCHLD", "SIGCONT", "SIGSTOP", "SIGTSTP",   "SIGTTIN", "SIGTTOU", "SIGURG",
+                                            "SIGXCPU", "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGIO",   "SIGPWR",  "SIGSYS"};
+    if (number >= 1U && number < std::size(names)) return names[number];
+    return "SIG" + std::to_string(number);
+}
+
 }  // namespace
 
 std::string compute_record_id(const std::string_view sensor_id, const std::string_view boot_id, const std::uint64_t seq) {
@@ -233,6 +242,16 @@ std::string record_serializer::event(const process_event& event, const std::uint
     if (event.previous_executable.has_value()) out.field("previous_executable", *event.previous_executable);
     if (event.previous_name.has_value()) out.field("previous_name", *event.previous_name);
     if (event.technique.has_value()) out.field("technique", *event.technique);
+    if (event.signal.has_value()) {
+        const auto& signal = *event.signal;
+        out.key("signal").begin_object();
+        out.field("number", signal.number);
+        out.field("name", signal_name(signal.number));
+        out.field("via", signal.code == 0 ? "kill" : signal.code == -6 ? "tgkill" : signal.code == -1 ? "sigqueue" : "other");
+        out.field("result", signal.result);
+        out.field("target_is_sensor", signal.target_is_sensor);
+        out.end_object();
+    }
     if (event.ns_change.has_value()) {
         const auto& change = *event.ns_change;
         out.key("ns_change").begin_object();

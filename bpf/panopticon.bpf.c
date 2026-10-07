@@ -296,6 +296,41 @@ int BPF_PROG(on_ptrace, struct task_struct *child, unsigned int mode)
     return 0;
 }
 
+// A process sending a terminating, core-dumping or stopping signal to another one: the way an
+// intruder silences an agent or a service. Kernel-internal senders (SEND_SIG_NOINFO and
+// SEND_SIG_PRIV: tty job control, the OOM killer, the scheduler) and signals the kernel raises
+// itself (si_code > 0: faults, child exits) are left out, because the task that happens to be
+// running is not the origin there. A process signalling itself is not an attack on anything.
+SEC("tp_btf/signal_generate")
+int BPF_PROG(on_signal, int sig, struct kernel_siginfo *info, struct task_struct *task, int type, int result)
+{
+    if (sig != 3 && sig != 6 && sig != 9 && sig != 11 && sig != 15 && sig != 19)
+        return 0;
+    if ((unsigned long)info <= 1)
+        return 0;
+    int code = BPF_CORE_READ(info, si_code);
+    if (code > 0)
+        return 0;
+    struct task_struct *sender = (struct task_struct *)bpf_get_current_task_btf();
+    u32 sender_tgid = BPF_CORE_READ(sender, tgid);
+    u32 target_tgid = BPF_CORE_READ(task, tgid);
+    if (sender_tgid == target_tgid)
+        return 0;
+    struct pan_event *e = event_base(PAN_EVENT_SIGNAL);
+    if (!e)
+        return 0;
+    e->pid = target_tgid;
+    e->tid = BPF_CORE_READ(task, pid);
+    e->start_boot_ns = leader_start_boot(task);
+    e->sig_number = (u32)sig;
+    e->sig_code = (u32)code;
+    e->sig_sender = sender_tgid;
+    e->sig_result = (u8)result;
+    BPF_CORE_READ_STR_INTO(&e->comm, task, comm);
+    submit(e);
+    return 0;
+}
+
 // ---- network: connect, accept, listen, UDP flows (ADR 019) ------------------------------------
 //
 // These run in the context of the process that makes the call, so the actor is exact: there is no

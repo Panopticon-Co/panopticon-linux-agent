@@ -34,7 +34,7 @@ maps; systemd units; the rollback copy.
 | T7 | Event flooding to blind the sensor | In-kernel rate limits; priority-aware shedding that drops low-value events first; every drop counted and reported | Low-priority visibility reduced under sustained floods (reported) |
 | T8 | WAL tampering or deletion | 0700 root directory; CRC per record; contiguous `seq` lets Manager see gaps | Root can delete; detected via the gap |
 | T9 | Configuration tampering | Strict loader rejects non-root or group/world-writable files **[built]**; config path monitored | Root can edit; detected |
-| T10 | Stopping the sensor | `Restart=always`; systemd watchdog; tamper record on signals to the sensor and unit-file changes; BPF-LSM denial in protect mode | Root with `CAP_SYS_ADMIN` can always stop a user-space agent |
+| T10 | Stopping the sensor | `Restart=always`; systemd watchdog; `process.signal` records every KILL, TERM, STOP, QUIT, ABRT or SEGV another process sends, with `target_is_sensor` set for the sensor (REAL-VM VERIFIED with SIGSTOP); unit-file changes are not yet recorded; BPF-LSM denial in protect mode | Root with `CAP_SYS_ADMIN` can always stop a user-space agent |
 | T11 | Detaching sensor BPF programs | Links owned by the sensor process; periodic attachment self-check; foreign `bpf()` activity recorded; BPF-LSM denial in protect mode | Root can still unload; detected by self-check and Manager heartbeat |
 | T12 | Binary replacement | Package-owned files; self-integrity check against the build manifest; file events on install paths | Root can replace; detected |
 | T13 | Identity key theft | 0600 root key file; never logged | Root can read |

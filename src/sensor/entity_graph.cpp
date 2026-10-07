@@ -177,6 +177,7 @@ std::vector<process_event> entity_graph::apply(const raw_record& record) {
             else if constexpr (std::is_same_v<payload_type, raw_exit>) return on_exit(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_credential_change>) return on_credentials(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_ptrace>) return on_ptrace(record, payload);
+            else if constexpr (std::is_same_v<payload_type, raw_signal>) return on_signal(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_comm_change>) return on_comm(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_namespace_change>) return on_namespaces(record, payload);
             else if constexpr (std::is_same_v<payload_type, raw_file_event> || std::is_same_v<payload_type, raw_network_event> ||
@@ -373,6 +374,17 @@ std::vector<process_event> entity_graph::on_ptrace(const raw_record& record, con
     event.target = target;
     event.technique = trace.technique;
     if (!tracer) event.unavailable.push_back({"process", unavailable_reason::process_exited});
+    return {std::move(event)};
+}
+
+std::vector<process_event> entity_graph::on_signal(const raw_record& record, const raw_signal& signal) {
+    const auto sender = lookup_or_load(signal.sender_tgid, record.time_unix_ns);
+    const auto target = lookup_or_load(signal.target_tgid, record.time_unix_ns);
+    auto event = make_event("process.signal", record, sender);
+    event.target = target;
+    event.signal = signal_details{signal.number, signal.code, signal.result, signal.target_is_sensor};
+    if (!sender) event.unavailable.push_back({"process", unavailable_reason::process_exited});
+    if (!target) event.unavailable.push_back({"target", unavailable_reason::process_exited});
     return {std::move(event)};
 }
 

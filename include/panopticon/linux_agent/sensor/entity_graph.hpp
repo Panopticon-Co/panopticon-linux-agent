@@ -49,6 +49,13 @@ struct namespace_change_body {
     std::vector<namespace_move> moves;
 };
 
+struct signal_details {
+    std::uint32_t number{};
+    std::int32_t code{};
+    std::string result;
+    bool target_is_sensor{false};
+};
+
 struct process_event {
     std::string type;  // catalog §4: process.fork/exec/exit/discovered/cred_change/inject/rename
     std::uint64_t time_unix_ns{};
@@ -62,6 +69,7 @@ struct process_event {
     std::optional<std::string> previous_name;        // process.rename
     std::optional<process_credentials> creds_before; // process.cred_change
     std::optional<std::string> technique;            // process.inject
+    std::optional<signal_details> signal;            // process.signal (process = sender, target = receiver)
     std::optional<namespace_change_body> ns_change;  // process.ns_change
     std::vector<unavailable_field> unavailable;      // event-level, in addition to process ones
     // Filled in by the pipeline (not the graph) for exec and discovery events: the hash of the
@@ -127,6 +135,7 @@ private:
     std::vector<process_event> on_exit(const raw_record& record, const raw_exit& exit);
     std::vector<process_event> on_credentials(const raw_record& record, const raw_credential_change& change);
     std::vector<process_event> on_ptrace(const raw_record& record, const raw_ptrace& trace);
+    std::vector<process_event> on_signal(const raw_record& record, const raw_signal& signal);
     std::vector<process_event> on_comm(const raw_record& record, const raw_comm_change& change);
     std::vector<process_event> on_namespaces(const raw_record& record, const raw_namespace_change& change);
     std::vector<process_event> on_session(const raw_record& record, const raw_session_change& change);

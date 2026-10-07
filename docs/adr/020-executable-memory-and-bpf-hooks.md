@@ -39,7 +39,7 @@ place to observe them is the kernel call that asks for the memory or the program
 
 - Verified on Ubuntu 22.04 / 5.15.0-91 / x86_64 as root: decoder unit tests (all kinds, unknown
   backing, unknown command, unknown program type, unterminated name), a live test that makes an
-  RWX mapping twice (one report), an mprotect (exact address and length), a memfd exec mapping, a
+  RWX mapping twice (one report), an mprotect (the address and length of the VMA that holds the range: the whole area, which can be larger than the range), a memfd exec mapping, a
   file-backed exec mapping (not reported) and a real `bpf(PROG_LOAD)`; a real `panopticon-sensord`
   run delivering all four records to the Manager with none quarantined; the same run against a Manager
   that still had the old schema produced a real `manager_rejected` loss record.
