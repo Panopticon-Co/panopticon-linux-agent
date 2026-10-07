@@ -1,0 +1,27 @@
+# Panopticon sensor (panopticon-sensord) configuration. key=value lines; unknown keys, duplicate keys and
+# out-of-range values stop the sensor from starting. The sensor also refuses this file, the CA bundle and the
+# signing key list if they, or the directories above them, can be written by anyone but root (ADR 031).
+# Reference: docs/endpoint/LINUX_ENDPOINT_CONFIGURATION.md
+#
+# sensor_id and host_id are filled in by the package on first install and are required.
+
+# Where records are kept until the Manager acknowledges them. Everything below is created under /var/lib/panopticon
+# by the service (StateDirectory=): the log, wal.instance, wal.commands and wal.quarantine.
+wal_path=/var/lib/panopticon/wal
+wal_quota_bytes=268435456
+
+# Delivery to the Manager. Both or neither: with neither, records stay in the log (collection only).
+# manager_url=https://manager.example.internal:8443
+# identity_path=/etc/panopticon/identity
+# ca_bundle=/etc/panopticon/manager-ca.pem
+
+# Telemetry. Everything is on by default; uncomment to turn a family off.
+# enable_file_events=false
+# enable_network_events=false
+# enable_auth_events=false
+
+# Commands from the Manager (ADR 024/025/026). Off unless set. Enforcement needs pinned signing keys: one base64
+# P-256 public point per line in the file below, owned by root and not writable by anyone else.
+# response_mode=dry_run
+# response_signing_keys=/etc/panopticon/command-keys
+# response_actions=KILL_PROCESS,COLLECT_PROCESS_INFO,COLLECT_NETWORK_CONNECTIONS

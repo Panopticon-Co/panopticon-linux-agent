@@ -132,12 +132,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_definitions(panopticon-sensord PRIVATE PANOPTICON_SENSOR_VERSION="${PROJECT_VERSION}")
     target_compile_options(panopticon-sensord PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_link_libraries(panopticon-sensord PRIVATE panopticon-sensor-core)
-    install(TARGETS panopticon-sensord RUNTIME DESTINATION bin)
+    install(TARGETS panopticon-sensord RUNTIME DESTINATION bin COMPONENT sensord)
+    install(FILES systemd/panopticon-sensord.service DESTINATION lib/systemd/system COMPONENT sensord)
+    install(FILES packaging/sensord.conf.example DESTINATION share/panopticon COMPONENT sensord)
 
     add_executable(panopticon-ctl src/sensor/ctl_main.cpp)
     target_compile_options(panopticon-ctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_link_libraries(panopticon-ctl PRIVATE panopticon-sensor-core)
-    install(TARGETS panopticon-ctl RUNTIME DESTINATION bin)
+    install(TARGETS panopticon-ctl RUNTIME DESTINATION bin COMPONENT sensord)
 
     if(BUILD_TESTING)
         add_executable(panopticon-sensor-tests tests/sensor_tests.cpp)
@@ -273,3 +275,24 @@ if(LIBMNL_FOUND AND LIBNFTNL_FOUND)
     add_executable(isolation-raw-frame-tool tests/e2e/isolation_raw_frame_tool.cpp)
     target_compile_features(isolation-raw-frame-tool PRIVATE cxx_std_20)
 endif()
+
+# Debian package of the resident sensor: `cpack -G DEB` (see packaging/deb and docs/adr/031). Only the sensord component
+# is packaged; the older agent and the isolation helper keep their own install rules.
+set(CPACK_GENERATOR DEB)
+set(CPACK_PACKAGING_INSTALL_PREFIX /usr)
+set(CPACK_PACKAGE_NAME panopticon-sensord)
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGE_CONTACT "Panopticon&Co <maintainers@panopticon.invalid>")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Panopticon Linux endpoint sensor")
+set(CPACK_DEB_COMPONENT_INSTALL ON)
+set(CPACK_COMPONENTS_ALL sensord)
+set(CPACK_DEBIAN_SENSORD_PACKAGE_NAME panopticon-sensord)
+set(CPACK_DEBIAN_SENSORD_FILE_NAME DEB-DEFAULT)
+set(CPACK_DEBIAN_SENSORD_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_SENSORD_PACKAGE_DEPENDS "systemd")
+set(CPACK_DEBIAN_SENSORD_PACKAGE_SECTION admin)
+set(CPACK_DEBIAN_SENSORD_PACKAGE_CONTROL_EXTRA
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/postinst
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/prerm
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/postrm)
+include(CPack)

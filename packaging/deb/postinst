@@ -1,0 +1,32 @@
+#!/bin/sh
+# Creates /etc/panopticon/sensord.conf on first install (never overwrites an existing one) and starts the service.
+set -e
+
+conf=/etc/panopticon/sensord.conf
+example=/usr/share/panopticon/sensord.conf.example
+
+if [ "$1" = configure ]; then
+    install -d -m 0755 -o root -g root /etc/panopticon
+    if [ ! -e "$conf" ]; then
+        host=
+        if [ -r /etc/machine-id ]; then host=$(tr -d '\n-' < /etc/machine-id); fi
+        if [ -z "$host" ]; then host=$(tr -d '\n-' < /proc/sys/kernel/random/uuid); fi
+        umask 022
+        {
+            echo "sensor_id=sensor-$(echo "$host" | cut -c1-12)"
+            echo "host_id=$host"
+            echo
+            grep -v '^# sensor_id and host_id are filled in' "$example"
+        } > "$conf.new"
+        chown root:root "$conf.new"
+        chmod 0644 "$conf.new"
+        mv "$conf.new" "$conf"
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        systemctl enable panopticon-sensord.service || true
+        # A restart, not a start: an upgrade must run the new binary.
+        systemctl restart panopticon-sensord.service || true
+    fi
+fi
+exit 0

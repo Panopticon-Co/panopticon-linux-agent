@@ -1,0 +1,11 @@
+#!/bin/sh
+# remove keeps the configuration and the log; purge removes the configuration. The log (records the Manager has not
+# acknowledged) is evidence and is deleted only by an explicit purge as well, after the service has been stopped.
+set -e
+if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+if [ "$1" = purge ]; then
+    rm -f /etc/panopticon/sensord.conf
+    rmdir /etc/panopticon 2>/dev/null || true
+    rm -rf /var/lib/panopticon
+fi
+exit 0

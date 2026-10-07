@@ -3,7 +3,7 @@
 Source of truth: `parse_sensor_config` in `src/sensor/pipeline.cpp` and the defaults in `struct sensor_config`
 (`include/panopticon/linux_agent/sensor/pipeline.hpp`). This page is derived from them; if they disagree, the code
 is right. The file is `key=value` lines. **Unknown keys, duplicate keys and out-of-range values are errors**, and
-the loader (`load_sensor_config`) also refuses a file that is not a regular file or is group- or world-writable.
+the loader (`load_sensor_config`) also refuses a file that is not a regular file, is owned by anyone but root or the sensor's own user, is group- or world-writable, or sits under a directory others can write into (sticky directories such as `/tmp` are fine). The same rule applies to the `ca_bundle` and to the `response_signing_keys` file (ADR 031).
 `panopticon-sensord --config <file>` does not start on any error.
 
 Paths named "absolute" must start with `/` and must not contain `..`. Booleans are `true` or `false`.
@@ -79,3 +79,17 @@ Cross-key rules, all enforced at start:
 * `QUARANTINE_FILE` is listed if and only if `response_file_roots` is set.
 * `ISOLATE_HOST` and `RELEASE_HOST_ISOLATION` are listed together, and if and only if `response_isolation_socket`
   is set.
+
+## Installing and running as a service
+
+`cpack -G DEB` (in the build directory) produces `panopticon-sensord_<version>_amd64.deb` with `/usr/bin/panopticon-sensord`,
+`/usr/bin/panopticon-ctl`, `/usr/lib/systemd/system/panopticon-sensord.service` and
+`/usr/share/panopticon/sensord.conf.example`. The post-install script creates `/etc/panopticon/sensord.conf` (root-owned,
+0644, `sensor_id` and `host_id` derived from `/etc/machine-id`, collection only) if there is none, enables the service
+and restarts it, so an upgrade runs the new binary and never overwrites an edited configuration. `dpkg -r` stops and
+disables the service and keeps the configuration and the log; `dpkg -P` removes both (the log holds records the Manager
+may not have acknowledged, so purge is the only way it is deleted). The unit is described in ADR 031: `Type=notify`,
+`WatchdogSec=30`, `Restart=always`, `StateDirectory=panopticon` (`/var/lib/panopticon`), control socket
+`/run/panopticon/control.sock` (`panopticon-ctl --socket /run/panopticon/control.sock status`). File actions that move
+files out of `response_file_roots` need those roots in `ReadWritePaths=` (a drop-in, because the unit makes the file
+system read-only for the sensor).

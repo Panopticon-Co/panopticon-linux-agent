@@ -1,0 +1,10 @@
+#!/bin/sh
+# Stops the service before its files are removed; an upgrade is restarted by the new package's postinst.
+set -e
+if [ "$1" = remove ] || [ "$1" = deconfigure ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl stop panopticon-sensord.service || true
+        systemctl disable panopticon-sensord.service || true
+    fi
+fi
+exit 0
