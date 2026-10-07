@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -17,10 +18,24 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <variant>
 #include <vector>
 
 using namespace panopticon::linux_agent;
 using namespace panopticon::linux_agent::sensor;
+
+namespace panopticon::linux_agent::sensor {
+// Lets a test hand the provider decoded events without a kernel descriptor.
+struct fanotify_file_provider_test_access {
+    static void attach(fanotify_file_provider& provider, record_queue& queue) {
+        provider.queue_ = &queue;
+        provider.tokens_ = 1000.0;
+        provider.last_refill_ = std::chrono::steady_clock::now();
+    }
+    static void event(fanotify_file_provider& provider, const fanotify_decoded& decoded) { provider.handle_event(decoded); }
+};
+}  // namespace panopticon::linux_agent::sensor
 
 namespace {
 
@@ -172,6 +187,11 @@ pid_t run_child_operations(const std::string& directory, const std::string& excl
         (void)::rmdir(folder.c_str());
         const int hidden = ::open((excluded + "/hidden").c_str(), O_CREAT | O_WRONLY, 0600);
         if (hidden >= 0) ::close(hidden);
+        // The last event of the child. The kernel merges queued events with the same pid and name, so the rmdir of "sub"
+        // is folded into the earlier mkdir event, which a reader can collect before the renames; only a name used once
+        // is certain to come after everything above.
+        const int last = ::open((directory + "/zz-end").c_str(), O_CREAT | O_WRONLY, 0600);
+        if (last >= 0) ::close(last);
         ::_exit(0);
     }
     int status = 0;
@@ -222,7 +242,7 @@ void test_live_file_events_match_ground_truth() {
     const auto child = static_cast<std::uint32_t>(run_child_operations(watched, silent));
 
     std::vector<raw_file_event> events;
-    for (int attempt = 0; attempt < 40 && !has(events, file_operation::remove, watched + "/sub", child, true); ++attempt) {
+    for (int attempt = 0; attempt < 40 && !has(events, file_operation::create, watched + "/zz-end", child); ++attempt) {
         std::vector<raw_record> batch;
         queue.pop_batch(batch, 256U, std::chrono::milliseconds{100});
         for (const auto& record : batch) {
@@ -266,6 +286,50 @@ void test_live_file_events_match_ground_truth() {
     (void)::rmdir(root.c_str());
 }
 
+// A rename is two kernel events and the reader can be descheduled between handling them. Found on the VM: under CPU
+// contention the live test saw halves of one rename reported separately, because a clock check threw away the pending
+// half although its partner was already queued. Driven without a kernel so the delay is exact.
+std::vector<raw_file_event> feed_rename(const std::chrono::milliseconds delay) {
+    fanotify_file_provider provider;
+    record_queue queue{64U};
+    fanotify_file_provider_test_access::attach(provider, queue);
+    fanotify_decoded from;
+    from.mask = FAN_MOVED_FROM;
+    from.pid = 4242U;
+    from.name = "a";
+    fanotify_decoded to = from;
+    to.mask = FAN_MOVED_TO;
+    to.name = "b";
+    fanotify_file_provider_test_access::event(provider, from);
+    std::this_thread::sleep_for(delay);
+    fanotify_file_provider_test_access::event(provider, to);
+    std::vector<raw_record> batch;
+    queue.pop_batch(batch, 64U, std::chrono::milliseconds{1});
+    std::vector<raw_file_event> events;
+    for (const auto& record : batch) {
+        if (const auto* event = std::get_if<raw_file_event>(&record.payload)) events.push_back(*event);
+    }
+    return events;
+}
+
+bool lacks_old_path(const raw_file_event& event) {
+    return std::any_of(event.unavailable.begin(), event.unavailable.end(), [](const unavailable_field& field) { return field.field == "file.old_path"; });
+}
+
+void test_a_delayed_reader_still_pairs_the_halves_of_a_rename() {
+    // Far past the 25 ms soft window, well inside the hard bound.
+    const auto delayed = feed_rename(std::chrono::milliseconds{120});
+    require(delayed.size() == 1U, "one rename, not two halves");
+    require(delayed.front().operation == file_operation::rename && delayed.front().old_path.has_value() && !lacks_old_path(delayed.front()),
+            "the rename keeps its source");
+    const auto prompt = feed_rename(std::chrono::milliseconds{0});
+    require(prompt.size() == 1U && prompt.front().old_path.has_value(), "an undelayed rename pairs as before");
+    // A half older than the hard bound is never paired with a later move: it is reported alone, and so is the later one.
+    const auto stale = feed_rename(std::chrono::milliseconds{1100});
+    require(stale.size() == 2U, "a half older than the hard bound is flushed, not paired");
+    require(std::count_if(stale.begin(), stale.end(), lacks_old_path) == 1, "the later move is reported as arriving from outside");
+}
+
 void test_sensitive_patterns_expand_against_a_root() {
     namespace fs = std::filesystem;
     const auto root = fs::temp_directory_path() / ("panopticon-sensitive-" + std::to_string(::getpid()));
@@ -305,6 +369,7 @@ int main() {
     run("decoder fuzz never crashes", test_decoder_fuzz_never_crashes);
     run("filter prefixes respect directory boundaries", test_filter_prefixes_respect_directory_boundaries);
     run("sensitive patterns expand against a root", test_sensitive_patterns_expand_against_a_root);
+    run("a delayed reader still pairs the halves of a rename", test_a_delayed_reader_still_pairs_the_halves_of_a_rename);
     run("live file events match ground truth", test_live_file_events_match_ground_truth);
     return 0;
 }

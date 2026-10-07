@@ -23,6 +23,7 @@ namespace panopticon::linux_agent::sensor {
 namespace {
 
 constexpr std::chrono::milliseconds pending_window{25};
+constexpr std::chrono::milliseconds pending_hard_limit{1000};
 constexpr std::size_t maximum_name_bytes = 4096U;
 constexpr std::uint32_t maximum_handle_bytes = 128U;  // MAX_HANDLE_SZ
 constexpr std::uint64_t watched_mask =
@@ -243,20 +244,26 @@ void fanotify_file_provider::run() {
         // apart, so they can straddle a read().
         if (::poll(descriptors, 2, pending_.valid ? static_cast<int>(pending_window.count()) : 1000) < 0 && errno != EINTR) break;
         if ((descriptors[1].revents & POLLIN) != 0) break;
-        if ((descriptors[0].revents & POLLIN) != 0) {
+        const auto drain = [&] {
+            bool any = false;
             while (true) {
                 const auto got = ::read(fan_fd_, buffer.data(), buffer.size());
                 if (got > 0) {
+                    any = true;
                     handle_buffer(buffer.data(), static_cast<std::size_t>(got));
                 } else if (got < 0 && errno == EINTR) {
                     continue;
                 } else {
-                    break;  // EAGAIN: drained
+                    return any;  // EAGAIN: drained
                 }
             }
-        }
+        };
+        if ((descriptors[0].revents & POLLIN) != 0) (void)drain();
         const auto now = std::chrono::steady_clock::now();
-        flush_stale_move(now);
+        // A pending half is given up only when the descriptor is empty. The reader can be descheduled for far longer than
+        // the window between the kernel queueing the two halves and this read, so a clock alone must not split a rename
+        // whose other half is already waiting: read once more, and only an empty read lets the window decide.
+        if (pending_.valid && now >= pending_.deadline && !drain()) flush_pending_move();
         if (now - last_remark >= options_.remark_interval) {
             mark_filesystems();
             last_remark = now;
@@ -351,14 +358,16 @@ void fanotify_file_provider::flush_pending_move() {
 }
 
 void fanotify_file_provider::flush_stale_move(const std::chrono::steady_clock::time_point now) {
-    if (pending_.valid && now >= pending_.deadline) flush_pending_move();
+    if (pending_.valid && now >= pending_.hard_deadline) flush_pending_move();
 }
 
 void fanotify_file_provider::handle_event(const fanotify_decoded& event) {
     if (event.pid == static_cast<std::uint32_t>(::getpid())) return;  // never report our own WAL and state writes
     // Merged events can arrive in a different order than they happened, so other events of the same
     // process may sit between the two halves of a rename: a pending half is closed only by its
-    // MOVED_TO, a newer MOVED_FROM, or its deadline.
+    // MOVED_TO, a newer MOVED_FROM, an empty descriptor after its soft deadline (run), or its hard deadline. The soft
+    // deadline is not checked here: this event may be the very half it is waiting for, already queued when the reader
+    // was descheduled. The hard deadline bounds how stale a half can be and still pair with an unrelated later move.
     flush_stale_move(std::chrono::steady_clock::now());
     if (!take_token()) {
         governed_.fetch_add(1U);
@@ -405,7 +414,8 @@ void fanotify_file_provider::handle_event(const fanotify_decoded& event) {
     }
     if ((event.mask & FAN_MOVED_FROM) != 0U) {
         flush_pending_move();
-        pending_ = {true, event.pid, path, is_directory, std::chrono::steady_clock::now() + pending_window};
+        const auto started = std::chrono::steady_clock::now();
+        pending_ = {true, event.pid, path, is_directory, started + pending_window, started + pending_hard_limit};
     }
     if ((event.mask & FAN_ATTRIB) != 0U) emit(make(file_operation::attrib));
     if ((event.mask & FAN_CLOSE_WRITE) != 0U) emit(make(file_operation::modify));

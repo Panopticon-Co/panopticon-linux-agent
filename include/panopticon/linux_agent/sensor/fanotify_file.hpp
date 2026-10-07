@@ -80,12 +80,15 @@ public:
     [[nodiscard]] std::uint64_t take_governed() override { return governed_.exchange(0U); }
 
 private:
+    friend struct fanotify_file_provider_test_access;
+
     struct pending_move {
         bool valid{false};
         std::uint32_t pid{};
         std::string path;
         bool directory{false};
-        std::chrono::steady_clock::time_point deadline;
+        std::chrono::steady_clock::time_point deadline;       // soft: flushed once the descriptor has nothing more to read
+        std::chrono::steady_clock::time_point hard_deadline;  // hard: never paired with a later rename after this
     };
     struct cached_path {
         std::string path;
