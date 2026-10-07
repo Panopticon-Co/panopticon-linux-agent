@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#include <nmmintrin.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -91,12 +94,43 @@ bool sync_directory(const std::filesystem::path& directory) {
 
 }  // namespace
 
-std::uint32_t crc32c(std::uint32_t crc, const void* data, const std::size_t size) noexcept {
+std::uint32_t crc32c_portable(std::uint32_t crc, const void* data, const std::size_t size) noexcept {
     const auto* bytes = static_cast<const unsigned char*>(data);
     crc = ~crc;
     for (std::size_t index = 0U; index < size; ++index) crc = crc32c_table[(crc ^ bytes[index]) & 0xFFU] ^ (crc >> 8U);
     return ~crc;
 }
+
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+namespace {
+// The byte-at-a-time table was the largest single cost on the pipeline thread under a connection storm (13 % of
+// it, over records of about 2 KB). The SSE4.2 instruction computes the same CRC-32C (Castagnoli) eight bytes at a time.
+__attribute__((target("sse4.2"))) std::uint32_t crc32c_sse42(const std::uint32_t crc, const unsigned char* bytes, std::size_t size) noexcept {
+    std::uint64_t state = ~crc;
+    while (size >= 8U) {
+        std::uint64_t word;
+        std::memcpy(&word, bytes, sizeof(word));  // x86 is little endian, as the reflected polynomial expects
+        state = _mm_crc32_u64(state, word);
+        bytes += 8U;
+        size -= 8U;
+    }
+    auto narrow = static_cast<std::uint32_t>(state);
+    while (size > 0U) {
+        narrow = _mm_crc32_u8(narrow, *bytes++);
+        --size;
+    }
+    return ~narrow;
+}
+}  // namespace
+
+std::uint32_t crc32c(const std::uint32_t crc, const void* data, const std::size_t size) noexcept {
+    static const bool hardware = __builtin_cpu_supports("sse4.2") != 0;
+    if (hardware) return crc32c_sse42(crc, static_cast<const unsigned char*>(data), size);
+    return crc32c_portable(crc, data, size);
+}
+#else
+std::uint32_t crc32c(const std::uint32_t crc, const void* data, const std::size_t size) noexcept { return crc32c_portable(crc, data, size); }
+#endif
 
 std::uint32_t wal_frame_crc(const std::uint64_t seq, const std::string_view payload) noexcept {
     unsigned char seq_bytes[8];

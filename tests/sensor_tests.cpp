@@ -538,6 +538,24 @@ wal_options small_wal(const fs::path& directory) {
 
 void test_crc32c_known_vector() {
     require(crc32c(0U, "123456789", 9U) == 0xE3069283U, "crc32c check value");
+    require(crc32c_portable(0U, "123456789", 9U) == 0xE3069283U, "table implementation check value");
+    // The hardware path takes eight bytes at a time and then single bytes, so sizes and start offsets around the word
+    // boundary are where it could differ from the table version; frames already on disk depend on them agreeing.
+    std::vector<unsigned char> bytes(1024U);
+    std::uint32_t state = 0x9E3779B9U;
+    for (auto& byte : bytes) {
+        state = state * 1664525U + 1013904223U;
+        byte = static_cast<unsigned char>(state >> 24U);
+    }
+    for (std::size_t offset = 0U; offset < 9U; ++offset) {
+        for (std::size_t size = 0U; size <= 300U; ++size) {
+            require(crc32c(0U, bytes.data() + offset, size) == crc32c_portable(0U, bytes.data() + offset, size),
+                    "hardware and table crc32c agree at offset " + std::to_string(offset) + " size " + std::to_string(size));
+        }
+    }
+    const auto chained = crc32c(crc32c(0U, bytes.data(), 13U), bytes.data() + 13U, 600U);
+    require(chained == crc32c_portable(crc32c_portable(0U, bytes.data(), 13U), bytes.data() + 13U, 600U), "running values agree");
+    require(chained == crc32c(0U, bytes.data(), 613U), "a running value equals one pass over the same bytes");
 }
 
 void test_wal_append_read_ack_and_recover() {

@@ -15,8 +15,11 @@
 
 namespace panopticon::linux_agent::sensor {
 
-// CRC-32C (Castagnoli), software implementation. `crc` is the running value (0 to start).
+// CRC-32C (Castagnoli). `crc` is the running value (0 to start). Uses the SSE4.2 instruction where the CPU has it and
+// the table version otherwise; both give the same value, which is what the frames on disk carry.
 [[nodiscard]] std::uint32_t crc32c(std::uint32_t crc, const void* data, std::size_t size) noexcept;
+// The table implementation by itself, for checking the fast path against it.
+[[nodiscard]] std::uint32_t crc32c_portable(std::uint32_t crc, const void* data, std::size_t size) noexcept;
 
 inline constexpr std::uint32_t wal_magic = 0x314C5750U;  // "PWL1" little-endian
 inline constexpr std::size_t wal_header_bytes = 20U;     // magic, length, crc, seq
