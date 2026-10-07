@@ -357,6 +357,31 @@ struct {
     __type(value, u64);
 } udp_seen SEC(".maps");
 
+// Connections the sensor saw open, by socket address: start time and direction for the close
+// event. An LRU, so sockets that never reach tcp_close cannot fill it. A socket that predates
+// the sensor has no entry and its close says so (direction unknown, no duration).
+struct pan_conn_val {
+    u64 start_ns;
+    u8 dir;
+    u8 pad[7];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 16384);
+    __type(key, u64);
+    __type(value, struct pan_conn_val);
+} conn_seen SEC(".maps");
+
+static __always_inline void conn_track(struct sock *sk, u8 dir)
+{
+    u64 key = (u64)sk;
+    struct pan_conn_val val = {};
+    val.start_ns = bpf_ktime_get_boot_ns();
+    val.dir = dir;
+    bpf_map_update_elem(&conn_seen, &key, &val, BPF_ANY);
+}
+
 static __always_inline void net_actor(struct pan_event *e)
 {
     struct task_struct *t = (struct task_struct *)bpf_get_current_task_btf();
@@ -405,6 +430,7 @@ int BPF_PROG(on_tcp_connect, struct sock *sk)
     if (!net_fill_sock(e, sk, 6))
         return 0;
     net_actor(e);
+    conn_track(sk, 1);
     submit(e);
     return 0;
 }
@@ -420,6 +446,56 @@ int BPF_PROG(on_tcp_accept, struct sock *sk, int flags, int *err, bool kern, str
         return 0;
     if (!net_fill_sock(e, ret, 6))
         return 0;
+    net_actor(e);
+    conn_track(ret, 2);
+    submit(e);
+    return 0;
+}
+
+// tcp_close() runs when a process (or exit) drops its last reference to a TCP socket. The actor is
+// whoever closed it, which is the connecting or accepting process unless the descriptor was
+// inherited or passed. Listeners are left out and so are sockets that never connected.
+SEC("fentry/tcp_close")
+int BPF_PROG(on_tcp_close, struct sock *sk, long timeout)
+{
+    u8 state = BPF_CORE_READ(sk, __sk_common.skc_state);
+    if (state == 10)
+        return 0;
+    u64 key = (u64)sk;
+    u64 start = 0;
+    u8 dir = 0;
+    struct pan_conn_val *seen = bpf_map_lookup_elem(&conn_seen, &key);
+    if (seen) {
+        start = seen->start_ns;
+        dir = seen->dir;
+        bpf_map_delete_elem(&conn_seen, &key);
+    } else if (state == 7 || BPF_CORE_READ(sk, __sk_common.skc_dport) == 0) {
+        return 0;
+    }
+    struct pan_event *e = event_base(PAN_EVENT_NET_CLOSE);
+    if (!e)
+        return 0;
+    if (!net_fill_sock(e, sk, 6))
+        return 0;
+    // The kernel counts sequence numbers, not just payload: bytes_acked includes the SYN of an
+    // active open and our own FIN once acknowledged, bytes_received includes the peer's FIN once
+    // it has arrived. Take those out so the counters are payload bytes. A socket the sensor did
+    // not see open (direction unknown) may still carry the SYN of an active open.
+    struct tcp_sock *tp = (struct tcp_sock *)sk;
+    u64 sent = BPF_CORE_READ(tp, bytes_acked);
+    u64 received = BPF_CORE_READ(tp, bytes_received);
+    if (dir == 1 && sent)
+        sent -= 1;
+    if (state == 5 && sent)
+        sent -= 1;
+    if ((state == 8 || state == 9 || state == 11) && received)
+        received -= 1;
+    e->net_bytes_sent = sent;
+    e->net_bytes_received = received;
+    e->net_state = state;
+    e->net_dir = dir;
+    if (start)
+        e->net_duration_ns = e->time_boot_ns - start;
     net_actor(e);
     submit(e);
     return 0;

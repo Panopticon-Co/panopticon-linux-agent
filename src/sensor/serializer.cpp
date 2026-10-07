@@ -477,9 +477,16 @@ std::string record_serializer::network_event(const network_record& record, const
     out.key("network").begin_object();
     out.field("transport", net.protocol);
     out.field("family", net.family == "inet" ? "ipv4" : "ipv6");
-    out.field("direction", net.operation == network_operation::connect || net.operation == network_operation::udp_flow ? "outbound"
-                           : net.operation == network_operation::accept ? "inbound"
-                                                                        : "listen");
+    const auto direction = [&]() -> std::string {
+        switch (net.operation) {
+        case network_operation::connect:
+        case network_operation::udp_flow: return "outbound";
+        case network_operation::accept: return "inbound";
+        case network_operation::close: return net.direction.empty() ? "unknown" : net.direction;
+        default: return "listen";
+        }
+    }();
+    out.field("direction", direction);
     out.key("local").begin_object();
     out.field("ip", net.local_address);
     out.field("port", static_cast<std::uint32_t>(net.local_port));
@@ -499,6 +506,11 @@ std::string record_serializer::network_event(const network_record& record, const
     out.field("socket_inode", net.inode);
     out.field("uid", net.uid);
     if (net.holders > 1U) out.field("holders", net.holders);
+    if (net.operation == network_operation::close) {
+        out.field("bytes_sent", net.bytes_sent);
+        out.field("bytes_received", net.bytes_received);
+        if (net.duration_ns != 0U) out.field("duration_ns", net.duration_ns);
+    }
     out.end_object();
     out.key("unavailable").begin_array();
     for (const auto& field : unavailable) {

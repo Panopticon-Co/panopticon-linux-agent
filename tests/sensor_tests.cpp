@@ -897,6 +897,60 @@ void test_pipeline_enriches_file_events() {
     }
 }
 
+void test_pipeline_tcp_close_event() {
+    const auto root = fresh_directory("closeproc");
+    fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
+    fake_process{100U, 1U, "curl", 500U, "/usr/bin/curl", {"curl", "https://example.com"}}.write(root);
+    raw_network_event seen_open;
+    seen_open.operation = network_operation::close;
+    seen_open.protocol = "tcp";
+    seen_open.family = "inet";
+    seen_open.local_address = "10.0.0.5";
+    seen_open.local_port = 51000U;
+    seen_open.remote_address = "93.184.216.34";
+    seen_open.remote_port = 443U;
+    seen_open.state = "established";
+    seen_open.pid = 100U;
+    seen_open.direction = "outbound";
+    seen_open.bytes_sent = 5120U;
+    seen_open.bytes_received = 1048576U;
+    seen_open.duration_ns = 2500000000ULL;
+    raw_network_event predates = seen_open;
+    predates.pid = 4040U;  // gone
+    predates.direction.clear();
+    predates.duration_ns = 0U;
+    predates.state = "close_wait";
+    std::vector<raw_record> script{record_of(seen_open), record_of(predates)};
+    sensor_config config;
+    config.sensor_id = "sensor-test";
+    config.host_id = "host-test";
+    config.proc_root = root;
+    clock_domain clock;
+    std::FILE* stream = std::tmpfile();
+    stream_sink sink{stream};
+    std::vector<std::unique_ptr<provider>> providers;
+    providers.push_back(std::make_unique<scripted_provider>(script, 0U));
+    {
+        sensor_pipeline pipeline{config, {"host-test", "boot-test", "testhost", "sensor-test", "0.1.0", "none"}, clock, sink,
+                                 std::move(providers)};
+        value_of(pipeline.start(), "pipeline start");
+        value_of(pipeline.step(clock_domain::now_monotonic_ns(), std::chrono::milliseconds{0}), "pipeline step");
+    }
+    const auto lines = lines_of(stream);
+    std::fclose(stream);
+    std::vector<std::string> closes;
+    for (const auto& line : lines) {
+        if (contains(line, "\"type\":\"network.close\"")) closes.push_back(line);
+    }
+    require(closes.size() == 2U, "two network.close records");
+    require(contains(closes[0], "\"direction\":\"outbound\"") && contains(closes[0], "\"bytes_sent\":5120,\"bytes_received\":1048576,\"duration_ns\":2500000000") &&
+                contains(closes[0], "\"name\":\"curl\""),
+            "counters, duration and the closing process: " + closes[0]);
+    require(contains(closes[1], "\"direction\":\"unknown\"") && contains(closes[1], "\"state\":\"close_wait\"") && !contains(closes[1], "duration_ns") &&
+                contains(closes[1], "{\"field\":\"process\",\"reason\":\"process_exited\"}"),
+            "a socket opened before the sensor has unknown direction and no duration: " + closes[1]);
+}
+
 void test_pipeline_enriches_network_events() {
     const auto root = fresh_directory("netproc");
     fake_process{1U, 0U, "systemd", 1U, "/usr/lib/systemd/systemd", {"/sbin/init"}, 0U}.write(root);
@@ -1857,6 +1911,7 @@ int main() {
     run("pipeline_exec_stdio_and_interpreter", test_pipeline_exec_stdio_and_interpreter);
     run("pipeline_signal_event", test_pipeline_signal_event);
     run("pipeline_raw_socket_event", test_pipeline_raw_socket_event);
+    run("pipeline_tcp_close_event", test_pipeline_tcp_close_event);
     run("pipeline_emits_host_state_parts", test_pipeline_emits_host_state_parts);
     run("pipeline_reports_records_the_sink_refused", test_pipeline_reports_records_the_sink_refused);
     run("pipeline_rebases_event_times_after_a_clock_step", test_pipeline_rebases_event_times_after_a_clock_step);

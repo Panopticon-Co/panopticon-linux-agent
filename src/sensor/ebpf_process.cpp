@@ -50,10 +50,11 @@ constexpr std::array<hook, 7U> process_hooks{{
 }};
 // Network hooks run in the calling process, so the actor is exact. Connect is the one that makes
 // the provider worth having; the rest are dropped (and reported) when the kernel cannot host them.
-constexpr std::array<hook, 5U> network_hooks{{
+constexpr std::array<hook, 6U> network_hooks{{
     {"on_tcp_connect", "network.connect", true},
     {"on_tcp_accept", "network.accept", false},
     {"on_tcp_listen", "network.listen", false},
+    {"on_tcp_close", "network.close", false},
     {"on_udp_send", "network.udp_flow", false},
     {"on_udp6_send", "network.udp_flow", false},
 }};
@@ -201,6 +202,7 @@ std::vector<raw_record> decode_ebpf_process_sample(const void* data, const std::
     case wire::PAN_EVENT_NET_CONNECT:
     case wire::PAN_EVENT_NET_ACCEPT:
     case wire::PAN_EVENT_NET_LISTEN:
+    case wire::PAN_EVENT_NET_CLOSE:
     case wire::PAN_EVENT_NET_UDP: {
         const bool known_family = event.net_family == 2U || event.net_family == 10U;
         const bool known_proto = event.net_proto == 6U || event.net_proto == 17U;
@@ -225,6 +227,22 @@ std::vector<raw_record> decode_ebpf_process_sample(const void* data, const std::
             net.operation = network_operation::udp_flow;
             hook_name = "udp_sendmsg";
             break;
+        case wire::PAN_EVENT_NET_CLOSE: {
+            static constexpr std::array<const char*, 12U> states{"",          "established", "syn_sent", "syn_recv", "fin_wait1", "fin_wait2",
+                                                                 "time_wait", "close",       "close_wait", "last_ack", "listen",   "closing"};
+            if (event.net_proto != 6U || event.net_state == 0U || event.net_state >= states.size() || event.net_dir > 2U) {
+                if (malformed != nullptr) *malformed = true;
+                return {};
+            }
+            net.operation = network_operation::close;
+            net.state = states[event.net_state];
+            net.direction = event.net_dir == 1U ? "outbound" : event.net_dir == 2U ? "inbound" : "";
+            net.bytes_sent = event.net_bytes_sent;
+            net.bytes_received = event.net_bytes_received;
+            net.duration_ns = event.net_duration_ns;
+            hook_name = "tcp_close";
+            break;
+        }
         default:
             net.operation = network_operation::connect;
             net.state = "syn_sent";

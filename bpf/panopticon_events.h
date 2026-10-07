@@ -44,6 +44,7 @@ enum pan_event_kind {
     PAN_EVENT_DNS_QUERY = 15,   /* UDP datagram to port 53; its first bytes ride in `filename` */
     PAN_EVENT_SIGNAL = 16,      /* a process sent a terminating or stopping signal to another process */
     PAN_EVENT_RAW_SOCKET = 17,  /* a process created a raw (AF_INET/AF_INET6 SOCK_RAW) or packet (AF_PACKET) socket */
+    PAN_EVENT_NET_CLOSE = 18,   /* a TCP socket was closed; carries byte counts and, when the sensor saw it open, duration */
 };
 
 /* What a standard descriptor referred to when the program began (exec-time stdio, matrix G5). */
@@ -115,12 +116,16 @@ struct pan_event {
     u8 net_proto;   /* network: 6 = TCP, 17 = UDP */
     u16 net_sport;  /* network: local port, host order */
     u16 net_dport;  /* network: remote port, host order; 0 for a listener */
-    u16 net_pad;
+    u8 net_dir;     /* network close: 0 unknown (opened before the sensor), 1 outbound, 2 inbound */
+    u8 net_state;   /* network close: TCP state when close() began */
     u8 net_saddr[16]; /* network: local address (IPv4 uses the first 4 bytes) */
     u8 net_daddr[16]; /* network: remote address */
 
     u64 mem_addr;   /* memory: vma start (mprotect); 0 for mmap, which has no address at the hook */
     u64 mem_length; /* memory: vma length (mprotect); 0 for mmap */
+    u64 net_bytes_sent;     /* network close: payload bytes the peer acknowledged */
+    u64 net_bytes_received; /* network close: payload bytes received in order */
+    u64 net_duration_ns;    /* network close: connect/accept to close; 0 when the open was not seen */
     u32 bpf_cmd;    /* bpf: BPF_* command */
     u32 bpf_type;   /* bpf: program type (PROG_LOAD) or attach type (PROG_ATTACH, LINK_CREATE) */
     u8 mem_backing; /* memory: pan_mem_backing */

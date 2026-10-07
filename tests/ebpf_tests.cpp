@@ -276,6 +276,50 @@ void test_decode_raw_socket() {
     reject(2U, 200U, "a type past the table is malformed");
 }
 
+void test_decode_tcp_close() {
+    clock_domain clock;
+    auto event = base_event(wire::PAN_EVENT_NET_CLOSE);
+    event.net_family = 2U;
+    event.net_proto = 6U;
+    event.net_sport = 41000U;
+    event.net_dport = 443U;
+    event.net_state = 1U;
+    event.net_dir = 1U;
+    event.net_bytes_sent = 5120U;
+    event.net_bytes_received = 1048576U;
+    event.net_duration_ns = 2500000000ULL;
+    put_address(event.net_saddr, "10.0.2.15", AF_INET);
+    put_address(event.net_daddr, "198.51.100.7", AF_INET);
+    bool malformed = true;
+    auto records = decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed);
+    require(!malformed && records.size() == 1U, "a close decodes");
+    const auto& closed = std::get<raw_network_event>(records[0].payload);
+    require(closed.operation == network_operation::close && closed.state == "established" && closed.direction == "outbound" &&
+                closed.bytes_sent == 5120U && closed.bytes_received == 1048576U && closed.duration_ns == 2500000000ULL &&
+                closed.remote_address == "198.51.100.7" && closed.remote_port == 443U && closed.local_port == 41000U,
+            "close carries state, direction, counters, duration and endpoints");
+    require(records[0].source.mechanism == "tcp_close", "provenance names the hook");
+
+    event.net_dir = 0U;
+    event.net_duration_ns = 0U;
+    event.net_state = 8U;
+    records = decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed);
+    const auto& unseen = std::get<raw_network_event>(records[0].payload);
+    require(unseen.direction.empty() && unseen.duration_ns == 0U && unseen.state == "close_wait", "a socket opened before the sensor has no direction or duration");
+
+    const auto reject = [&](const std::uint8_t state, const std::uint8_t direction, const std::uint8_t proto, const char* why) {
+        event.net_state = state;
+        event.net_dir = direction;
+        event.net_proto = proto;
+        malformed = false;
+        require(decode_ebpf_process_sample(&event, header_size, clock, {}, &malformed).empty() && malformed, why);
+    };
+    reject(0U, 1U, 6U, "state 0 is malformed");
+    reject(12U, 1U, 6U, "a state past the table is malformed");
+    reject(1U, 3U, 6U, "an unknown direction is malformed");
+    reject(1U, 1U, 17U, "only TCP closes are reported");
+}
+
 void test_decode_network() {
     clock_domain clock;
     auto connect = base_event(wire::PAN_EVENT_NET_CONNECT);
@@ -652,6 +696,82 @@ void test_live_network_connect_accept_listen_udp() {
     });
     require(connects[0]->source.mechanism == "tcp_connect" && std::get<raw_network_event>(connects[0]->payload).remote_address == "127.0.0.1",
             "connect provenance and destination");
+}
+
+// A real loopback conversation with known sizes: the client sends 1000 bytes, the server answers
+// with 300, both ends close. Each end's close names itself, the direction it saw, the byte counts
+// the kernel kept and a duration, and a socket that never connected and a listener are not reported.
+void test_live_tcp_close_bytes() {
+    live_provider live{ebpf_role::network};
+    if (!live.begin("live_tcp_close_bytes")) return;
+
+    const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    require(::bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0 && ::listen(server, 1) == 0, "bind and listen");
+    socklen_t length = sizeof(address);
+    require(::getsockname(server, reinterpret_cast<sockaddr*>(&address), &length) == 0, "getsockname");
+    const auto port = ntohs(address.sin_port);
+
+    const int idle = ::socket(AF_INET, SOCK_STREAM, 0);  // never connected
+    const int client = ::socket(AF_INET, SOCK_STREAM, 0);
+    require(::connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0, "connect");
+    const int peer = ::accept(server, nullptr, nullptr);
+    require(peer >= 0, "accept");
+
+    std::vector<char> out(1000U, 'x');
+    std::vector<char> back(300U, 'y');
+    std::vector<char> sink(2048U);
+    const auto drain = [&](const int fd, const std::size_t wanted) {
+        std::size_t got = 0U;
+        while (got < wanted) {
+            const auto n = ::recv(fd, sink.data(), sink.size(), 0);
+            if (n <= 0) break;
+            got += static_cast<std::size_t>(n);
+        }
+        return got;
+    };
+    require(::send(client, out.data(), out.size(), 0) == 1000, "client send");
+    require(drain(peer, 1000U) == 1000U, "peer received everything");
+    require(::send(peer, back.data(), back.size(), 0) == 300, "peer send");
+    require(drain(client, 300U) == 300U, "client received everything");
+    ::close(peer);
+    ::close(client);
+    ::close(idle);
+    ::close(server);
+
+    const auto self = static_cast<std::uint32_t>(::getpid());
+    const auto closes = [&](const records_t& seen) {
+        return select<raw_network_event>(seen, [&](const raw_network_event& e) {
+            return e.pid == self && e.operation == network_operation::close && (e.remote_port == port || e.local_port == port);
+        });
+    };
+    records_t all;
+    require(collect(live.queue(), all, [&](const records_t& seen) { return closes(seen).size() >= 2U; }), "both ends of the connection reported a close");
+    (void)collect(live.queue(), all, [&](const records_t& seen) { return closes(seen).size() > 2U; }, std::chrono::milliseconds{500});
+    const auto found = closes(all);
+    require(found.size() == 2U, "two closes: the unconnected socket and the listener are not reported");
+    bool saw_client = false;
+    bool saw_peer = false;
+    for (const auto* record : found) {
+        const auto& event = std::get<raw_network_event>(record->payload);
+        const auto detail = "direction=" + event.direction + " state=" + event.state + " sent=" + std::to_string(event.bytes_sent) +
+                            " received=" + std::to_string(event.bytes_received) + " duration=" + std::to_string(event.duration_ns);
+        // Exact payload bytes: the kernel's SYN and FIN sequence numbers are taken out in the program.
+        // The peer closed first, so the client's socket was in CLOSE_WAIT when it closed.
+        if (event.direction == "outbound" && event.remote_port == port) {
+            saw_client = event.bytes_sent == 1000U && event.bytes_received == 300U && event.duration_ns > 0U && event.state == "close_wait";
+            require(saw_client, "client close counters: " + detail);
+        } else if (event.direction == "inbound" && event.local_port == port) {
+            saw_peer = event.bytes_sent == 300U && event.bytes_received == 1000U && event.duration_ns > 0U && event.state == "established";
+            require(saw_peer, "peer close counters: " + detail);
+        } else {
+            require(false, "an unexpected close: " + detail);
+        }
+    }
+    require(saw_client && saw_peer, "one outbound and one inbound close");
+    require(live.provider().take_losses() == 0U, "no ring buffer losses");
 }
 
 // The test process asks the kernel for each thing the security hooks report and nothing else, so
@@ -1286,6 +1406,7 @@ int main(int argc, char** argv) {
     run("decode_exec_stdio_and_interpreter", test_decode_exec_stdio_and_interpreter);
     run("decode_signal", test_decode_signal);
     run("decode_raw_socket", test_decode_raw_socket);
+    run("decode_tcp_close", test_decode_tcp_close);
     run("decode_network", test_decode_network);
     run("decode_security", test_decode_security);
     run("decode_namespace_change", test_decode_namespace_change);
@@ -1304,6 +1425,7 @@ int main(int argc, char** argv) {
     run("live_ptrace_access", test_live_ptrace_access);
     run("live_thread_group_exit_is_one_process_exit", test_live_thread_group_exit_is_one_process_exit);
     run("live_network_connect_accept_listen_udp", test_live_network_connect_accept_listen_udp);
+    run("live_tcp_close_bytes", test_live_tcp_close_bytes);
     run("live_executable_memory_and_bpf", test_live_executable_memory_and_bpf);
     run("live_namespace_change", test_live_namespace_change);
     run("live_dns_query", test_live_dns_query);

@@ -123,6 +123,7 @@ enum class network_operation : std::uint8_t {
     accept,   // an inbound connection was seen on a local listening port
     listen,   // a socket started listening (TCP) or was bound (UDP)
     udp_flow, // first datagram of a UDP flow from a process to a destination, once per window
+    close,    // a TCP socket was closed (byte counts and duration when known)
 };
 [[nodiscard]] const char* to_string(network_operation value) noexcept;
 
@@ -141,6 +142,11 @@ struct raw_network_event {
     std::uint32_t uid{};
     std::uint32_t pid{};
     std::uint32_t holders{};  // processes holding the socket (a forked server shares it)
+    // close only
+    std::string direction;             // outbound, inbound; empty when the sensor did not see the socket open
+    std::uint64_t bytes_sent{};
+    std::uint64_t bytes_received{};
+    std::uint64_t duration_ns{};       // 0 when the open was not seen
     std::vector<unavailable_field> unavailable;
 };
 
