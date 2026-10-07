@@ -448,6 +448,49 @@ void test_store_without_usable_keys() {
     only_change(store.refresh(now), "loaded", "no_previous_state");
 }
 
+void test_store_revokes_the_policy_of_a_removed_key() {
+    store_fixture fx{"revoke"};
+    const auto now = now_s();
+    const auto second = make_key();
+    put(fx.options.keys_path, key_line(fx.key) + key_line(second));
+    policy_store store{fx.options};
+    put(fx.options.policy_path, signed_bundle(second, fields(4U, now), body_v));
+    only_change(store.refresh(now), "loaded", "no_previous_state");
+
+    // Removing a key that signed nothing in force changes nothing.
+    put(fx.options.keys_path, key_line(second));
+    require(store.refresh(now).empty() && store.active(now) != nullptr, "an unrelated key's removal leaves the policy in force");
+    require(store.health(now).state == "active", "and health stays active");
+
+    // Removing the key of the policy in force, from a list that still loads, takes the policy out of force.
+    put(fx.options.keys_path, key_line(fx.key));
+    const auto revoked = only_change(store.refresh(now), "removed", "key_revoked");
+    require(revoked.version == 4U && !revoked.key_id.empty(), "the revocation names the policy and its key");
+    require(revoked.detail.find("no longer pins") != std::string::npos, "and says why");
+    require(store.active(now) == nullptr, "a policy of a revoked key makes no decisions");
+    require(store.health(now).state == "degraded" && store.health(now).reason.find("key_revoked") != std::string::npos, "health says so");
+    require(store.refresh(now).empty(), "the revocation is recorded once, and the file is not judged again in the same pass");
+
+    // Pinning the key again puts the same policy back (same version, same content: a resume).
+    put(fx.options.keys_path, key_line(fx.key) + key_line(second));
+    only_change(store.refresh(now), "loaded", "resumed");
+    require(store.active(now) != nullptr && store.health(now).state == "active", "the policy is back in force");
+
+    // Revoked for good: a newer policy signed by a pinned key replaces it, and the rollback record still stands.
+    put(fx.options.keys_path, key_line(fx.key));
+    only_change(store.refresh(now), "removed", "key_revoked");
+    fx.write(fields(3U, now));
+    only_change(store.refresh(now), "rejected", "rollback");
+    fx.write(fields(5U, now));
+    only_change(store.refresh(now), "loaded", "updated");
+    require(store.active(now)->header.version == 5U, "a policy of a pinned key is in force");
+
+    // A key list that cannot be read is not a revocation: the keys loaded before stay, and health says so.
+    put(fx.options.keys_path, "not a key\n");
+    require(store.refresh(now).empty() && store.active(now) != nullptr, "an unreadable key list leaves the policy in force");
+    require(store.health(now).state == "degraded", "and is reported");
+}
+
 }  // namespace
 
 int main() {
@@ -468,6 +511,7 @@ int main() {
         {"store_refuses_bad_signatures_and_scope", test_store_refuses_bad_signatures_and_scope},
         {"store_expiry_removal_and_lost_state", test_store_expiry_removal_and_lost_state},
         {"store_without_usable_keys", test_store_without_usable_keys},
+        {"store_revokes_the_policy_of_a_removed_key", test_store_revokes_the_policy_of_a_removed_key},
     };
     int failures = 0;
     for (const auto& test : tests) {

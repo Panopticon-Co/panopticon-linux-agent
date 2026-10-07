@@ -70,9 +70,11 @@ public:
     // An ES256 signature over `data` by the pinned key `key_id`: valid, unknown_key or bad_signature.
     [[nodiscard]] authorization_verdict verify(std::string_view key_id, std::string_view data, const ec_raw_signature& signature) const;
 
-    // Re-reads the file when it changed since the last load (size or modification time). A changed file that is
-    // invalid keeps the previous keys and reports why through last_error(); a missing file does the same, so
-    // that a transient failure cannot lock an endpoint out, while an emptied file revokes everything.
+    // Re-reads the file when it changed since the last load: a different file (device, inode), size, modification
+    // time or change time (ctime moves even when a replacement preserves the mtime), or any file written within the
+    // last two seconds, because a second write in the same timestamp tick would leave the identity unchanged. A
+    // changed file that is invalid keeps the previous keys and reports why through last_error(); a missing file does
+    // the same, so that a transient failure cannot lock an endpoint out, while an emptied file revokes everything.
     void refresh();
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] std::string last_error() const;
@@ -88,6 +90,9 @@ private:
     std::map<std::string, ec_public_key_point> keys_;
     std::int64_t file_size_{-1};
     std::int64_t file_mtime_ns_{-1};
+    std::int64_t file_ctime_ns_{-1};
+    std::uint64_t file_dev_{0U};
+    std::uint64_t file_inode_{0U};
     std::string last_error_;
 };
 

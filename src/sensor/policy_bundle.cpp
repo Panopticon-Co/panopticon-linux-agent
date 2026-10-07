@@ -250,6 +250,22 @@ std::vector<policy_change> policy_store::refresh(const std::int64_t now_unix) {
     const bool keys_changed = fingerprint != keys_fingerprint_;
     keys_fingerprint_ = std::move(fingerprint);
 
+    // Revocation: removing a key from a key list that loaded cleanly withdraws the authority of everything it signed,
+    // the policy in force included. (A key list that cannot be read is no list: the keys loaded before stay, and health
+    // says so. Only a list that was read and no longer names the key revokes it.)
+    bool revoked = false;
+    if (active_ && keys_ && keys_error_.empty()) {
+        const auto ids = keys_->key_ids();
+        if (std::find(ids.begin(), ids.end(), active_->header.key_id) == ids.end()) {
+            changes.push_back(about_active("removed", "key_revoked",
+                                           describe(*active_) + " is signed with key " + active_->header.key_id +
+                                               ", which this endpoint no longer pins; it is out of force and makes no decisions until a policy signed by a pinned key is in place"));
+            refused_reason_ = "key_revoked: key " + active_->header.key_id + " is no longer pinned";
+            active_.reset();
+            revoked = true;
+        }
+    }
+
     const auto path = options_.policy_path.string();
     struct stat info {};
     if (::stat(options_.policy_path.c_str(), &info) != 0) {
@@ -276,14 +292,15 @@ std::vector<policy_change> policy_store::refresh(const std::int64_t now_unix) {
         // Written within the last two seconds: a further write in the same timestamp tick would leave the identity
         // unchanged, so the content is checked again (the digest makes that free of new records).
         const bool racy = static_cast<std::int64_t>(info.st_mtim.tv_sec) >= now_unix - 1 || static_cast<std::int64_t>(info.st_ctim.tv_sec) >= now_unix - 1;
-        // A changed key set can make a refused file valid (its key was pinned), so it is a reason to decide again. The
-        // policy in force stays even if its key is removed: a key file that changed is no reason to stop detecting.
-        if (size != file_size_ || mtime != file_mtime_ns_ || ctime != file_ctime_ns_ || inode != file_inode_ || racy || keys_changed) {
+        // A changed key set can make a refused file valid (its key was pinned), so it is a reason to decide again. When
+        // it just revoked the policy in force, the file is not judged again in the same pass: the revocation record says
+        // all there is to say, and a second, "rejected" record would only repeat it.
+        if (size != file_size_ || mtime != file_mtime_ns_ || ctime != file_ctime_ns_ || inode != file_inode_ || racy || (keys_changed && !revoked)) {
             file_size_ = size;
             file_mtime_ns_ = mtime;
             file_ctime_ns_ = ctime;
             file_inode_ = inode;
-            if (auto change = consider(now_unix, keys_changed)) changes.push_back(std::move(*change));
+            if (auto change = consider(now_unix, keys_changed && !revoked)) changes.push_back(std::move(*change));
         }
     }
     if (active_ && now_unix >= active_->header.expires_unix && !expired_reported_) {

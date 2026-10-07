@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <sstream>
 
@@ -150,6 +151,9 @@ result<std::unique_ptr<command_keyring>> command_keyring::load(const std::filesy
     if (::stat(path.c_str(), &info) == 0) {
         ring->file_size_ = static_cast<std::int64_t>(info.st_size);
         ring->file_mtime_ns_ = static_cast<std::int64_t>(info.st_mtim.tv_sec) * 1'000'000'000LL + info.st_mtim.tv_nsec;
+        ring->file_ctime_ns_ = static_cast<std::int64_t>(info.st_ctim.tv_sec) * 1'000'000'000LL + info.st_ctim.tv_nsec;
+        ring->file_dev_ = static_cast<std::uint64_t>(info.st_dev);
+        ring->file_inode_ = static_cast<std::uint64_t>(info.st_ino);
     }
     return ring;
 }
@@ -202,14 +206,24 @@ void command_keyring::refresh() {
     }
     const auto size = static_cast<std::int64_t>(info.st_size);
     const auto mtime = static_cast<std::int64_t>(info.st_mtim.tv_sec) * 1'000'000'000LL + info.st_mtim.tv_nsec;
+    const auto ctime = static_cast<std::int64_t>(info.st_ctim.tv_sec) * 1'000'000'000LL + info.st_ctim.tv_nsec;
+    const auto dev = static_cast<std::uint64_t>(info.st_dev);
+    const auto inode = static_cast<std::uint64_t>(info.st_ino);
+    // Written within the last two seconds: another write in the same timestamp tick would leave size and times as they
+    // were, so the file is read again (it is a few lines; the next pass finds it quiet).
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+    const bool racy = static_cast<std::int64_t>(info.st_mtim.tv_sec) >= now - 1 || static_cast<std::int64_t>(info.st_ctim.tv_sec) >= now - 1;
     {
         const std::lock_guard lock{mutex_};
-        if (size == file_size_ && mtime == file_mtime_ns_) return;
+        if (!racy && size == file_size_ && mtime == file_mtime_ns_ && ctime == file_ctime_ns_ && dev == file_dev_ && inode == file_inode_) return;
     }
     auto keys = read_file(path_, label_);
     const std::lock_guard lock{mutex_};
     file_size_ = size;
     file_mtime_ns_ = mtime;
+    file_ctime_ns_ = ctime;
+    file_dev_ = dev;
+    file_inode_ = inode;
     if (!succeeded(keys)) {
         last_error_ = std::get<error>(keys).message + "; the previous keys stay in force";
         return;
