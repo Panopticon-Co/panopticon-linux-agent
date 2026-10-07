@@ -614,6 +614,134 @@ void test_wal_detects_corruption_and_enforces_quota() {
     require(!recovery.empty() && recovery.front().reason == "corrupt_segment", "corruption reported");
 }
 
+std::unique_ptr<write_ahead_log> open_wal(const fs::path& directory) {
+    return std::move(std::get<std::unique_ptr<write_ahead_log>>(write_ahead_log::open(small_wal(directory))));
+}
+
+std::vector<fs::path> wal_segments(const fs::path& directory) {
+    std::vector<fs::path> segments;
+    for (const auto& entry : fs::directory_iterator{directory}) {
+        if (entry.path().filename().string().rfind("wal-", 0U) == 0U) segments.push_back(entry.path());
+    }
+    std::sort(segments.begin(), segments.end());
+    return segments;
+}
+
+// Everything the log will hand out from `from`, the way the uplink asks for it: read, then read after the last seq.
+std::vector<std::uint64_t> drain_wal(write_ahead_log& log, std::uint64_t from) {
+    std::vector<std::uint64_t> seqs;
+    for (int guard = 0; guard < 64; ++guard) {
+        const auto records = value_of(log.read(from, 100U, 1U << 20U), "drain read");
+        if (records.empty()) break;
+        for (const auto& record : records) seqs.push_back(record.seq);
+        from = records.back().seq + 1U;
+    }
+    return seqs;
+}
+
+// A segment deleted behind a running log is reported with its exact range, and delivery carries on with what is left.
+void test_wal_removed_sealed_segment_is_reported_and_skipped() {
+    const auto directory = fresh_directory("walremoved");
+    auto log = open_wal(directory);
+    const std::string payload(200U, 'p');
+    for (std::uint64_t seq = 1U; seq <= 40U; ++seq) value_of(log->append(seq, payload), "append");
+    value_of(log->sync(0U, true), "sync");
+    value_of(log->acknowledge(5U), "ack");
+    const auto segments = wal_segments(directory);
+    require(segments.size() >= 3U, "records span at least three segments");
+    fs::remove(segments.front());
+    require(log->verify_storage() == 1U, "one segment found missing");
+    const auto losses = log->take_losses();
+    require(losses.size() == 1U && losses[0].reason == "removed", "removal reported as a loss");
+    require(losses[0].first_seq == 6U && losses[0].records == losses[0].last_seq - 5U, "only unacknowledged records of the segment are lost");
+    require(log->metrics().dropped_records == losses[0].records, "dropped_records counts the removal");
+    const auto seqs = drain_wal(*log, 6U);
+    require(!seqs.empty() && seqs.front() == losses[0].last_seq + 1U && seqs.back() == 40U, "delivery resumes after the removed range");
+    require(log->next_seq() == 41U, "no seq is reused");
+
+    // A reader that finds the file missing before verify_storage does is not wedged either.
+    const auto directory_two = fresh_directory("walremoved2");
+    auto second = open_wal(directory_two);
+    for (std::uint64_t seq = 1U; seq <= 40U; ++seq) value_of(second->append(seq, payload), "append");
+    value_of(second->sync(0U, true), "sync");
+    fs::remove(wal_segments(directory_two).front());
+    const auto delivered = drain_wal(*second, 1U);
+    require(!delivered.empty() && delivered.back() == 40U, "read survives a missing segment and reaches the end");
+    const auto reported = second->take_losses();
+    require(reported.size() == 1U && reported[0].reason == "removed" && reported[0].first_seq == 1U, "missing segment reported by the reader");
+    log.reset();
+    second.reset();
+
+    // A restart after the removal opens, and carries on from the remaining records.
+    auto reopened = open_wal(directory);
+    require(reopened->next_seq() == 41U, "seq continues after restart");
+}
+
+// The segment being written is deleted: appends were going to an unlinked file. Nothing may be silently lost.
+void test_wal_removed_active_segment_and_directory() {
+    const auto directory = fresh_directory("walactive");
+    auto log = open_wal(directory);
+    for (std::uint64_t seq = 1U; seq <= 5U; ++seq) value_of(log->append(seq, "before"), "append");
+    value_of(log->sync(0U, true), "sync");
+    fs::remove(wal_segments(directory).front());
+    require(log->verify_storage() == 1U, "deleted active segment found");
+    auto losses = log->take_losses();
+    require(losses.size() == 1U && losses[0].reason == "removed" && losses[0].first_seq == 1U && losses[0].last_seq == 5U && losses[0].records == 5U,
+            "the five unacknowledged records are reported with their range");
+    require(log->verify_storage() == 0U, "second check is quiet");
+    value_of(log->append(6U, "after"), "append after removal");
+    value_of(log->sync(0U, true), "sync after removal");
+    require(drain_wal(*log, 1U) == std::vector<std::uint64_t>{6U}, "new records land in a new segment and are readable");
+
+    // The whole directory.
+    fs::remove_all(directory);
+    require(log->verify_storage() == 1U, "removed directory found");
+    losses = log->take_losses();
+    require(losses.size() == 1U && losses[0].first_seq == 6U && losses[0].last_seq == 6U, "record 6 reported");
+    require(fs::is_directory(directory), "directory is created again");
+    const auto mode = fs::status(directory).permissions();
+    require((mode & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none, "directory is private again");
+    value_of(log->append(7U, "again"), "append into the new directory");
+    value_of(log->sync(0U, true), "sync into the new directory");
+    require(drain_wal(*log, 7U) == std::vector<std::uint64_t>{7U}, "readable");
+    require(log->next_seq() == 8U, "no seq is reused");
+
+    // Acknowledged records are not reported as lost when their segment goes: they were delivered.
+    value_of(log->acknowledge(7U), "ack");
+    fs::remove(wal_segments(directory).front());
+    require(log->verify_storage() == 1U, "found");
+    require(log->take_losses().empty(), "nothing unacknowledged was lost");
+}
+
+// A frame that fails its checksum while the log runs costs the rest of that segment, not the stream.
+void test_wal_runtime_corruption_is_isolated() {
+    const auto directory = fresh_directory("walruntime");
+    auto log = open_wal(directory);
+    const std::string payload(200U, 'p');
+    for (std::uint64_t seq = 1U; seq <= 40U; ++seq) value_of(log->append(seq, payload), "append");
+    value_of(log->sync(0U, true), "sync");
+    const auto segments = wal_segments(directory);
+    require(segments.size() >= 3U, "records span at least three segments");
+    {
+        std::fstream file{segments[1], std::ios::in | std::ios::out | std::ios::binary};
+        file.seekp(static_cast<std::streamoff>(wal_header_bytes + payload.size() + wal_header_bytes + 10U));  // second frame's payload
+        file.put('y');
+    }
+    const auto seqs = drain_wal(*log, 1U);
+    const auto losses = log->take_losses();
+    require(losses.size() == 1U && losses[0].reason == "corrupt_segment", "corruption reported once");
+    const auto lost_first = losses[0].first_seq;
+    const auto lost_last = losses[0].last_seq;
+    require(lost_first > 1U && lost_last >= lost_first && lost_last < 40U && losses[0].records == lost_last - lost_first + 1U, "range is exact");
+    require(!seqs.empty() && seqs.front() == 1U && seqs.back() == 40U, "delivery reaches the newest record");
+    for (std::size_t index = 1U; index < seqs.size(); ++index) require(seqs[index] > seqs[index - 1U], "seqs only increase");
+    for (const auto seq : seqs) require(seq < lost_first || seq > lost_last, "nothing inside the lost range is delivered");
+    require(seqs.size() == 40U - losses[0].records, "everything outside the lost range is delivered");
+    require(log->next_seq() == 41U, "no seq is reused");
+    require(drain_wal(*log, 1U) == seqs, "a second pass sees the same stream");
+    require(log->take_losses().empty(), "the loss is reported once");
+}
+
 // ---- serializer and pipeline ----------------------------------------------------------------
 
 class scripted_provider final : public provider {
@@ -2066,6 +2194,9 @@ int main() {
     run("crc32c_known_vector", test_crc32c_known_vector);
     run("wal_append_read_ack_and_recover", test_wal_append_read_ack_and_recover);
     run("wal_detects_corruption_and_enforces_quota", test_wal_detects_corruption_and_enforces_quota);
+    run("wal_removed_sealed_segment_is_reported_and_skipped", test_wal_removed_sealed_segment_is_reported_and_skipped);
+    run("wal_removed_active_segment_and_directory", test_wal_removed_active_segment_and_directory);
+    run("wal_runtime_corruption_is_isolated", test_wal_runtime_corruption_is_isolated);
     run("pipeline_end_to_end_with_scripted_provider", test_pipeline_end_to_end_with_scripted_provider);
     run("pipeline_exec_stdio_and_interpreter", test_pipeline_exec_stdio_and_interpreter);
     run("pipeline_signal_event", test_pipeline_signal_event);

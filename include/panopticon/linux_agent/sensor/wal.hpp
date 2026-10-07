@@ -32,7 +32,7 @@ struct wal_options {
 
 // Range of records that no longer exist: torn tail at recovery, or dropped at quota.
 struct wal_loss {
-    std::string reason;  // "torn_tail", "corrupt_segment", "gap", "quota"
+    std::string reason;  // "torn_tail", "corrupt_segment", "gap", "quota", "removed"
     std::uint64_t first_seq{};
     std::uint64_t last_seq{};
     std::uint64_t records{};
@@ -83,6 +83,14 @@ public:
     // Persists the delivery cursor and deletes segments that are fully acknowledged.
     [[nodiscard]] result<bool> acknowledge(std::uint64_t seq);
 
+    // Notices state removed from under the running log: a segment file deleted (or replaced) behind its back,
+    // or the whole directory. Records that lived only in such a segment and were not yet acknowledged are
+    // reported as a "removed" loss with their exact seq range (the log keeps the last seq of every segment even
+    // when the file is gone, so the range is exact), the segment leaves the index, and when the active segment
+    // is gone the directory is created again and the next append starts a new segment. Returns how many
+    // segments were found missing. Cheap (one stat per segment); the pipeline calls it about once a second.
+    [[nodiscard]] std::size_t verify_storage();
+
     [[nodiscard]] std::vector<wal_loss> take_losses();
     [[nodiscard]] wal_metrics metrics() const;
 
@@ -100,6 +108,9 @@ private:
     result<bool> persist_cursor(std::uint64_t seq);
     void enforce_quota();
     void delete_segment(std::size_t index);
+    // Both called with the mutex held.
+    std::size_t drop_missing_segments();
+    void isolate_corrupt_tail(std::size_t index, std::uint64_t bad_seq, std::uint64_t offset);
 
     wal_options options_;
     mutable std::mutex mutex_;

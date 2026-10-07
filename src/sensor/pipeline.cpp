@@ -810,6 +810,10 @@ result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
             reconcile_now = true;
         }
     }
+    if (now_ns - last_storage_check_ns_ >= ns_per_second) {
+        last_storage_check_ns_ = now_ns;
+        sink_.verify_storage();
+    }
     for (const auto& loss : sink_.take_losses()) {
         loss_report report{"wal", loss.records, {{loss.reason, loss.records}}, {}};
         report.detail = loss.reason + ": seq " + std::to_string(loss.first_seq) +

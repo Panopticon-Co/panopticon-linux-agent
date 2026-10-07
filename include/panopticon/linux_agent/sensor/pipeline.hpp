@@ -98,6 +98,8 @@ public:
     [[nodiscard]] virtual result<bool> flush(std::uint64_t now_ns, bool force) = 0;
     [[nodiscard]] virtual std::vector<wal_loss> take_losses() { return {}; }
     [[nodiscard]] virtual wal_metrics metrics() const { return {}; }
+    // Checks that the storage behind the sink still exists (see write_ahead_log::verify_storage).
+    virtual void verify_storage() {}
 };
 
 class wal_sink final : public record_sink {
@@ -108,6 +110,7 @@ public:
     [[nodiscard]] result<bool> flush(std::uint64_t now_ns, bool force) override { return log_->sync(now_ns, force); }
     [[nodiscard]] std::vector<wal_loss> take_losses() override { return log_->take_losses(); }
     [[nodiscard]] wal_metrics metrics() const override { return log_->metrics(); }
+    void verify_storage() override { (void)log_->verify_storage(); }
     [[nodiscard]] write_ahead_log& log() noexcept { return *log_; }
 
 private:
@@ -229,6 +232,7 @@ private:
     std::vector<loss_report> pending_losses_;
     std::uint64_t unwritten_reported_{};
     std::uint64_t last_loss_retry_ns_{};
+    std::uint64_t last_storage_check_ns_{};
     std::string last_write_error_;
     bool write_failed_{false};
     std::uint64_t started_ns_{};

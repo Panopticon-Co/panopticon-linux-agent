@@ -307,6 +307,78 @@ void write_ahead_log::enforce_quota() {
     }
 }
 
+std::size_t write_ahead_log::verify_storage() {
+    const std::lock_guard<std::mutex> lock{mutex_};
+    return drop_missing_segments();
+}
+
+std::size_t write_ahead_log::drop_missing_segments() {
+    std::size_t removed = 0U;
+    for (std::size_t index = segments_.size(); index-- > 0U;) {
+        const bool active = active_fd_ >= 0 && index + 1U == segments_.size();
+        struct stat by_path {};
+        bool gone = ::lstat(segments_[index].path.c_str(), &by_path) != 0;
+        if (!gone && active) {
+            // The path can name a different file than the descriptor we write to (deleted and recreated), or the
+            // descriptor can name a file with no name left: either way our appends are going nowhere.
+            struct stat by_fd {};
+            gone = ::fstat(active_fd_, &by_fd) != 0 || by_fd.st_nlink == 0U || by_fd.st_ino != by_path.st_ino || by_fd.st_dev != by_path.st_dev;
+        }
+        if (!gone) continue;
+        ++removed;
+        const auto& lost = segments_[index];
+        if (lost.last_seq > acknowledged_seq_) {
+            const auto first = std::max(lost.first_seq, acknowledged_seq_ + 1U);
+            losses_.push_back({"removed", first, lost.last_seq, lost.last_seq - first + 1U, lost.bytes});
+            dropped_records_ += lost.last_seq - first + 1U;
+        }
+        if (active) {
+            ::close(active_fd_);  // never synced into a file that has no name: nothing pending is durable
+            active_fd_ = -1;
+            durable_seq_ = next_seq_ - 1U;
+            pending_bytes_ = 0U;
+        }
+        segments_.erase(segments_.begin() + static_cast<std::ptrdiff_t>(index));
+        reader_seq_.reset();
+    }
+    if (removed > 0U) {
+        // A removed directory has to exist again before the next segment or cursor can be written.
+        std::error_code ignored;
+        std::filesystem::create_directories(options_.directory, ignored);
+        (void)::chmod(options_.directory.c_str(), 0700);
+    }
+    return removed;
+}
+
+// A frame that fails its checksum while the log is running (the file was altered, or the medium rotted): the
+// records from there to the end of the segment can never be delivered. Report them, keep the valid prefix, and
+// seal the segment if it is the one being written so the next append starts a new file.
+void write_ahead_log::isolate_corrupt_tail(const std::size_t index, const std::uint64_t bad_seq, const std::uint64_t offset) {
+    auto& damaged = segments_[index];
+    const bool active = active_fd_ >= 0 && index + 1U == segments_.size();
+    if (damaged.last_seq >= bad_seq && damaged.last_seq > acknowledged_seq_) {
+        const auto first = std::max(bad_seq, acknowledged_seq_ + 1U);
+        losses_.push_back({"corrupt_segment", first, damaged.last_seq, damaged.last_seq - first + 1U, damaged.bytes > offset ? damaged.bytes - offset : 0U});
+        dropped_records_ += damaged.last_seq - first + 1U;
+    }
+    if (active) {
+        (void)::fdatasync(active_fd_);
+        ::close(active_fd_);
+        active_fd_ = -1;
+        durable_seq_ = next_seq_ - 1U;
+        pending_bytes_ = 0U;
+    }
+    reader_seq_.reset();
+    if (bad_seq <= damaged.first_seq) {
+        std::error_code ignored;
+        std::filesystem::remove(damaged.path, ignored);
+        segments_.erase(segments_.begin() + static_cast<std::ptrdiff_t>(index));
+        return;
+    }
+    damaged.last_seq = bad_seq - 1U;
+    damaged.bytes = offset;
+}
+
 void write_ahead_log::delete_segment(const std::size_t index) {
     std::error_code ignored;
     std::filesystem::remove(segments_[index].path, ignored);
@@ -338,13 +410,37 @@ result<std::vector<wal_record>> write_ahead_log::read(const std::uint64_t from_s
     for (; index < segments_.size(); ++index, offset = 0U) {
         const auto& current = segments_[index];
         const int fd = ::open(current.path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-        if (fd < 0) return error{error_code::io_failure, "cannot read write-ahead log segment"};
+        if (fd < 0) {
+            // A segment that is gone must not stop delivery of the ones that are not: report it, and carry on with
+            // the first segment that still holds records at or after where this read has got to.
+            if (errno == ENOENT && drop_missing_segments() > 0U) {
+                const auto resume = records.empty() ? from_seq : records.back().seq + 1U;
+                std::size_t next = 0U;
+                while (next < segments_.size() && segments_[next].last_seq < resume) ++next;
+                if (next >= segments_.size()) return records;
+                index = next - 1U;  // the loop's increment lands on `next` (wrapping when it is 0 is intended)
+                continue;
+            }
+            return error{error_code::io_failure, "cannot read write-ahead log segment"};
+        }
+        // The seq the frame at `offset` must carry: segments are contiguous, so it is known without trusting a header
+        // that may be the damaged part. A reader resuming mid-segment is positioned on from_seq.
+        std::uint64_t expected = offset == 0U ? current.first_seq : from_seq;
+        bool damaged = false;
         while (offset + wal_header_bytes <= current.bytes) {
             unsigned char header[wal_header_bytes];
-            if (!read_exact(fd, header, sizeof(header), offset)) break;
+            if (!read_exact(fd, header, sizeof(header), offset)) {
+                damaged = true;  // the file is shorter than the bytes this log wrote into it
+                break;
+            }
             const auto frame = decode_wal_header(header);
-            if (frame.magic != wal_magic || frame.seq > durable_seq_) break;
+            if (frame.magic != wal_magic || frame.seq != expected) {
+                damaged = true;
+                break;
+            }
+            if (frame.seq > durable_seq_) break;
             const auto next_offset = offset + wal_header_bytes + frame.length;
+            ++expected;
             if (frame.seq >= from_seq) {
                 if (!records.empty() && (records.size() == maximum_records || bytes + frame.length > maximum_bytes)) {
                     ::close(fd);
@@ -357,7 +453,9 @@ result<std::vector<wal_record>> write_ahead_log::read(const std::uint64_t from_s
                 if (!read_exact(fd, payload.data(), frame.length, offset + wal_header_bytes) ||
                     wal_frame_crc(frame.seq, payload) != frame.crc) {
                     ::close(fd);
-                    return error{error_code::corrupt_data, "write-ahead log record failed its checksum"};
+                    // Lose the damaged tail, not the stream: deliver what precedes it and go on after it.
+                    isolate_corrupt_tail(index, frame.seq, offset);
+                    return records;
                 }
                 bytes += frame.length;
                 records.push_back({frame.seq, payload});
@@ -365,6 +463,10 @@ result<std::vector<wal_record>> write_ahead_log::read(const std::uint64_t from_s
             offset = next_offset;
         }
         ::close(fd);
+        if (damaged) {
+            isolate_corrupt_tail(index, expected, offset);
+            return records;
+        }
         reader_seq_ = records.empty() ? std::optional<std::uint64_t>{} : std::optional<std::uint64_t>{records.back().seq + 1U};
         reader_path_ = current.path;
         reader_offset_ = offset;

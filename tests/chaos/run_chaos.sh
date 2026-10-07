@@ -2,7 +2,7 @@
 # Real-kernel chaos scenarios for the sensor's WAL, uplink and recovery paths (test plan section 5).
 #
 # usage: sudo tests/chaos/run_chaos.sh [scenario ...]        (default: every scenario)
-#   scenarios: baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt ringoverflow memcap nofile
+#   scenarios: baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt ringoverflow memcap nofile walseg waldir
 #   power loss needs a reboot, so it is two runs (see scenario_powerloss_crash)
 #
 # Needs root (eBPF process provider), python3, openssl and a built build/panopticon-sensord.
@@ -306,6 +306,11 @@ scenario_ringoverflow() {
   kill -CONT "$SENSOR"
   sleep 8
   for i in $(seq 1 50); do "$W/chaospost"; done
+  # The sensor may still be working through the backlog the storm left in the ring: the post-storm execs are queued
+  # behind it, late but not lost, and the uplink looks drained until they arrive. Judge them after they could.
+  local waited_from=$SECONDS
+  wait_exec_seen chaospost 50 90
+  say "ringoverflow: post-storm execs waited for $((SECONDS - waited_from)) s after they were run"
   wait_drained 90
   local alive=no; alive && alive=yes
   local out; out=$(analyze --count-exec chaosstorm,chaospost); local rc=$?
@@ -381,6 +386,45 @@ scenario_nofile() {
     "held=$held limit=$limit alive=$alive recovered_post_seen=$post/30 stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) accounted=$(echo "$out" | jfield accounted)"
 }
 
+# Someone removes the sensor's spool while it runs. `walseg`: the oldest sealed segments of an
+# undelivered backlog are deleted. `waldir`: the whole directory, active segment included, is removed
+# while records keep arriving. The sensor must stay up, report what the removal cost as a `wal` loss,
+# keep the records written after it, and deliver everything that still exists (no wedged uplink).
+walremove_case() { # name what
+  reset_run; write_conf <<EOF2
+wal_quota_bytes=134217728
+wal_segment_bytes=262144
+EOF2
+  start_manager && start_sensor || return
+  echo http503 >"$W/mode"                       # nothing is acknowledged: segments pile up
+  load 12 0; wait_load; sleep 2
+  local segs; segs=$(ls "$W"/wal/wal-*.log | wc -l)
+  # The quota is far above what the run writes, so nothing is dropped by it and every missing record is the removal's.
+  case "$2" in
+    seg) ls "$W"/wal/wal-*.log | sed -n 5,6p | xargs rm -f ;;      # two sealed segments in the middle of the backlog
+    dir) rm -rf "$W/wal" ;;
+  esac
+  say "$1: removed $2 ($segs segments before)"
+  cp /bin/true "$W/chaospost"
+  load 6 0.01; wait_load
+  echo ok >"$W/mode"
+  sleep 3
+  for i in $(seq 1 40); do "$W/chaospost"; done
+  wait_exec_seen chaospost 40 90
+  wait_drained 90
+  local alive=no; alive && alive=yes
+  local out; out=$(analyze --count-exec chaospost); local rc=$?
+  local post; post=$(echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["exec_named"]["chaospost"])')
+  stop_sensor
+  say "$1 losses: $(echo "$out" | jfield loss_records)"
+  local removed=no; echo "$out" | grep -q "removed:" && removed=yes     # a loss that says the removal, not the quota, cost them
+  local quota=no; echo "$out" | grep -q "quota:" && quota=yes
+  verdict "$1" "$([ "$alive" = yes ] && [ $rc = 0 ] && [ "$post" = 40 ] && [ "$removed" = yes ] && [ "$quota" = no ] && echo PASS || echo FAIL)" \
+    "alive=$alive post_removal_seen=$post/40 removal_reported=$removed quota_dropped=$quota stored=$(echo "$out" | jfield stored) missing=$(echo "$out" | jfield missing) wal_loss_reported=$(echo "$out" | jfield wal_loss_reported) problems=$(echo "$out" | jfield problems)"
+}
+scenario_walseg() { walremove_case walseg seg; }
+scenario_waldir() { walremove_case waldir dir; }
+
 # Power loss, phase 1. Crashes the machine with sysrq-b (no sync, no unmount: the page cache is lost) while the
 # sensor is writing under load and the Manager is refusing, so nothing is acknowledged. The lines "DURABLE n" go
 # to stdout (read them from outside the machine: files here would be subject to the same loss); n is a seq the
@@ -426,7 +470,7 @@ scenario_powerloss_verify() {
 [ -x "$SENSORD" ] || { echo "build first: $SENSORD" >&2; exit 2; }
 SCENARIOS=("$@")
 case " ${SCENARIOS[*]:-} " in *" powerloss_verify "*) ;; *) setup ;; esac
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt ringoverflow memcap nofile)
+[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(baseline kill9 outage ackloss badack http503 rejected slowack diskfull clock walcorrupt ringoverflow memcap nofile walseg waldir)
 for name in "${SCENARIOS[@]}"; do
   say "=== $name"
   "scenario_$name"
