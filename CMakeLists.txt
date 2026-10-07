@@ -6,6 +6,8 @@ include(CTest)
 
 option(PANOPTICON_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(PANOPTICON_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+# ThreadSanitizer: cannot be combined with ASAN; libbpf, libcurl and OpenSSL stay uninstrumented.
+option(PANOPTICON_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 # libFuzzer harnesses for the hostile-input parsers (tests/fuzz). Needs clang; use with ASAN and UBSAN.
 option(PANOPTICON_ENABLE_FUZZ "Build the libFuzzer parser harnesses" OFF)
 
@@ -57,6 +59,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     if(PANOPTICON_ENABLE_UBSAN)
         target_compile_options(panopticon-linux-core PUBLIC -fsanitize=undefined -fno-omit-frame-pointer)
         target_link_options(panopticon-linux-core PUBLIC -fsanitize=undefined)
+    endif()
+    if(PANOPTICON_ENABLE_TSAN)
+        if(PANOPTICON_ENABLE_ASAN)
+            message(FATAL_ERROR "PANOPTICON_ENABLE_TSAN cannot be combined with PANOPTICON_ENABLE_ASAN")
+        endif()
+        target_compile_options(panopticon-linux-core PUBLIC -fsanitize=thread -fno-omit-frame-pointer)
+        target_link_options(panopticon-linux-core PUBLIC -fsanitize=thread)
     endif()
     if(PANOPTICON_ENABLE_FUZZ)
         # Coverage instrumentation in the code under test; the fuzz binaries add the engine itself.
