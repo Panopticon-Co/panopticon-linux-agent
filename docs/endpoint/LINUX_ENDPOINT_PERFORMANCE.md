@@ -255,9 +255,10 @@ What this found, in the order it was found:
    unpinned, the kernel ring overflowed (11368 events at 8000 connections/s offered, 217864 in one unconstrained run at
    a sensor CPU of only 55 %) because the generator's busy processes starved the reader thread of CPU. With the generator
    confined to its own CPUs no ring loss appeared in any run here. Those losses were also reported exactly (the BPF `drops`
-   map counts every `bpf_ringbuf_output` failure). The message "number of lost events is unknown" that the pipeline
-   attaches to every `kernel` loss is generic and wrong for eBPF, where the count is exact; it is right for netlink, audit
-   and fanotify, where a count is overflow notices.
+   map counts every `bpf_ringbuf_output` failure). The pipeline used to attach "number of lost events is unknown" to
+   every `kernel` loss, which was wrong for eBPF, where the count is exact; it is right for netlink, audit and fanotify,
+   where a count is overflow notices. A provider now says which it is (`losses_are_event_counts`), and the eBPF
+   providers' loss record says "the count is exact".
 4. **Not claimed:** "zero loss under load". The honest statement is: no loss up to about 12000 network events a second
    on this VM, exact accounting of everything beyond it. A bigger queue absorbs bursts (`queue_capacity`, default 65536
    records, a few seconds at the observed drain rate) but not a sustained overload; the choice between a larger queue and

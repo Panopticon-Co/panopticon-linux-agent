@@ -32,6 +32,17 @@ bool send_mcast_op(const int fd, const proc_cn_mcast_op op) {
     return ::send(fd, buffer.data(), header->nlmsg_len, 0) == static_cast<ssize_t>(header->nlmsg_len);
 }
 
+// The kernel ABI values of enum proc_cn_event. Linux 6.x headers moved the enumerators out of struct proc_event,
+// so naming them through the struct stops compiling there; the values themselves never change.
+constexpr std::uint32_t proc_event_fork = 0x00000001U;
+constexpr std::uint32_t proc_event_exec = 0x00000002U;
+constexpr std::uint32_t proc_event_uid = 0x00000004U;
+constexpr std::uint32_t proc_event_gid = 0x00000040U;
+constexpr std::uint32_t proc_event_sid = 0x00000080U;
+constexpr std::uint32_t proc_event_ptrace = 0x00000100U;
+constexpr std::uint32_t proc_event_comm = 0x00000200U;
+constexpr std::uint32_t proc_event_exit = 0x80000000U;
+
 }  // namespace
 
 std::optional<raw_record> decode_proc_event(const void* data, const std::size_t size, const clock_domain& clock) {
@@ -44,15 +55,15 @@ std::optional<raw_record> decode_proc_event(const void* data, const std::size_t 
     raw_record record;
     record.time_unix_ns = clock.monotonic_to_unix_ns(event.timestamp_ns);
     record.source = {"netlink_proc", "CNPROC", confidence::observed};
-    switch (event.what) {
-    case proc_event::PROC_EVENT_FORK: {
+    switch (static_cast<std::uint32_t>(event.what)) {
+    case proc_event_fork: {
         if (!have(sizeof(event.event_data.fork))) return std::nullopt;
         const auto& fork = event.event_data.fork;
         record.payload = raw_fork{static_cast<std::uint32_t>(fork.parent_tgid), static_cast<std::uint32_t>(fork.parent_pid),
                                   static_cast<std::uint32_t>(fork.child_tgid), static_cast<std::uint32_t>(fork.child_pid), std::nullopt};
         return record;
     }
-    case proc_event::PROC_EVENT_EXEC: {
+    case proc_event_exec: {
         if (!have(sizeof(event.event_data.exec))) return std::nullopt;
         const auto& exec = event.event_data.exec;
         raw_exec payload;
@@ -61,29 +72,29 @@ std::optional<raw_record> decode_proc_event(const void* data, const std::size_t 
         record.payload = std::move(payload);
         return record;
     }
-    case proc_event::PROC_EVENT_UID:
-    case proc_event::PROC_EVENT_GID: {
+    case proc_event_uid:
+    case proc_event_gid: {
         if (!have(sizeof(event.event_data.id))) return std::nullopt;
         const auto& id = event.event_data.id;
-        const bool user = event.what == proc_event::PROC_EVENT_UID;
+        const bool user = static_cast<std::uint32_t>(event.what) == proc_event_uid;
         record.payload = raw_credential_change{static_cast<std::uint32_t>(id.process_tgid), static_cast<std::uint32_t>(id.process_pid),
                                                user, user ? id.r.ruid : id.r.rgid, user ? id.e.euid : id.e.egid};
         return record;
     }
-    case proc_event::PROC_EVENT_SID: {
+    case proc_event_sid: {
         if (!have(sizeof(event.event_data.sid))) return std::nullopt;
         const auto& sid = event.event_data.sid;
         record.payload = raw_session_change{static_cast<std::uint32_t>(sid.process_tgid), static_cast<std::uint32_t>(sid.process_pid)};
         return record;
     }
-    case proc_event::PROC_EVENT_PTRACE: {
+    case proc_event_ptrace: {
         if (!have(sizeof(event.event_data.ptrace))) return std::nullopt;
         const auto& trace = event.event_data.ptrace;
         record.payload = raw_ptrace{static_cast<std::uint32_t>(trace.process_tgid), static_cast<std::uint32_t>(trace.process_pid),
                                     static_cast<std::uint32_t>(trace.tracer_tgid), static_cast<std::uint32_t>(trace.tracer_pid)};
         return record;
     }
-    case proc_event::PROC_EVENT_COMM: {
+    case proc_event_comm: {
         if (!have(sizeof(event.event_data.comm))) return std::nullopt;
         const auto& comm = event.event_data.comm;
         const auto length = ::strnlen(comm.comm, sizeof(comm.comm));
@@ -91,7 +102,7 @@ std::optional<raw_record> decode_proc_event(const void* data, const std::size_t 
                                          std::string{comm.comm, length}};
         return record;
     }
-    case proc_event::PROC_EVENT_EXIT: {
+    case proc_event_exit: {
         // Older kernels lack parent_pid/parent_tgid at the end of the struct; they are unused.
         const auto& exit = event.event_data.exit;
         const auto minimum = static_cast<std::size_t>(reinterpret_cast<const char*>(&exit.exit_signal) -

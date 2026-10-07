@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -60,8 +61,23 @@ public:
     void stop() override;
     [[nodiscard]] provider_health health() const override;
     [[nodiscard]] std::uint64_t take_losses() override;
+    // The probes count each event they fail to reserve in the ring buffer.
+    [[nodiscard]] bool losses_are_event_counts() const noexcept override { return true; }
+
+    // Asks the kernel about every link this provider attached and returns how many are gone or no longer the
+    // link that was attached (closed or replaced from outside the sensor). Runs on the provider thread every
+    // few seconds; a non-zero result makes health() report "degraded". Public so a test can provoke it.
+    std::uint32_t check_attachments();
 
 private:
+    // One attached hook, with the identity the kernel gave it so a closed and reused descriptor is noticed.
+    struct attached_link {
+        ::bpf_link* link{nullptr};
+        std::uint32_t id{0U};
+        std::uint32_t type{0U};
+        std::string program;
+    };
+
     void run();
     int on_sample(const void* data, std::size_t size);
     void release();
@@ -74,7 +90,10 @@ private:
 
     ::bpf_object* object_{nullptr};
     ::ring_buffer* ring_{nullptr};
-    std::vector<::bpf_link*> links_;
+    std::vector<attached_link> links_;
+    std::atomic<std::uint32_t> links_lost_{0U};
+    mutable std::mutex lost_mutex_;
+    std::string lost_programs_;  // guarded by lost_mutex_
     int drops_map_fd_{-1};
     std::uint64_t drops_seen_{0};
 

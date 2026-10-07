@@ -463,7 +463,7 @@ void test_exit_status_decoding() {
 void test_decode_proc_events() {
     clock_domain clock;
     proc_event event{};
-    event.what = proc_event::PROC_EVENT_FORK;
+    event.what = static_cast<decltype(event.what)>(0x00000001U);  // PROC_EVENT_FORK (named differently across header versions)
     event.timestamp_ns = 5U;
     event.event_data.fork.parent_pid = 10;
     event.event_data.fork.parent_tgid = 10;
@@ -473,7 +473,7 @@ void test_decode_proc_events() {
     require(decoded && std::holds_alternative<raw_fork>(decoded->payload) && std::get<raw_fork>(decoded->payload).child_tgid == 11U, "fork");
 
     event = {};
-    event.what = proc_event::PROC_EVENT_COMM;
+    event.what = static_cast<decltype(event.what)>(0x00000200U);  // PROC_EVENT_COMM
     event.event_data.comm.process_pid = 12;
     event.event_data.comm.process_tgid = 12;
     std::memcpy(event.event_data.comm.comm, "0123456789abcdef", 16U);  // no terminator
@@ -481,7 +481,7 @@ void test_decode_proc_events() {
     require(decoded && std::get<raw_comm_change>(decoded->payload).comm == "0123456789abcdef", "unterminated comm bounded");
 
     event = {};
-    event.what = proc_event::PROC_EVENT_EXIT;
+    event.what = static_cast<decltype(event.what)>(0x80000000U);  // PROC_EVENT_EXIT
     event.event_data.exit.process_pid = 12;
     event.event_data.exit.process_tgid = 12;
     event.event_data.exit.exit_code = 0x0200U;
@@ -489,7 +489,7 @@ void test_decode_proc_events() {
     require(decoded && std::get<raw_exit>(decoded->payload).exit_status == 0x0200U, "exit");
 
     require(!decode_proc_event(&event, 8U, clock).has_value(), "truncated event rejected");
-    event.what = proc_event::PROC_EVENT_NONE;
+    event.what = static_cast<decltype(event.what)>(0U);  // PROC_EVENT_NONE
     require(!decode_proc_event(&event, sizeof(event), clock).has_value(), "unused kinds ignored");
 }
 

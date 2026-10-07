@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <string_view>
@@ -536,7 +537,14 @@ result<bool> ebpf_process_provider::start(record_queue& queue) {
             missing_programs_.push_back(entry.capability);
             continue;
         }
-        links_.push_back(link);
+        attached_link attached{link, 0U, 0U, entry.program};
+        bpf_link_info info{};
+        auto info_length = static_cast<std::uint32_t>(sizeof(info));
+        if (bpf_obj_get_info_by_fd(bpf_link__fd(link), &info, &info_length) == 0) {
+            attached.id = info.id;
+            attached.type = info.type;
+        }
+        links_.push_back(std::move(attached));
         if (std::find(capabilities_.begin(), capabilities_.end(), entry.capability) == capabilities_.end()) capabilities_.emplace_back(entry.capability);
     }
 
@@ -569,9 +577,15 @@ void ebpf_process_provider::run() {
     constexpr int idle_timeout_ms = 1000;
     constexpr int burst_timeout_ms = 5;
     constexpr int quiet_polls_before_idle = 6;  // 6 x 5 ms = 30 ms of silence, more than the 20 ms gap
+    constexpr auto attachment_check_interval = std::chrono::seconds{5};
     int timeout_ms = idle_timeout_ms;
     int quiet_polls = 0;
+    auto next_attachment_check = std::chrono::steady_clock::now() + attachment_check_interval;
     while (!stop_.load(std::memory_order_relaxed)) {
+        if (std::chrono::steady_clock::now() >= next_attachment_check) {
+            (void)check_attachments();
+            next_attachment_check = std::chrono::steady_clock::now() + attachment_check_interval;
+        }
         const auto polled = ring_buffer__poll(ring_, timeout_ms);
         if (polled < 0 && polled != -EINTR) {
             poll_failed_ = true;
@@ -586,6 +600,27 @@ void ebpf_process_provider::run() {
         }
     }
     (void)ring_buffer__consume(ring_);  // whatever the kernel queued before shutdown
+}
+
+std::uint32_t ebpf_process_provider::check_attachments() {
+    std::uint32_t lost = 0U;
+    std::string names;
+    for (const auto& attached : links_) {
+        bpf_link_info info{};
+        auto info_length = static_cast<std::uint32_t>(sizeof(info));
+        // A closed descriptor fails here; one that was closed and reused names a different object, or none that
+        // can be asked about, or another link with another id.
+        const bool gone = bpf_obj_get_info_by_fd(bpf_link__fd(attached.link), &info, &info_length) != 0 ||
+                          (attached.id != 0U && (info.id != attached.id || info.type != attached.type));
+        if (!gone) continue;
+        ++lost;
+        if (!names.empty()) names += ", ";
+        names += attached.program;
+    }
+    links_lost_.store(lost, std::memory_order_relaxed);
+    const std::lock_guard lock{lost_mutex_};
+    lost_programs_ = std::move(names);
+    return lost;
 }
 
 int ebpf_process_provider::on_sample(const void* data, const std::size_t size) {
@@ -619,7 +654,7 @@ void ebpf_process_provider::release() {
         ring_buffer__free(ring_);
         ring_ = nullptr;
     }
-    for (auto* link : links_) bpf_link__destroy(link);
+    for (auto& attached : links_) bpf_link__destroy(attached.link);
     links_.clear();
     if (object_ != nullptr) {
         bpf_object__close(object_);
@@ -634,6 +669,11 @@ provider_health ebpf_process_provider::health() const {
     if (state == "active" && poll_failed_.load()) {
         state = "degraded";
         reason = "ring buffer polling failed";
+    }
+    if (state == "active" && links_lost_.load(std::memory_order_relaxed) > 0U) {
+        const std::lock_guard lock{lost_mutex_};
+        state = "degraded";
+        reason = "hook attachment lost from outside the sensor: " + lost_programs_ + (reason.empty() ? "" : "; " + reason);
     }
     if (malformed_.load() > 0U) reason += (reason.empty() ? "" : "; ") + std::to_string(malformed_.load()) + " malformed samples";
     return {std::string{name()}, state, reason, capabilities(), events_.load(), drops_seen_};

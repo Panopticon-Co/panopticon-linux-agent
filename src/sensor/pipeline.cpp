@@ -882,8 +882,11 @@ result<bool> sensor_pipeline::collect_losses(const std::uint64_t now_ns) {
         }
         if (const auto lost = source->take_losses(); lost > 0U) {
             (void)emit_loss({"kernel", lost, {},
-                             std::string{source->name()} + " receive buffer overflowed " + std::to_string(lost) +
-                                 " time(s); the number of lost events is unknown"});
+                             source->losses_are_event_counts()
+                                 ? std::string{source->name()} + " could not reserve space in its kernel ring buffer for " + std::to_string(lost) +
+                                       " event(s); the count is exact"
+                                 : std::string{source->name()} + " receive buffer overflowed " + std::to_string(lost) +
+                                       " time(s); the number of lost events is unknown"});
             reconcile_now = true;
         }
     }

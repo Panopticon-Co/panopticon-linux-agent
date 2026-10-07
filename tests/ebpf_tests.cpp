@@ -643,6 +643,34 @@ private:
     record_queue queue_;
 };
 
+// Someone with root can blind the sensor by closing its link descriptors from outside (bpftool refuses on 5.15, a
+// ptrace-injected close() does not). The provider must notice instead of reporting itself active.
+void test_live_attachment_self_check() {
+    live_provider live{ebpf_role::process};
+    if (!live.begin("live_attachment_self_check")) return;
+    auto& provider = live.provider();
+
+    require(provider.check_attachments() == 0U, "an untouched provider has every hook attached");
+    require(provider.health().state == "active", "and reports itself active");
+
+    // Find one link descriptor of this process (an anonymous inode named bpf_link on 5.15) and close it, as an attacker would.
+    int closed = -1;
+    for (const auto& entry : fs::directory_iterator("/proc/self/fd")) {
+        std::error_code error;
+        const auto target = fs::read_symlink(entry.path(), error);
+        if (error || target.string() != "anon_inode:bpf_link") continue;
+        closed = std::stoi(entry.path().filename().string());
+        break;
+    }
+    require(closed >= 0, "the provider holds a bpf-link descriptor");
+    require(::close(closed) == 0, "close the link descriptor");
+
+    require(provider.check_attachments() == 1U, "exactly the closed hook is reported lost");
+    const auto health = provider.health();
+    require(health.state == "degraded", "a lost hook makes the provider degraded");
+    require(health.reason.find("hook attachment lost") != std::string::npos, "and says why");
+}
+
 // A loopback server and client in one process: the kernel hooks must report the listen, the
 // connect, the accept and the first UDP datagram with this process as the actor and the exact
 // ports. A connection that is closed immediately is the case the socket-table poll misses.
@@ -1560,6 +1588,7 @@ int main(int argc, char** argv) {
     run("live_executable_memory_and_bpf", test_live_executable_memory_and_bpf);
     run("live_namespace_change", test_live_namespace_change);
     run("live_dns_query", test_live_dns_query);
+    run("live_attachment_self_check", test_live_attachment_self_check);
     std::cout << (failures == 0 ? std::string{"ALL PASSED"} : "FAILURES: " + std::to_string(failures)) << " (skipped " << skipped << ")\n";
     return failures == 0 ? 0 : 1;
 }
