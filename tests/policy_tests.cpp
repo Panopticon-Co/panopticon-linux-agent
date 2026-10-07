@@ -284,7 +284,9 @@ struct store_fixture {
     void write(const bundle_fields& f, const std::string& body = body_v) const { put(options.policy_path, signed_bundle(key, f, body)); }
 };
 
-const policy_change& only_change(const std::vector<policy_change>& changes, const std::string& outcome, const std::string& reason) {
+// By value: callers pass `store.refresh(now)`, a temporary vector, and keep the result. A reference into it would dangle
+// after the statement (ThreadSanitizer reported it as a heap-use-after-free); a returned copy has its lifetime extended.
+policy_change only_change(const std::vector<policy_change>& changes, const std::string& outcome, const std::string& reason) {
     require(changes.size() == 1U, ("one change expected, got " + std::to_string(changes.size())).c_str());
     if (changes[0].outcome != outcome || changes[0].reason != reason) {
         throw std::runtime_error{"expected " + outcome + "/" + reason + ", got " + changes[0].outcome + "/" + changes[0].reason + ": " + changes[0].detail};

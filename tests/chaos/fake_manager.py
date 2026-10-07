@@ -33,15 +33,18 @@ COMPACT_FULL_TYPES = ("health", "loss")
 
 
 def compact_line(line):
-    """--compact-store: an event keeps only its envelope (what analyze.py and the soak read); health, loss and
-    response records keep everything. The digest is always of the full line, so dedup and conflicts are exact."""
+    """--compact-store: an event keeps only its envelope (what analyze.py and the soak read) plus, for policy.change and
+    policy.match, the small `policy` object the soak checks; health, loss and response records keep everything. The
+    digest is always of the full line, so dedup and conflicts are exact."""
     try:
         record = json.loads(line)
     except ValueError:
         return line
-    if record.get("record_type") in COMPACT_FULL_TYPES or str(record.get("type", "")).startswith("response."):
+    kind = str(record.get("type", ""))
+    if record.get("record_type") in COMPACT_FULL_TYPES or kind.startswith("response."):
         return line
-    keep = {key: record[key] for key in ("seq", "record_type", "type", "time", "observed_time") if key in record}
+    keys = ("seq", "record_type", "type", "time", "observed_time") + (("policy",) if kind.startswith("policy.") else ())
+    keep = {key: record[key] for key in keys if key in record}
     return json.dumps(keep, separators=(",", ":"))
 
 
