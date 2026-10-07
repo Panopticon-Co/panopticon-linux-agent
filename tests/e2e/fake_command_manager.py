@@ -38,12 +38,23 @@ def main():
     parser.add_argument("--commands", required=True)
     parser.add_argument("--events", required=True)
     parser.add_argument("--redeliver-file", default="")
+    parser.add_argument("--wire-log")
     args = parser.parse_args()
 
-    state = fake_manager.State(args.store, args.mode_file, args.token)
+    state = fake_manager.State(args.store, args.mode_file, args.token, args.wire_log)
     base = fake_manager.make_handler(state)
     lock = threading.Lock()
+    # Accepted ids survive a restart, as they do in the real Manager's database (the soak restarts this process).
     accepted = set()
+    if os.path.exists(args.events):
+        with open(args.events, "r", encoding="utf-8") as handle:
+            for row in handle:
+                try:
+                    identifier = json.loads(row).get("accept")
+                except ValueError:
+                    continue
+                if identifier:
+                    accepted.add(identifier)
     events = open(args.events, "a", encoding="utf-8", buffering=1)
 
     def redeliver():
