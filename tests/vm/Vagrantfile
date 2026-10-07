@@ -1,0 +1,28 @@
+# Linux endpoint validation VM: the platform every REAL-VM VERIFIED claim in this repository refers to.
+# Ubuntu 22.04 (kernel 5.15), 8 vCPU, 6 GB. Usage: see tests/vm/README.md.
+Vagrant.configure("2") do |config|
+  config.vm.box = "generic/ubuntu2204"
+  config.vm.box_check_update = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  config.vm.boot_timeout = 600
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "panopticon-endpoint-dev"
+    vb.memory = 6144
+    vb.cpus = 8
+    vb.gui = false
+  end
+  config.vm.provision "shell", inline: <<-SHELL
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq build-essential cmake ninja-build pkg-config git clang llvm lld \
+      libelf-dev zlib1g-dev libzstd-dev libcurl4-openssl-dev libssl-dev libmnl-dev libnftnl-dev \
+      libsystemd-dev libcap-dev libseccomp-dev libpam0g-dev libaudit-dev \
+      python3-jsonschema python3-pip netcat-openbsd bpftrace \
+      linux-tools-$(uname -r) linux-tools-common dpkg-dev rpm fakeroot \
+      auditd stress-ng hyperfine jq strace gdb valgrind afl++ clang-tools >/tmp/apt.log 2>&1 || (tail -30 /tmp/apt.log; exit 1)
+    sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 lsm=lockdown,capability,landlock,yama,apparmor,bpf"/' /etc/default/grub
+    update-grub >/dev/null 2>&1
+    echo PROVISION_OK
+  SHELL
+end

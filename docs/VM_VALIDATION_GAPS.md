@@ -1,12 +1,21 @@
 # VM validation gaps
 
-Automated tests cover pure core behavior on the development host. A real Ubuntu/Debian
-systemd VM is still required for procfs process collection, inotify/journald sources,
-capability-limited service operation, HTTPS Manager delivery, and any firewall isolation.
-The former Rust validation commands and service are discontinued by ADR 003. Do not install
-or validate that prototype. After the C++20 rebaseline, run its CTest/sanitizer suite, install
-the service, generate benign process/file activity, and verify only the documented Manager
-endpoint before marking each item validated.
+GitHub CI (Ubuntu 24.04, kernel 6.x) proves only portable behaviour and namespace-level isolation. Everything about
+real kernel hooks, `systemd`, packages and long runs is validated on one VM (Ubuntu 22.04, kernel 5.15.0-91, x86_64,
+Vagrant/VirtualBox). **What is verified, what is pending and what is out of scope for the Linux endpoint is tracked in
+[endpoint/IMPLEMENTATION_STATUS.md](endpoint/IMPLEMENTATION_STATUS.md) and [HANDOFF.md](HANDOFF.md#final-gap-analysis);
+the table below is the short list of validation that still needs a VM.**
+
+| Gap | Command | Blocking |
+| --- | --- | --- |
+| 6-hour soak (result recorded in the handoff once complete) | `sudo tests/soak/run_soak.sh 6 /var/tmp/soak` | No |
+| Signed package / apt repository end to end | `sudo tests/e2e/run_package_e2e.sh` (disposable VM only) | Yes, for calling the package path verified |
+| Command authorization after ADR 034 | `sudo tests/e2e/run_command_auth_e2e.sh` | No |
+| Throughput ladder and overload recovery | `sudo python3 tests/perf/ladder.py` and `--recover` | No |
+| TSan re-run with policy sweep and rollback code | build with `-DPANOPTICON_ENABLE_TSAN=ON`, then ctest and a live run | No |
+| Any other kernel, distribution, ARM64, SELinux | – | Out of scope |
+
+The sections below are about the foundation agent's host-isolation path and are kept as written.
 
 ## Host isolation (ADR 004)
 

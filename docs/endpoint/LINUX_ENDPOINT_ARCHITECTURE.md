@@ -5,6 +5,14 @@ that exists and is tested on this branch; everything else is **[designed]** and 
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). This document is updated in the same
 commit as the code that changes it.
 
+> **Reading note (handoff pass).** This is a design document and it is deliberately ahead of the code. One thing
+> in it is **not built as drawn**: there is no separate `panopticon-responder` executable. Process termination,
+> quarantine and file collection run in-process in `panopticon-sensord` through the response library
+> (`src/response.cpp`, `src/quarantine.cpp`, ADR 015, 026), reached only by a signed command; only the
+> isolation helper is a separate privileged process. A split responder, prevention policy load and evidence
+> capture beyond file collection are **[designed]**, not implemented. For what exists and how far it is verified,
+> use [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and [../HANDOFF.md](../HANDOFF.md#final-gap-analysis).
+
 ## 1. Design goals
 
 1. **Complete, honest visibility.** Every security-relevant Linux behaviour is either observed,

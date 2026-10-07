@@ -1,5 +1,11 @@
 # Response boundary
 
+> **Two response paths exist.** The text below describes the foundation agent's response library, which
+> `panopticon-sensord` reuses. In `sensord` the same seven actions are reached only through a **signed** command
+> (ES256, pinned keys, durable ledger, durable result, `response.action` audit record; ADR 024–028, 034), and
+> remediation stays dry-run unless a sacrificial test target is configured. See
+> [README.md](README.md#7-command-and-response-plane).
+
 The Manager's Response Engine authorizes commands; this agent only authenticates, validates,
 target-checks, replay-checks, dispatches a closed action set, executes, receipts, and audits.
 

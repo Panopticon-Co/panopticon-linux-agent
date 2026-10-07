@@ -11,7 +11,7 @@ described as "labs only", but it was one line in a config file. Anyone who could
 `/etc/panopticon/sensord.conf` could switch a signing endpoint to trusting the TLS identity alone,
 and the shipped binary contained the code path whether or not anyone wanted it.
 
-A flagship endpoint should not have an unsigned production path that the configuration can reach.
+A production-oriented endpoint should not have an unsigned production path that the configuration can reach.
 
 ## Decision
 

@@ -1,5 +1,15 @@
 # Telemetry
 
+The records written by **`panopticon-sensord`** (Linux endpoint record 1.0, defined in
+[panopticon-contracts](https://github.com/Panopticon-Co/panopticon-contracts)) are listed with their sources and
+verification status in [README.md](README.md#4-telemetry); field-level detail is in
+[docs/endpoint/LINUX_ENDPOINT_TELEMETRY_CATALOG.md](docs/endpoint/LINUX_ENDPOINT_TELEMETRY_CATALOG.md), and the
+coverage gaps against a mature EDR in
+[docs/endpoint/LINUX_ENDPOINT_CAPABILITY_MATRIX.md](docs/endpoint/LINUX_ENDPOINT_CAPABILITY_MATRIX.md). The sensor
+also reports what it cannot see (`health`, `coverage`, `loss`, `state.*` records).
+
+## Foundation agent (`panopticon-linux-agent`, schema 0.4 `linux_procfs`)
+
 The only implemented live-source adapter is a bounded Linux procfs process snapshot. For each
 readable process it obtains PID, PPID, UID/GID, state, executable symlink, command line, cgroup
 text, and kernel start ticks. The internal process identity is `(host_id, pid, start_time_ticks)`

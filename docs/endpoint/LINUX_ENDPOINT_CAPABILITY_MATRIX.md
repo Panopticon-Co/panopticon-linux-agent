@@ -12,7 +12,7 @@ justification in §4.
 
 Status legend: **IMPL** implemented and verified · **PARTIAL** implemented with a documented gap ·
 **MISSING** not yet implemented · **UNSUPPORTED** deliberately not provided (see §4).
-"Req" is **M** (mandatory for flagship), **S** (should; expected by the industry baseline) or
+"Req" is **M** (mandatory for a mature endpoint), **S** (should; expected by the industry baseline) or
 **O** (optional/differentiator).
 
 The *Baseline* column is the state at `335dae0` (start of this program). The *Current* column is
