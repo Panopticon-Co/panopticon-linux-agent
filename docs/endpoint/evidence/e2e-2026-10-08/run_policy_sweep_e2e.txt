@@ -1,0 +1,25 @@
+[sweep] 0. two processes are running before the sensor and before any policy
+[sweep] PASS no policy: no match (0)
+[sweep] 1. a signed policy naming the first process's command line is accepted while the sensor runs
+[sweep] PASS the running process is reported (1)
+[sweep] PASS the match names the rule and the action (sleep-7771 recommend_terminate high)
+[sweep] PASS the match is labelled as a sweep of a running process (process.running)
+[sweep] PASS the match's subject seq is a real record (1)
+[sweep] PASS the unrelated process is not reported (0)
+[sweep] PASS nothing was killed (yes)
+[sweep] 2. the same version is not swept again
+[sweep] PASS one match for version 1 (1)
+[sweep] 3. a newer version sweeps again
+[sweep] PASS version 2 reports the still-running process (1)
+[sweep] PASS version 1 was not repeated (1)
+[sweep] 4. a restarted sensor with the policy already in place reports what is still running
+[sweep] PASS after the restart version 2 reports it again (2)
+[sweep] PASS the policy provider is active without a sweep warning (active)
+[sweep] PASS no sweep limit was reached (0)
+[sweep] 5. a policy that matches nothing writes nothing
+[sweep] PASS no new match (3)
+[sweep] 6. an indicator on the digest of the running image is matched once the sweep has hashed it
+[sweep] PASS the digest indicator matches the running target (1)
+[sweep] PASS and the bystander, which runs the same image (1)
+[sweep] passed 16, failed 0
+EXIT=0

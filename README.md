@@ -139,7 +139,7 @@ Status is on Ubuntu 22.04 / 5.15 / x86_64 only.
 | Containers | `container.started/stopped`, container id on process records | cgroup path parsing | REAL-VM VERIFIED with docker; podman/CRI-O/Kubernetes by unit tests only |
 | Host state | `state.host`, `.posture`, `.users`, `.groups`, `.interfaces`, `.mounts`, `.modules`, `.persistence`, `.processes`, `.connections`, `.packages` (dpkg only), `.devices`; periodic diffs as `posture.changed`, `account.changed`, `interface.changed`, `package.changed`, `device.changed` | procfs/sysfs/dpkg collectors, snapshot differ | REAL-VM VERIFIED for the first group; packages, devices and the diff records are IMPLEMENTED + UNIT TESTED (`state_tests`), live confirmation pending. Default interval 1 h, so package changes are seen up to an hour late. `state.host` carries OS release, kernel, boot and CPU/memory/hypervisor; there is no DMI, disk or NIC hardware detail |
 | Policy and response | `policy.match`, `policy.change`, `response.action` | policy engine, command processor | REAL-VM VERIFIED |
-| Self | `tamper.integrity`, `health`, `loss` | integrity monitor, pipeline | REAL-VM VERIFIED (`tamper.integrity`); package path VALIDATION PENDING |
+| Self | `tamper.integrity`, `health`, `loss` | integrity monitor, pipeline | REAL-VM VERIFIED (`tamper.integrity`; package path 34/34 on the VM) |
 
 Not collected (see [Known limitations](#16-known-limitations)): rpm package inventory, real-time package install events (only an hourly dpkg diff), shared library loads, `ptrace`/`process_vm_writev` injection, route changes, USB hotplug events (only a device inventory), log tampering, cloud identity, io_uring, and file-write content.
 
@@ -233,7 +233,7 @@ Key custody: [docs/endpoint/LINUX_ENDPOINT_KEY_CUSTODY.md](docs/endpoint/LINUX_E
 | Command replay / retargeting | Durable ledger, boot and start-time binding, lifetimes, rate limit | REAL-VM VERIFIED, chaos-tested |
 | Policy authenticity | Signed bundle, separate keyring, monotonic version, expiry, key revocation | UNIT TESTED; REAL-VM VERIFIED (policy sweep e2e); exercised for 6 h in the older-build soak (145 loaded, 35 rollbacks refused) |
 | Trusted configuration | Config, CA bundle and key lists must be regular files owned by root/sensor, not group/world writable, in non-writable directories ([ADR 031](docs/adr/031-trusted-configuration-and-service-unit.md)) | UNIT TESTED |
-| Binary / install integrity | Signed build manifest, running-image hash, `tamper.integrity` | REAL-VM VERIFIED (26 checks); signed package path VALIDATION PENDING |
+| Binary / install integrity | Signed build manifest, running-image hash, `tamper.integrity` | REAL-VM VERIFIED (26 checks; signed package path 34/34, local file repository) |
 | Rollback detection | Signed `built_at` high-water mark | REAL-VM VERIFIED (integrity e2e scenario 8) |
 | No unsigned-command path in packages | Compiled out; refusal string checked at package build | UNIT TESTED; refusal observed on a real sensord |
 | Privilege separation | Isolation only via the minimal helper | REAL-VM VERIFIED |
@@ -330,7 +330,7 @@ Measured by us on the validation VM (Ubuntu 22.04, kernel 5.15, VirtualBox). Ful
 | Hook overhead, 4 vCPUs online | exec −0.4 %, TCP loopback connect +5.1 %, open/close +1.3 %; sensor ≈ 10 % of one core, 55 MiB | MEASURED (S13.14); noisier on 8 vCPUs |
 | Loss-free event rate | up to ≈ 12,000 network events/s; beyond that, the excess is shed and reported exactly | MEASURED (S13.9), single pipeline thread |
 | Mixed-workload rate used for comparison | ≈ 150 events/s (153.5/s in the 30-minute ThreadSanitizer run; that run was ≈ 24 % of one core with TSan instrumentation, so it overstates a Release build) | MEASURED (S13.22) |
-| Throughput ladder, queue depth, drain and recovery after overload | `tests/perf/ladder.py` | **NOT YET MEASURED** (harness written, run pending) |
+| Throughput ladder, queue depth, drain and recovery after overload | `tests/perf/ladder.py` | MEASURED once on the VM, 2026-10-08 (no loss up to 4 k events/s offered; overload reported, recovered): [docs/endpoint/LINUX_ENDPOINT_PERFORMANCE.md](docs/endpoint/LINUX_ENDPOINT_PERFORMANCE.md#8-throughput-ladder-and-overload-recovery-2026-10-08) |
 | Kernel→WAL latency p99, host→Manager latency p95 | – | NOT YET MEASURED |
 
 ## 14. Testing
@@ -367,14 +367,14 @@ Summary as of the handoff pass:
 | Release build and unit tests | 21/21 CTest targets passed on the VM at `5491442` (0 compiler warnings); sanitizer and TSan runs predate the last additions |
 | Telemetry providers on 5.15 | IMPLEMENTED + REAL-VM VERIFIED |
 | WAL, uplink, loss accounting | IMPLEMENTED + REAL-VM VERIFIED + chaos (Release and ASan/UBSan) |
-| Command plane | IMPLEMENTED + REAL-VM VERIFIED; `run_command_auth_e2e.sh` re-run after ADR 034 **pending** |
+| Command plane | IMPLEMENTED + REAL-VM VERIFIED; `run_command_auth_e2e.sh` re-run after ADR 034: 51/51 on the packaged build (2026-10-08) |
 | Signed local policy and sweep | IMPLEMENTED + REAL-VM VERIFIED |
 | Self-integrity and rollback detection | IMPLEMENTED + REAL-VM VERIFIED (integrity e2e) |
 | Signed package / apt repository path | IMPLEMENTED — **REAL-VM VERIFIED** (`tests/e2e/run_package_e2e.sh` 34/34, local file repository, one VM) |
 | ThreadSanitizer | PASSED (ctest + 30 min live) before the policy-sweep and rollback additions; re-run pending |
 | Long ASan/UBSan chaos | Full suite passed once; long repeat pending |
 | 6-hour soak | Older build (pre-ADR 033): **completed with one caveat** (health-timer drift while other work ran on the VM; [evidence](docs/endpoint/evidence/soak-2026-10-07/README.md)). Current build: **pending**, see [HANDOFF](docs/HANDOFF.md#6-hour-soak-status) |
-| Performance ladder | Harness written, **run pending** |
+| Performance ladder and overload recovery | MEASURED once (2026-10-08), see the performance document; latency still NOT YET MEASURED |
 | Other kernels, distros, ARM64, SELinux | Not tested / out of current scope |
 
 ## 16. Known limitations

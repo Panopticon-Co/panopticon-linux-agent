@@ -93,6 +93,8 @@ check "edit: reported as binary_modified" 1 "$(count "sum(1 for r in rows if r['
 check "edit: hashes differ" 1 "$(count "sum(1 for r in rows if r['kind']=='tamper' and r['technique']=='binary_modified' and r['target']=='$CTL_BIN' and r['expected_sha256']!=r['observed_sha256'])")"
 check "edit: attributed to the writer's pid" "$TAMPERER" "$(count "[r['process']['pid'] for r in rows if r['kind']=='tamper' and r['status']=='violated' and r['target']=='$CTL_BIN'][0]")"
 check "edit: last_change is a modify" modify "$(count "[r['last_change']['operation'] for r in rows if r['kind']=='tamper' and r['status']=='violated' and r['target']=='$CTL_BIN'][0]")"
+# Health is emitted every ~10 s, so the last record can predate the violation: wait for one that follows it.
+wait_for 30 "any(r['kind']=='health' and r['integrity'] and r['integrity']['state']=='degraded' for r in rows)"
 check "edit: health degraded" degraded "$(count "[r['integrity']['state'] for r in rows if r['kind']=='health' and r['integrity']][-1]")"
 cat "$W/ctl.orig" >"$CTL_BIN"
 wait_for 40 "any(r['kind']=='tamper' and r['status']=='restored' and r['target']=='$CTL_BIN' for r in rows)"

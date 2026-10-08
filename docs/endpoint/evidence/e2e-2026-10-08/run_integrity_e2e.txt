@@ -1,0 +1,37 @@
+[integrity] 1. clean start from the installed binary
+[integrity] PASS clean start: no tamper record (0)
+[integrity] PASS clean start: integrity provider active (active)
+[integrity] PASS clean start: health status healthy (healthy)
+[integrity] 2. a listed file is edited by a process we know
+[integrity] PASS edit: reported as binary_modified (1)
+[integrity] PASS edit: hashes differ (1)
+[integrity] PASS edit: attributed to the writer's pid (872513)
+[integrity] PASS edit: last_change is a modify (modify)
+[integrity] PASS edit: health degraded (degraded)
+[integrity] PASS edit undone: restored (1)
+[integrity] 3. the running binary is replaced by another copy of the same build
+[integrity] PASS replace: reported as binary_replaced (1)
+[integrity] PASS replace: attributed to the renaming process (872645)
+[integrity] PASS replace: last_change is a rename (rename)
+[integrity] 4. the manifest is edited
+[integrity] PASS manifest edit: manifest_invalid (1)
+[integrity] PASS manifest edit: the reason is named (1)
+[integrity] PASS manifest put back: restored (1)
+[integrity] 5. a listed file is deleted
+[integrity] PASS delete: binary_missing (1)
+[integrity] 6. restart from the replaced binary: the install verifies
+[integrity] PASS restart: no new violated tamper record (0)
+[integrity] PASS restart: integrity provider active (active)
+[integrity] 7. restart with a manifest signed by a key this endpoint does not pin
+[integrity] PASS stranger manifest: reported at once, as unknown_key (1)
+[integrity] PASS stranger manifest: health degraded (degraded)
+[integrity] 8. restart with an older build's manifest, signed by the right key (a rollback, ADR 036)
+[integrity] PASS the newest build time is remembered (yes)
+[integrity] PASS rollback: reported at once, as manifest_rollback (1)
+[integrity] PASS rollback: the detail says how to accept it on purpose (1)
+[integrity] PASS rollback: health degraded (degraded)
+[integrity] PASS rollback: the files still verify against the older manifest (0)
+[integrity] PASS a newer build clears the rollback (1)
+[integrity] tamper records written to /var/tmp/integrity-e2e/tamper.ndjson: 9
+[integrity] passed 26, failed 0
+EXIT=0

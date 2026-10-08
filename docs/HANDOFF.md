@@ -7,8 +7,7 @@ For engineers taking over the Panopticon Linux endpoint who may not know the his
 **One-sentence summary.** `panopticon-sensord` is a resident C++20 Linux sensor with eBPF/fanotify/audit
 telemetry, a durable write-ahead log, at-least-once delivery to the Manager, signed commands and signed local
 policy, and self-integrity checks; it is validated on one platform (Ubuntu 22.04, kernel 5.15, x86_64, in a VM),
-is not claimed to be production-ready, and four validations are still pending (a 6-hour soak of the current build, package end-to-end,
-command-auth re-run after ADR 034, performance ladder).
+is not claimed to be production-ready, and one validation is still pending (a 6-hour soak of the current build).
 
 ## Contents
 
@@ -84,7 +83,7 @@ Labels as defined in the README. Evidence lives in IMPLEMENTATION_STATUS (sectio
 | Trusted configuration checks, hardened systemd unit with watchdog | IMPLEMENTED; unit tested; install REAL-VM VERIFIED [S13.13] |
 | TSan (ctest 20/20 + 30 min live), 16 fuzz harnesses × 900 s | SUSTAINED-LOAD VERIFIED (before the latest additions; see pending) |
 | Signed `.deb` and apt repository tooling | IMPLEMENTED — **VALIDATION PENDING** |
-| Throughput ladder harness | IMPLEMENTED — **VALIDATION PENDING** |
+| Throughput ladder harness | IMPLEMENTED — MEASURED once (2026-10-08) |
 
 ## 6-hour soak status
 
@@ -141,7 +140,7 @@ RSS/fd/thread trends after warm-up, an on-time health timer, and a clean shutdow
 | Integrity / rollback e2e | 26/26 |
 | Policy sweep e2e | 16/16 |
 | Package e2e | 34/34 on 2026-10-08 (`tests/e2e/run_package_e2e.sh`, disposable VM, local `file:` apt repository; [log](endpoint/evidence/package-e2e-2026-10-08/package-e2e.txt)). The first run's 2 failures were a test flaw, fixed |
-| Performance ladder, latency | Harness only; **not measured** |
+| Performance ladder and overload recovery | Measured once on 2026-10-08 ([performance doc §8](endpoint/LINUX_ENDPOINT_PERFORMANCE.md#8-throughput-ladder-and-overload-recovery-2026-10-08)); latency **not measured** |
 | Fuzz | 16 harnesses × 900 s once |
 
 ## Final gap analysis

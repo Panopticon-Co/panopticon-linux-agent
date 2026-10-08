@@ -10,8 +10,8 @@ the table below is the short list of validation that still needs a VM.**
 | --- | --- | --- |
 | 6-hour soak of the current build (an older build completed one; see [HANDOFF](HANDOFF.md#6-hour-soak-status)) | `sudo PANOPTICON_SOURCE_HEAD=$(git rev-parse HEAD) tests/soak/run_soak.sh 6 /var/tmp/soak2` on an idle VM | No |
 | ~~Signed package / apt repository end to end~~ | Done 2026-10-08: 34/34 (`tests/e2e/run_package_e2e.sh`; [log](endpoint/evidence/package-e2e-2026-10-08/package-e2e.txt)). Remaining: a remote repository and key custody | – |
-| Command authorization after ADR 034 | `sudo tests/e2e/run_command_auth_e2e.sh` | No |
-| Throughput ladder and overload recovery | `sudo python3 tests/perf/ladder.py` and `--recover` | No |
+| ~~Command authorization after ADR 034~~ | Done 2026-10-08: 51/51 on the packaged build (scenario 7 packaged variant; the lab-build variant was not re-run) | – |
+| ~~Throughput ladder and overload recovery~~ | Done 2026-10-08 (performance doc §8) | – |
 | TSan re-run with policy sweep and rollback code | build with `-DPANOPTICON_ENABLE_TSAN=ON`, then ctest and a live run | No |
 | Any other kernel, distribution, ARM64, SELinux | – | Out of scope |
 

@@ -271,3 +271,43 @@ re-measured here. `live_wake_policy` now judges the hook cost on the best of fiv
 wakes the reader on every record costs 535 us in its best window and still fails; checked).
 
 **Re-measured after the attachment self-check (S13.14), same script, same binary.** With 4 vCPUs online (CPUs 4 to 7 offlined in the guest): exec -0.4 %, tcp loopback connection +5.1 %, open+close +1.3 %; the sensor used about 10 % of one core and 55 MiB and recorded no loss. With all 8 vCPUs online the same binary measured exec +11.9 % and tcp +38 % and the sensor 14 to 27 % of a core. The 4-vCPU numbers are the ones comparable with the table above; the 8-vCPU figures are the scheduling effect described in section 7, so overhead budgets are judged on the pinned 4-CPU configuration and the 8-vCPU result is reported, not hidden.
+
+## 8. Throughput ladder and overload recovery (2026-10-08)
+
+`tests/perf/ladder.py` on the Ubuntu 22.04 VM (kernel 5.15.0-91, 8 vCPU, 6 GiB), Release `build-rel`, nothing else
+running, a real `panopticon-sensord` with default providers and a WAL (no Manager), loopback connection storm
+(`netstorm.py`, 3 generator processes, **not pinned** to separate CPUs), 20 s per step, 65 s pause between steps.
+Raw output: [evidence/perf-ladder-2026-10-08/](evidence/perf-ladder-2026-10-08/). **MEASURED, one run each.**
+
+| Target conn/s | Offered ev/s | Written ev/s | Peak backlog (events) | Drain (s) | WAL MB/s | Pipeline CPU | Peak RSS (MiB) | Reported loss |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 37 | 153 | 153 | 2 | 2 | 0.4 | 3 % | 40 | none |
+| 100 | 388 | 388 | 4 | 2 | 0.9 | 4 % | 40 | none |
+| 250 | 948 | 948 | 11 | 2 | 2.2 | 7 % | 40 | none |
+| 750 | 2904 | 2853 | 1052 | 2 | 6.6 | 33 % | 41 | none |
+| 1500 | 4033 | 3266 | 15625 | 3 | 7.6 | 44 % | 48 | none |
+| 3000 | 4045 | 2977 | 23805 | 5 | 6.9 | 36 % | 53 | none |
+
+`--recover` (one sensor: baseline, unlimited overload, baseline again):
+
+| Phase | Offered ev/s | Written ev/s | Peak backlog | Drain (s) | Peak RSS (MiB) | Reported loss |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline | 147 | 147 | 3 | 2 | 40 | none |
+| overload | 5271 | 3741 | 35641 | 6 | 61 | kernel 8703 |
+| baseline again | 149 | 149 | 8 | 2 | 61 | no new loss (the 8703 is the cumulative counter) |
+
+Reading it:
+
+* Up to about 950 events/s offered the pipeline keeps up with a backlog of at most a dozen events. From about 2900
+  events/s the backlog is in the thousands and is drained within 2 to 6 s of the load stopping; no loss was reported on
+  any ladder step (largest backlog 23805 events, 53 MiB RSS).
+* Under unlimited overload (5271 events/s offered) the sensor wrote 3741/s, held a backlog of 35641 events, reported the
+  shortfall as `kernel` loss (8703 events) and returned to the idle rate with no new loss once the load stopped. The
+  loss is reported, not silent; the `gap` column of the raw output (handed over minus written minus reported) stayed
+  between -2 and 8 events, which is the sensor's own records.
+* **These numbers are not comparable with section 7.** The ladder's generator is weaker (3 unpinned processes) and
+  competes with the sensor for CPU; here the pipeline wrote 3.0 to 3.7k events/s while loaded, where section 7 (generator
+  pinned to 4 CPUs) delivered loss-free to roughly 12000 events/s. The kernel loss in the overload phase fits section 7's
+  finding that ring overflow is CPU contention with the generator, not capacity. Neither figure is a capacity
+  guarantee, and no figure here may be quoted as a sustained rate for real hosts.
+* Not measured: kernel-to-WAL latency p99, host-to-Manager latency p95, a file-event storm.

@@ -1,0 +1,8 @@
+target   offered/s  written/s  peak_backlog drain_s  wal_MB/s  cpu    rss_MiB  gap / loss reported
+37       153        153        2            2        0.4       3    % 40       gap=-2      none
+100      388        388        4            2        0.9       4    % 40       gap=4       none
+250      948        948        11           2        2.2       7    % 40       gap=2       none
+750      2904       2853       1052         2        6.6       33   % 41       gap=5       none
+1500     4033       3266       15625        3        7.6       44   % 48       gap=5       none
+3000     4045       2977       23805        5        6.9       36   % 53       gap=4       none
+EXIT=0

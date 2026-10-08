@@ -1,0 +1,5 @@
+target   offered/s  written/s  peak_backlog drain_s  wal_MB/s  cpu    rss_MiB  gap / loss reported
+base     147        147        3            2        0.3       2    % 40       gap=3       none
+overload 5271       3741       35641        6        8.7       46   % 61       gap=6       kernel=8703
+recover  149        149        8            2        0.4       2    % 61       gap=8       kernel=8703
+EXIT=0
