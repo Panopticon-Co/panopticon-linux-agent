@@ -140,7 +140,7 @@ RSS/fd/thread trends after warm-up, an on-time health timer, and a clean shutdow
 | Command authorization e2e | 51 checks passed before ADR 034; the lab-versus-packaged scenario 7 needs a re-run |
 | Integrity / rollback e2e | 26/26 |
 | Policy sweep e2e | 16/16 |
-| Package e2e | **Never run** (`tests/e2e/run_package_e2e.sh`, disposable VM) |
+| Package e2e | 34/34 on 2026-10-08 (`tests/e2e/run_package_e2e.sh`, disposable VM, local `file:` apt repository; [log](endpoint/evidence/package-e2e-2026-10-08/package-e2e.txt)). The first run's 2 failures were a test flaw, fixed |
 | Performance ladder, latency | Harness only; **not measured** |
 | Fuzz | 16 harnesses × 900 s once |
 
@@ -154,7 +154,7 @@ Classification of every gap named in the plan, with the decision. "Today" means 
 | Prevention / enforcement | NOT IMPLEMENTED | Future: BPF-LSM or fanotify-permission design needed; out of the current scope |
 | Self-protection | PARTIAL (service hardening, integrity detection; no anti-kill, no protected process) | Future; document, do not claim |
 | Binary self-integrity | IMPLEMENTED + REAL-VM VERIFIED | Done; same-host trust anchor is a documented limit |
-| Signed package / update path | IMPLEMENTED — VALIDATION PENDING | Validate today (`run_package_e2e.sh`); fix what it finds |
+| Signed package / update path | IMPLEMENTED — REAL-VM VERIFIED (34/34, local file repository) | Done; a remote repository and key custody are future work |
 | Missing telemetry categories (real-time package events and rpm inventory, library loads, injection, route changes, USB hotplug, log tampering, DMI/disk hardware detail, cloud identity) | NOT IMPLEMENTED. Present but only unit tested so far: dpkg package inventory and hourly `package.changed`, device inventory, `interface.changed`, `account.changed`, `posture.changed` | Future, ranked in the capability matrix; no stubs |
 | File telemetry performance | PARTIALLY VERIFIED (mixed workload and FIM; no dedicated file-event storm ladder) | Future: add a file storm to `tests/perf` |
 | Latency measurements (kernel→WAL p99, host→Manager p95) | NOT YET MEASURED | Future: needs a timestamp harness; do not quote numbers |
@@ -205,7 +205,7 @@ Manager route does not accept it). `LINUX_ENDPOINT_SECURITY_MODEL.md` has the th
 
 ## Recommended next priorities
 
-1. Run the pending validations in this order on a quiet VM, then soak 2 (the soak last, because it needs the VM to itself): full Release ctest, `run_package_e2e.sh`, `run_command_auth_e2e.sh`, `tests/perf/ladder.py` (default and
+1. Run the pending validations in this order on a quiet VM, then soak 2 (the soak last, because it needs the VM to itself): full Release ctest (done, 21/21), `run_package_e2e.sh` (done, 34/34), `run_command_auth_e2e.sh`, `tests/perf/ladder.py` (default and
    `--recover`), long ASan/UBSan chaos, TSan on the latest code. Fix and re-run, and record results in
    IMPLEMENTATION_STATUS.
 2. Get the contracts and Manager branches reviewed and merged by their owners; decide the agent repository's default

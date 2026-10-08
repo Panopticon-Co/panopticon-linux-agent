@@ -301,8 +301,10 @@ flowchart LR
 * `dpkg` does **not** verify a `.deb`'s own signature; the protection is the **signed apt repository** and apt's
   refusal to downgrade without `--allow-downgrades`.
 * Status: the tooling is **IMPLEMENTED** and the manifest/rollback behaviour is REAL-VM VERIFIED by
-  `run_integrity_e2e.sh`, but **the end-to-end package script `tests/e2e/run_package_e2e.sh` has not been run**
-  (see [Current validation status](#15-current-validation-status)). Do not call the package/update path verified.
+  `run_integrity_e2e.sh`, and the end-to-end package script `tests/e2e/run_package_e2e.sh` passed 34/34 on the VM
+  against a local `file:` apt repository (2026-10-08; see [Current validation status](#15-current-validation-status)).
+  That is REAL-VM VERIFIED for install, upgrade, corrupted/wrong-key/unsigned repositories, downgrade/rollback and
+  tamper repair; it is not a statement about a remote repository, key custody or a fleet.
 * No automatic update, no automatic rollback on a failed start, no RPM, no SBOM.
 
 ## 12. Reliability
@@ -368,7 +370,7 @@ Summary as of the handoff pass:
 | Command plane | IMPLEMENTED + REAL-VM VERIFIED; `run_command_auth_e2e.sh` re-run after ADR 034 **pending** |
 | Signed local policy and sweep | IMPLEMENTED + REAL-VM VERIFIED |
 | Self-integrity and rollback detection | IMPLEMENTED + REAL-VM VERIFIED (integrity e2e) |
-| Signed package / apt repository path | IMPLEMENTED — **VALIDATION PENDING** (`tests/e2e/run_package_e2e.sh` never run) |
+| Signed package / apt repository path | IMPLEMENTED — **REAL-VM VERIFIED** (`tests/e2e/run_package_e2e.sh` 34/34, local file repository, one VM) |
 | ThreadSanitizer | PASSED (ctest + 30 min live) before the policy-sweep and rollback additions; re-run pending |
 | Long ASan/UBSan chaos | Full suite passed once; long repeat pending |
 | 6-hour soak | Older build (pre-ADR 033): **completed with one caveat** (health-timer drift while other work ran on the VM; [evidence](docs/endpoint/evidence/soak-2026-10-07/README.md)). Current build: **pending**, see [HANDOFF](docs/HANDOFF.md#6-hour-soak-status) |

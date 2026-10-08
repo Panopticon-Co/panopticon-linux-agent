@@ -32,7 +32,7 @@ vendored x86_64 5.15 BTF header, so the BPF build is not portable to other archi
 
 Packaging (`.deb`, signed apt repository): see [docs/endpoint/LINUX_ENDPOINT_CONFIGURATION.md](docs/endpoint/LINUX_ENDPOINT_CONFIGURATION.md)
 and the headers of `packaging/build_signed_deb.sh` and `packaging/build_apt_repo.sh`. **The package path is
-implemented; its end-to-end validation (`tests/e2e/run_package_e2e.sh`) is pending.**
+implemented and its end-to-end script (`tests/e2e/run_package_e2e.sh`) passed 34/34 on the Ubuntu 22.04 VM against a local `file:` apt repository (REAL-VM VERIFIED, 2026-10-08; see [evidence](docs/endpoint/evidence/package-e2e-2026-10-08/)). No remote repository, key-custody or fleet-update claim is made.**
 
 ## Foundation notes (original text)
 

@@ -18,6 +18,7 @@ WAL=/var/lib/panopticon/wal
 V1=0.9.1
 V2=0.9.2
 V3=0.9.3
+V4=0.9.4   # exists only in the untrusted repositories of step 4
 KEYRING=/usr/share/keyrings/panopticon-e2e.gpg
 FAILED=0
 PASSED=0
@@ -45,6 +46,9 @@ apt() { # apt-get restricted to this test's repository and private state
   apt-get -y -o Dir::Etc::sourcelist="$W/sources.list" -o Dir::Etc::sourceparts=/dev/null -o Dir::State::lists="$W/lists" \
     -o Dir::Cache::archives="$W/cache/archives" -o APT::Get::List-Cleanup=0 "$@" 2>&1
 }
+aptcache() { # apt-cache against the same private state
+  apt-cache -o Dir::Etc::sourcelist="$W/sources.list" -o Dir::Etc::sourceparts=/dev/null -o Dir::State::lists="$W/lists" "$@"
+}
 cleanup() {
   apt-get -y purge panopticon-sensord >/dev/null 2>&1
   rm -f "$KEYRING"
@@ -52,7 +56,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-say "setup: keys, packages $V1 $V2 $V3, signed repository"
+say "setup: keys, packages $V1 $V2 $V3 $V4, signed repository"
 "$SIGNER" keygen "$W/release.key" >/dev/null || exit 2
 gen_gpg() { GNUPGHOME=$1 gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key "$2 <$3@panopticon.invalid>" rsa3072 sign never >/dev/null 2>&1; }
 gen_gpg "$W/gnupg" "Panopticon E2E Release" release || { echo "gpg key generation failed" >&2; exit 2; }
@@ -60,7 +64,7 @@ gen_gpg "$W/gnupg-rogue" "Rogue" rogue || { echo "gpg key generation failed" >&2
 KEYID=$(GNUPGHOME=$W/gnupg gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
 ROGUEID=$(GNUPGHOME=$W/gnupg-rogue gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
 GNUPGHOME=$W/gnupg gpg --export >"$KEYRING"; chmod 644 "$KEYRING"
-for v in $V1 $V2 $V3; do
+for v in $V1 $V2 $V3 $V4; do
   DEB_VERSION=$v SOURCE_DATE_EPOCH=$(date +%s) bash "$ROOT/packaging/build_signed_deb.sh" "$B" "$W/release.key" "$W/debs" >/dev/null || { echo "cannot build $v" >&2; exit 2; }
 done
 ls "$W"/debs/*.deb | sed 's/^/[package]   /'
@@ -109,14 +113,19 @@ check_match "corrupt: apt names the mismatch" "unexpected size|Hash Sum mismatch
 check "corrupt: the installed version is unchanged" "$V2" "$(installed)"
 
 say "4. a repository signed by a key apt was not told to trust, and one that is not signed at all"
-repo "$W/gnupg-rogue" "$ROGUEID" "$(deb_of $V1)" "$(deb_of $V2)" "$(deb_of $V3)" || exit 2
+repo "$W/gnupg-rogue" "$ROGUEID" "$(deb_of $V1)" "$(deb_of $V2)" "$(deb_of $V3)" "$(deb_of $V4)" || exit 2
 OUT=$(apt update); RC=$?
 check_match "rogue key: update rejects the repository" "NO_PUBKEY|not signed|invalid|EXPKEYSIG|BADSIG|Release.*signed" "$OUT"
 rm -f "$W/repo/dists/stable/InRelease" "$W/repo/dists/stable/Release.gpg"
 OUT=$(apt update)
 check_match "unsigned: update rejects the repository" "not signed|no longer signed|Release" "$OUT"
-OUT=$(apt install panopticon-sensord="$V3"); RC=$?
-check "rogue/unsigned: nothing is installed from it" "$V2" "$(installed)"
+# A rejected update leaves apt's earlier, trusted lists in place (so $V3 stays installable from the genuine
+# repository, which is correct). What must not happen is that anything only the rejected repositories offer
+# becomes visible or installable.
+check "rogue/unsigned: the rejected index is not adopted (candidate)" 0 "$(aptcache madison panopticon-sensord | grep -c " $V4 ")"
+OUT=$(apt install panopticon-sensord="$V4"); RC=$?
+check "rogue/unsigned: $V4 cannot be installed" 1 "$([ "$RC" -ne 0 ] && echo 1 || echo 0)"
+check "rogue/unsigned: the installed version is unchanged" "$V2" "$(installed)"
 
 say "5. downgrade is refused, a deliberate rollback to $V1 works"
 repo "$W/gnupg" "$KEYID" "$(deb_of $V1)" "$(deb_of $V2)" "$(deb_of $V3)" || exit 2

@@ -22,6 +22,9 @@ Rules that were learned the hard way:
   chaos scripts track the pids they start; a name-based kill would take down the soak's sensor.
 * Detached long jobs: `setsid -f bash script.sh </dev/null >/dev/null 2>&1`, then poll their log. A `vagrant ssh`
   command is limited by your terminal's timeout, not by the VM.
+* If you copy the tree into the VM instead of cloning it, exclude only the **top-level** build directories (`tar --exclude=./build*`,
+  `rsync --exclude=/build*`). An unanchored `build*` also drops `packaging/build_signed_deb.sh` and `build_apt_repo.sh`, and a
+  wrong `rsync --delete` exclude deletes the VM's build trees.
 * `tests/e2e/run_package_e2e.sh` installs and purges the package: use a VM you can throw away.
 * Sanitizer builds need more memory than Release; chaos runs use `MEMCAP_MB=512` for them.
 * Power-loss chaos needs a hard power-off of the VM between its two runs (see `scenario_powerloss_crash` in

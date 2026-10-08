@@ -1,0 +1,58 @@
+[package] setup: keys, packages 0.9.1 0.9.2 0.9.3 0.9.4, signed repository
+gpg: checking the trustdb
+gpg: marginals needed: 3  completes needed: 1  trust model: pgp
+gpg: depth: 0  valid:   1  signed:   0  trust: 0-, 0q, 0n, 0m, 0f, 1u
+gpg: checking the trustdb
+gpg: marginals needed: 3  completes needed: 1  trust model: pgp
+gpg: depth: 0  valid:   1  signed:   0  trust: 0-, 0q, 0n, 0m, 0f, 1u
+manifest: 3 files, key 7039cba8814ec125, version 0.9.1
+manifest: 3 files, key 7039cba8814ec125, version 0.9.2
+manifest: 3 files, key 7039cba8814ec125, version 0.9.3
+manifest: 3 files, key 7039cba8814ec125, version 0.9.4
+[package]   /var/tmp/package-e2e/debs/panopticon-sensord_0.9.1_amd64.deb
+[package]   /var/tmp/package-e2e/debs/panopticon-sensord_0.9.2_amd64.deb
+[package]   /var/tmp/package-e2e/debs/panopticon-sensord_0.9.3_amd64.deb
+[package]   /var/tmp/package-e2e/debs/panopticon-sensord_0.9.4_amd64.deb
+[package] 1. install 0.9.1 from the signed repository
+[package] PASS update: the signed repository is accepted
+[package] PASS install: version (0.9.1)
+[package] PASS install: the config enables integrity
+[package] PASS install: the manifest ships (1)
+[package] PASS install: the service is active (active)
+[package] PASS install: the integrity provider is active (active)
+[package] PASS install: no tamper record (0)
+[package] 2. upgrade to 0.9.2: the replaced files must not look like tampering
+[package] PASS upgrade: version (0.9.2)
+[package] PASS upgrade: the service is active (active)
+[package] PASS upgrade: no violated record after the upgrade (0)
+[package] PASS upgrade: the integrity provider is active (active)
+[package] 3. a package changed in the repository after it was signed
+[package] PASS corrupt: the install is refused (1)
+[package] PASS corrupt: apt names the mismatch
+[package] PASS corrupt: the installed version is unchanged (0.9.2)
+[package] 4. a repository signed by a key apt was not told to trust, and one that is not signed at all
+[package] PASS rogue key: update rejects the repository
+[package] PASS unsigned: update rejects the repository
+[package] PASS rogue/unsigned: the rejected index is not adopted (candidate) (0)
+[package] PASS rogue/unsigned: 0.9.4 cannot be installed (1)
+[package] PASS rogue/unsigned: the installed version is unchanged (0.9.2)
+[package] 5. downgrade is refused, a deliberate rollback to 0.9.1 works
+[package] PASS downgrade: refused without the explicit flag (1)
+[package] PASS downgrade: still 0.9.2 (0.9.2)
+[package] PASS rollback: version (0.9.1)
+[package] PASS rollback: the service is active (active)
+[package] PASS rollback: reported as manifest_rollback (ADR 036) (1)
+[package] PASS rollback: nothing else is reported as violated (0)
+[package] PASS rollback: the integrity provider says so (degraded)
+[package] PASS rollback acknowledged: the service is active (active)
+[package] PASS rollback acknowledged: the integrity provider is active (active)
+[package] 6. an installed file is edited on the running system
+[package] PASS tamper: binary_modified on panopticon-ctl (1)
+[package] PASS tamper: attributed to the writer (869595)
+[package] PASS tamper: dpkg --verify agrees (1)
+[package] PASS repair: reinstall restores the file (42f7ed7bff9ed7643b0a9c9cf7bb097b32b56bfa601e98a5ceee2a962f30f8a3)
+[package] PASS repair: no violated record after the reinstall (0)
+[package] PASS repair: the integrity provider is active (active)
+[package] tamper records written to /var/tmp/package-e2e/tamper.ndjson: 3
+[package] passed 34, failed 0
+EXIT=0

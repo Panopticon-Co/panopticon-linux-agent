@@ -31,14 +31,14 @@ checks it for chaos and soak runs. Do not loosen its thresholds to make a run pa
 | `run_isolation_command_e2e.sh` | `ISOLATE_HOST` / `RELEASE_HOST_ISOLATION` through the command channel with real packets between namespaces (ADR 027) |
 | `run_integrity_e2e.sh` | Binary edit/replace/delete, manifest invalid/missing, rollback, restoration (ADR 033, 036) |
 | `run_policy_sweep_e2e.sh` | A signed policy applied to already-running processes (ADR 035) |
-| `run_package_e2e.sh` | Signed apt repository: install, upgrade, corrupted/wrong-key/unsigned repository, downgrade, tamper. **Never run yet** |
+| `run_package_e2e.sh` | Signed apt repository: install, upgrade, corrupted/wrong-key/unsigned repository, downgrade, tamper. **34/34 on the VM, 2026-10-08** ([log](docs/endpoint/evidence/package-e2e-2026-10-08/package-e2e.txt)) |
 | `run_isolation_*_e2e.sh`, `isolation_namespace_spike` | Foundation helper mechanics; also run in GitHub CI (see below) |
 
 ## Current results and what is pending
 
 See the table in [README.md](README.md#15-current-validation-status) and the handoff status in
 [docs/HANDOFF.md](docs/HANDOFF.md). In short: the unit/live/e2e/chaos/sanitizer/fuzz layers have passed on the
-validation VM; the 6-hour soak of the current build (an older build completed one, see the evidence directory), the packaged-path e2e, a re-run of the command-auth e2e after ADR 034, and the
+validation VM; the 6-hour soak of the current build (an older build completed one, see the evidence directory), a re-run of the command-auth e2e after ADR 034, and the
 performance ladder are pending.
 
 ## GitHub CI
