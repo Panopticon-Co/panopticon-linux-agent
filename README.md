@@ -137,7 +137,7 @@ Status is on Ubuntu 22.04 / 5.15 / x86_64 only.
 | Auth | `auth.login/failure/privilege` | audit netlink, auth log fallback | PARTIAL: SSH/sudo/su verified; PAM-config and account changes not covered |
 | Security | `lsm.denial`, `lsm.policy`, `netfilter.config_change` | audit netlink | REAL-VM VERIFIED for AppArmor and nftables; SELinux parsed, not verified |
 | Containers | `container.started/stopped`, container id on process records | cgroup path parsing | REAL-VM VERIFIED with docker; podman/CRI-O/Kubernetes by unit tests only |
-| Host state | `state.host`, `.posture`, `.users`, `.groups`, `.interfaces`, `.mounts`, `.modules`, `.persistence`, `.processes`, `.connections`, `.packages` (dpkg only), `.devices`; periodic diffs as `posture.changed`, `account.changed`, `interface.changed`, `package.changed`, `device.changed` | procfs/sysfs/dpkg collectors, snapshot differ | REAL-VM VERIFIED for the first group; packages, devices and the diff records are IMPLEMENTED + UNIT TESTED (`state_tests`), live confirmation pending. Default interval 1 h, so package changes are seen up to an hour late. `state.host` carries OS release, kernel, boot and CPU/memory/hypervisor; there is no DMI, disk or NIC hardware detail |
+| Host state | `state.host`, `.posture`, `.users`, `.groups`, `.interfaces`, `.mounts`, `.modules`, `.persistence`, `.processes`, `.connections`, `.packages` (dpkg only), `.devices`; periodic diffs as `posture.changed`, `account.changed`, `interface.changed`, `package.changed`, `device.changed` | procfs/sysfs/dpkg collectors, snapshot differ | REAL-VM VERIFIED for the first group; `state.packages` (9 chunked records on the VM) and `state.devices` were emitted live by a 60 s `--stdout` run on 2026-10-08; the `*.changed` diff records are IMPLEMENTED + UNIT TESTED (`state_tests`) and were not exercised live. Default interval 1 h, so package changes are seen up to an hour late. `state.host` carries OS release, kernel, boot and CPU/memory/hypervisor; there is no DMI, disk or NIC hardware detail |
 | Policy and response | `policy.match`, `policy.change`, `response.action` | policy engine, command processor | REAL-VM VERIFIED |
 | Self | `tamper.integrity`, `health`, `loss` | integrity monitor, pipeline | REAL-VM VERIFIED (`tamper.integrity`; package path 34/34 on the VM) |
 
@@ -371,8 +371,8 @@ Summary as of the handoff pass:
 | Signed local policy and sweep | IMPLEMENTED + REAL-VM VERIFIED |
 | Self-integrity and rollback detection | IMPLEMENTED + REAL-VM VERIFIED (integrity e2e) |
 | Signed package / apt repository path | IMPLEMENTED — **REAL-VM VERIFIED** (`tests/e2e/run_package_e2e.sh` 34/34, local file repository, one VM) |
-| ThreadSanitizer | PASSED (ctest + 30 min live) before the policy-sweep and rollback additions; re-run pending |
-| Long ASan/UBSan chaos | Full suite passed once; long repeat pending |
+| ThreadSanitizer | ctest 21/21 and a 5-scenario chaos subset (baseline, kill9, outage, ackloss, walseg) on the latest code, 2026-10-08, 0 TSan reports in the output; the 30 min live run predates the policy-sweep and rollback code and was not repeated |
+| ASan/UBSan | ctest 21/21 and the full 16-scenario chaos suite with `MEMCAP_MB=512` on the latest code, 2026-10-08, 0 sanitizer reports; one ~12 min pass, not a long repeat |
 | 6-hour soak | Older build (pre-ADR 033): **completed with one caveat** (health-timer drift while other work ran on the VM; [evidence](docs/endpoint/evidence/soak-2026-10-07/README.md)). Current build: **pending**, see [HANDOFF](docs/HANDOFF.md#6-hour-soak-status) |
 | Performance ladder and overload recovery | MEASURED once (2026-10-08), see the performance document; latency still NOT YET MEASURED |
 | Other kernels, distros, ARM64, SELinux | Not tested / out of current scope |

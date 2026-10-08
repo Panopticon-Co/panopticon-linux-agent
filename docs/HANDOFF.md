@@ -134,7 +134,7 @@ RSS/fd/thread trends after warm-up, an on-time health timer, and a clean shutdow
 | --- | --- |
 | Release unit tests (21 targets) | **21/21 passed** on the VM, Release build of `5491442` (documentation-only change on top of the last code commit `d90068c`), 2026-10-08 00:03–00:05 UTC, niced, as root, 131 s; 0 compiler warnings in the 143-target build |
 | ASan/UBSan | Full ctest and chaos 16/16 passed once; long repeat pending |
-| TSan | ctest 20/20, 30 min live, 0 reports, before policy sweep and rollback code; re-run pending |
+| TSan | 2026-10-08, latest code: ctest 21/21 + chaos subset (baseline, kill9, outage, ackloss, walseg), 0 reports. The earlier 30 min live run (before policy sweep and rollback code) was not repeated |
 | Chaos | 16/16 Release and ASan/UBSan; 14 kill -9; two power-loss runs |
 | Command authorization e2e | 51 checks passed before ADR 034; the lab-versus-packaged scenario 7 needs a re-run |
 | Integrity / rollback e2e | 26/26 |
@@ -159,7 +159,7 @@ Classification of every gap named in the plan, with the decision. "Today" means 
 | Latency measurements (kernel→WAL p99, host→Manager p95) | NOT YET MEASURED | Future: needs a timestamp harness; do not quote numbers |
 | Fuzzing | IMPLEMENTED + SUSTAINED-LOAD VERIFIED for one 900 s campaign | Future: longer campaigns, structure-aware corpora |
 | Long soak | Older build: COMPLETED with a health-timer caveat (SUSTAINED-LOAD VERIFIED for that build only). Current build: VALIDATION PENDING | Run soak 2 on an idle VM (section above) |
-| Long sanitized runs | PARTIALLY VERIFIED | Validate today: ASan/UBSan chaos with `MEMCAP_MB=512`, TSan on the latest code |
+| Long sanitized runs | REAL-VM VERIFIED once on the latest code (ASan/UBSan ctest 21/21, chaos 16/16 at `MEMCAP_MB=512`; TSan ctest 21/21, chaos subset); a long repeat and a long TSan live run remain future | Optional: repeat for hours before a release |
 | Pipeline scalability / concurrency | PARTIAL (single pipeline thread, ≈12,000 events/s loss-free; excess shed and reported) | Do not redesign without ladder evidence; sequence, ordering, loss accounting and WAL semantics must survive any change |
 | Manager-side command signing | IMPLEMENTED + REAL-VM VERIFIED against a real Manager process over HTTPS (S13.17: sign, verify, ledger, action, result; a command rewritten after signing was refused) | Remaining: the Manager branch is not merged; the signing key is a file held online by the Manager process (whoever controls it can sign); distributing the public key at enrollment is not built (see key custody) |
 | Forensic / evidence collection | PARTIAL (process info, file collect with hash, quarantine; no memory capture, no evidence signing or chain of custody) | Future |
@@ -204,14 +204,15 @@ Manager route does not accept it). `LINUX_ENDPOINT_SECURITY_MODEL.md` has the th
 
 ## Recommended next priorities
 
-1. Run the pending validations in this order on a quiet VM, then soak 2 (the soak last, because it needs the VM to itself): full Release ctest (done, 21/21), `run_package_e2e.sh` (done, 34/34), `run_command_auth_e2e.sh`, `tests/perf/ladder.py` (default and
-   `--recover`), long ASan/UBSan chaos, TSan on the latest code. Fix and re-run, and record results in
-   IMPLEMENTATION_STATUS.
+1. Soak 2: a 6-hour soak of the current build on an otherwise idle VM (see the soak section above for the command and
+   state). Everything else on the 2026-10-08 validation list (Release ctest 21/21, package e2e 34/34, command-auth
+   51/51, integrity 26/26, policy sweep 16/16, ladder and recovery, ASan/UBSan and TSan on the latest code) is done;
+   latency measurement and a long sanitizer repeat remain optional future work.
 2. Get the contracts and Manager branches reviewed and merged by their owners; decide the agent repository's default
    branch.
 3. Add what a real deployment needs next: tamper reporting for sensor kill/BPF detach, an externally anchored trust
    root (TPM/IMA or a signed key-distribution message), certificate pinning.
-4. Confirm the package/device inventory live, then close the highest-value telemetry gaps (library loads, injection, real-time package events) using the capability matrix.
+4. Close the highest-value telemetry gaps (library loads, injection, real-time package events) using the capability matrix.
 5. Measure latency and file-event performance; only then consider changing the pipeline threading.
 6. Decide, with Sokhi, when the endpoint is mature enough to connect to the Detection Engine through the Manager.
 

@@ -1,0 +1,47 @@
+# ASan+UBSan (RelWithDebInfo, clang), ctest
+
+100% tests passed, 0 tests failed out of 21
+
+Total Test time (real) =  35.92 sec
+
+# ASan+UBSan chaos, MEMCAP_MB=512
+  PASS  baseline  stored=3984 missing=0
+  PASS  kill9  kills=14 sensor_gap=14 after_clean_restart=14 stored=17632 missing=0 wal_loss_reported=0 conflicts=[]
+  PASS  outage-short  before=2220 stored=3204 missing=0
+  PASS  outage-long  stored=3756 missing=9900 wal_loss_reported=9900 excess=0
+  PASS  ackloss  stored=3845 missing=0 accounted=0 conflicts=[] retries=5 refusals=0 quarantined=0
+  PASS  badack  stored=3738 missing=0 accounted=0 conflicts=[] retries=0 refusals=5 quarantined=0
+  PASS  http503  stored=3960 missing=0 accounted=0 conflicts=[] retries=5 refusals=0 quarantined=0
+  PASS  rejected  stored=3781 missing=3 accounted=3 conflicts=[] retries=0 refusals=0 quarantined=3
+  PASS  slowack  stored=3608 missing=0 accounted=0 conflicts=[] retries=0 refusals=0 quarantined=0
+  PASS  diskfull  alive=yes sink_errors=7769->7809 stored=1870 missing=0 write_failed_reported=7578
+  PASS  clock  alive=yes stored=1598 missing=0 skewed_events=35 (limit 150) clock_steps_logged=3
+  PASS  walcorrupt  stored=2254 missing=1138 wal_loss_reported=1138 conflicts=[]
+  PASS  ringoverflow  generated=6000 seen=2731 kernel_loss_reported=9858 post_storm_seen=50/50 peak_rss=418MiB stored=8986
+  PASS  memcap  limit=512MiB alive=yes oom_kill=0 peak_rss=562MiB cgroup_current=413MiB stored=16337 missing=0 accounted=0
+  PASS  nofile  held=41 limit=41 alive=yes recovered_post_seen=30/30 stored=9891 missing=0 accounted=3
+  PASS  walseg  alive=yes post_removal_seen=40/40 removal_reported=yes quota_dropped=no stored=5855 missing=142 wal_loss_reported=142 problems=[]
+  PASS  waldir  alive=yes post_removal_seen=40/40 removal_reported=yes quota_dropped=no stored=1842 missing=0 wal_loss_reported=4233 problems=[]
+
+# TSan (RelWithDebInfo, clang), ctest
+
+100% tests passed, 0 tests failed out of 21
+
+Total Test time (real) =  35.77 sec
+
+# TSan chaos subset: baseline kill9 outage ackloss walseg
+  PASS  baseline  stored=3598 missing=0
+  PASS  kill9  kills=14 sensor_gap=14 after_clean_restart=14 stored=12365 missing=0 wal_loss_reported=0 conflicts=[]
+  PASS  outage-short  before=2218 stored=3286 missing=0
+  PASS  outage-long  stored=3823 missing=10137 wal_loss_reported=10137 excess=0
+  PASS  ackloss  stored=3755 missing=0 accounted=0 conflicts=[] retries=5 refusals=0 quarantined=0
+  PASS  walseg  alive=yes post_removal_seen=40/40 removal_reported=yes quota_dropped=no stored=6234 missing=136 wal_loss_reported=136 problems=[]
+
+2026-10-08T03:33:31Z asan-build-start
+2026-10-08T03:36:07Z asan-build-exit=0
+2026-10-08T03:36:43Z asan-ctest-exit=0
+2026-10-08T03:48:54Z asan-chaos-exit=0
+2026-10-08T03:48:54Z tsan-build-start
+2026-10-08T03:51:01Z tsan-build-exit=0
+2026-10-08T03:51:36Z tsan-ctest-exit=0
+2026-10-08T03:56:20Z tsan-chaos-exit=0
