@@ -137,13 +137,11 @@ Status is on Ubuntu 22.04 / 5.15 / x86_64 only.
 | Auth | `auth.login/failure/privilege` | audit netlink, auth log fallback | PARTIAL: SSH/sudo/su verified; PAM-config and account changes not covered |
 | Security | `lsm.denial`, `lsm.policy`, `netfilter.config_change` | audit netlink | REAL-VM VERIFIED for AppArmor and nftables; SELinux parsed, not verified |
 | Containers | `container.started/stopped`, container id on process records | cgroup path parsing | REAL-VM VERIFIED with docker; podman/CRI-O/Kubernetes by unit tests only |
-| Host state | `state.host`, `.posture`, `.users`, `.groups`, `.interfaces`, `.mounts`, `.modules`, `.persistence`, `.processes`, `.connections` | procfs/sysfs collectors | REAL-VM VERIFIED (partial inventory; no OS release or hardware inventory) |
+| Host state | `state.host`, `.posture`, `.users`, `.groups`, `.interfaces`, `.mounts`, `.modules`, `.persistence`, `.processes`, `.connections`, `.packages` (dpkg only), `.devices`; periodic diffs as `posture.changed`, `account.changed`, `interface.changed`, `package.changed`, `device.changed` | procfs/sysfs/dpkg collectors, snapshot differ | REAL-VM VERIFIED for the first group; packages, devices and the diff records are IMPLEMENTED + UNIT TESTED (`state_tests`), live confirmation pending. Default interval 1 h, so package changes are seen up to an hour late. `state.host` carries OS release, kernel, boot and CPU/memory/hypervisor; there is no DMI, disk or NIC hardware detail |
 | Policy and response | `policy.match`, `policy.change`, `response.action` | policy engine, command processor | REAL-VM VERIFIED |
 | Self | `tamper.integrity`, `health`, `loss` | integrity monitor, pipeline | REAL-VM VERIFIED (`tamper.integrity`); package path VALIDATION PENDING |
 
-Not collected (see [Known limitations](#16-known-limitations)): package install events and software inventory, shared
-library loads, `ptrace`/`process_vm_writev` injection, interface and route changes, USB, log tampering,
-cloud identity, io_uring, and file-write content.
+Not collected (see [Known limitations](#16-known-limitations)): rpm package inventory, real-time package install events (only an hourly dpkg diff), shared library loads, `ptrace`/`process_vm_writev` injection, route changes, USB hotplug events (only a device inventory), log tampering, cloud identity, io_uring, and file-write content.
 
 ## 5. Event pipeline
 
@@ -390,8 +388,8 @@ Summary as of the handoff pass:
 * **Package path unverified end to end**; no RPM; no SBOM; no automatic update.
 * **Single pipeline thread** limits loss-free throughput to roughly 12,000 events/s on the test VM; queue depth is
   not exposed in health.
-* **Telemetry gaps:** package events and inventory, library loads, injection (`ptrace`, `process_vm_writev`),
-  interface/route changes, USB, log tampering, OS release and hardware inventory, cloud identity.
+* **Telemetry gaps:** real-time package events and rpm inventory, library loads, injection (`ptrace`, `process_vm_writev`),
+  route changes, USB hotplug events, log tampering, DMI/disk hardware detail, cloud identity.
 * **Transport:** no certificate pinning; no compression (measured gain, Manager route does not accept it).
 * **Not integrated with the Detection Engine.** Intentionally deferred; the endpoint is meant to stay independently
   mature first.

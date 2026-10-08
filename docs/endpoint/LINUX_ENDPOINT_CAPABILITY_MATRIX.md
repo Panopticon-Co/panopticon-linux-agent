@@ -58,9 +58,9 @@ limits** · **Perf** impact · **Privacy** implications · **Test** method · **
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | A1 | Host identity (host id, machine-id, hostname, boot id) | M | Spoofed/duplicated sensors | `state.host` | PROCFS + `/etc/machine-id` | DMI product uuid | cloned golden images share machine-id → duplicate detection on (machine-id, enrollment key) | – | low | unit + VM | PARTIAL | PARTIAL |
-| A2 | Hardware inventory (CPU, memory, DMI vendor/model/serial, virtualisation) | S | Asset context | `state.host.hardware` | SYSFS dmi + `/proc/cpuinfo`, `/proc/meminfo` | partial if DMI unreadable | serial root-only | – | serial is PII-adjacent | VM | MISSING | MISSING |
+| A2 | Hardware inventory (CPU, memory, DMI vendor/model/serial, virtualisation) | S | Asset context | `state.host.hardware` | SYSFS dmi + `/proc/cpuinfo`, `/proc/meminfo` | partial if DMI unreadable | serial root-only | – | serial is PII-adjacent | VM | MISSING | PARTIAL |
 | A3 | Network identity (interfaces, MACs, addresses) | M | Correlation, lateral movement | `state.interfaces` | RTNL dump | `/sys/class/net` | – | – | MACs | VM | MISSING | PARTIAL |
-| B1 | OS / distribution / version | M | Vulnerability context | `state.host.os` | `/etc/os-release` | `/usr/lib/os-release` | – | – | none | unit | MISSING | MISSING |
+| B1 | OS / distribution / version | M | Vulnerability context | `state.host.os` | `/etc/os-release` | `/usr/lib/os-release` | – | – | none | unit | MISSING | PARTIAL |
 | B2 | Kernel version, cmdline, taint | M | Tainted kernel / rootkit | `state.kernel` | PROCFS version, cmdline, `kernel/tainted` | – | – | – | cmdline redaction | unit | PARTIAL | PARTIAL |
 | C1 | Security posture: Secure Boot, lockdown, active LSMs, SELinux/AppArmor mode, `kptr_restrict`, `ptrace_scope`, `unprivileged_bpf_disabled`, `modules_disabled`, ASLR, `core_pattern` | M | Weakened defences (TA0005) | `state.posture`, `posture.changed` | SYSFS + PROCFS | each item independently `unknown` | some need root | – | none | unit + VM | MISSING | PARTIAL |
 | C2 | Sensor capability report (BTF, BPF features, LSMs, fanotify, audit) | M | Silent coverage loss | `health.coverage` | capability prober | – | – | startup | none | VM matrix | MISSING | PARTIAL |
@@ -146,8 +146,8 @@ limits** · **Perf** impact · **Privacy** implications · **Test** method · **
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| AN1 | Package install/remove events | M | T1072, supply chain | `package.changed` | PKGDB change detection + diff | periodic diff | – | low | none | VM | MISSING | MISSING |
-| AO1 | Software inventory (deb, rpm; snap/flatpak optional) | M | Vulnerability management | `state.packages` | PKGDB | – | – | periodic | none | VM | MISSING | MISSING |
+| AN1 | Package install/remove events | M | T1072, supply chain | `package.changed` | PKGDB change detection + diff | periodic diff | hourly by default, dpkg only; not real-time | low | none | VM | MISSING | PARTIAL |
+| AO1 | Software inventory (deb, rpm; snap/flatpak optional) | M | Vulnerability management | `state.packages` | PKGDB | – | dpkg only (no rpm, snap or flatpak); unit tested, live run pending | periodic | none | VM | MISSING | PARTIAL |
 | AO2 | Package file verification | S | T1554 | `evidence.package_verify` | dpkg md5sums / `rpm -V` | – | on demand | med | none | VM | MISSING | MISSING |
 | AP1 | Kernel module load/unload + inventory + taint | M | T1547.006, T1014 | `kernel.module_load`, `state.modules` | EBPF-FENTRY `do_init_module` + SYSFS | `/proc/modules` diff | – | low | none | attack sim | MISSING | PARTIAL |
 | AP2 | Hidden-module cross-view | S | T1014 | `detection` | `/sys/module` vs `/proc/modules` vs kallsyms | – | heuristic | low | none | unit | MISSING | MISSING |
@@ -155,7 +155,7 @@ limits** · **Perf** impact · **Privacy** implications · **Test** method · **
 | AR1 | LSM / SELinux / AppArmor state and denials | M | T1562.001 | `posture.changed`, `lsm.denial` | SYSFS + AUDIT AVC/APPARMOR | JOURNAL kernel | – | low | none | VM | PARTIAL (AppArmor denials and profile load/replace/remove, SELinux AVC denials, mode and policy changes, from the audit stream as `lsm.denial` / `lsm.policy`; posture is polled in `state.posture`; no journal fallback) | VERIFIED for AppArmor on Ubuntu 22.04 / 5.15 / x86_64 root (profile load, replace, remove, read and create denials; Manager accepted); SELinux parsed from documented formats, NOT YET VERIFIED on a live SELinux host; other distros, kernels and aarch64 NOT YET VERIFIED |
 | AS1 | seccomp mode per process | S | Sandbox context | `process.seccomp` | PROCFS status | – | – | low | none | VM | MISSING | PARTIAL |
 | AT1 | Mounts (state + mount/umount events) | M | T1611, T1564 | `state.mounts`, `mount.changed` | EBPF-FENTRY `security_sb_mount` + mountinfo | mountinfo poll (POLLPRI) | – | low | none | attack sim | MISSING | PARTIAL |
-| AU1 | USB / removable media | S | T1091, T1052 | `device.attached` | UEVENT | `/sys/bus/usb` diff | – | low | device serials | VM | MISSING | MISSING |
+| AU1 | USB / removable media | S | T1091, T1052 | `device.attached` | UEVENT | `/sys/bus/usb` diff | inventory and diff only (`state.devices`, `device.changed`); no hotplug event; unit tested | low | device serials | VM | MISSING | PARTIAL |
 | AV1 | Log tampering (truncate/delete logs, `auditctl -D`) | M | T1070.002 | `file.*` + `audit.config_changed` | P1–P2 on log paths + AUDIT `CONFIG_CHANGE` | FSSCAN | – | low | none | attack sim | MISSING | MISSING |
 | AV2 | Selected log forwarding | O | context | `log.record` | JOURNAL | file tail | policy volume cap | med | log content | VM | MISSING | MISSING |
 | AW1 | Cloud instance identity (AWS/Azure/GCP) | S | Asset context | `state.cloud` | IMDS (IMDSv2) at start, opt-in | DMI hints | – | – | account ids | mocked IMDS | MISSING | MISSING |
@@ -165,7 +165,7 @@ limits** · **Perf** impact · **Privacy** implications · **Test** method · **
 
 | ID | Capability | Req | Threats | Events/state | Primary | Fallback chain | Accuracy limits | Perf | Privacy | Test | Baseline | Current |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| AX1 | Indicator matching (hash, IP, domain, path) from policy | M | IOC hits | `detection` (`ioc.*`) | pipeline matcher | – | bounded set size | low | none | unit | MISSING | MISSING |
+| AX1 | Indicator matching (hash, IP, domain, path) from policy | M | IOC hits | `detection` (`ioc.*`) | pipeline matcher | – | bounded set size; supported fields per ADR 016/032 | low | none | unit | MISSING | PARTIAL |
 | AY1 | Forensic evidence (process, maps, fds, env, sockets, exe copy, persistence, logs, packages, container) | M | Investigation | `evidence.*` | responder + state engine | – | memory capture bounded | on demand | high → audit trail | e2e | PARTIAL | PARTIAL |
 | AZ1 | Live host-state query for every §9 object | M | Hunting | `state.*` on demand | state engine + `QUERY_STATE` + `panopticon-ctl query` | – | – | on demand | per object | e2e | MISSING | PARTIAL |
 | BA1 | Exec prevention by hash/path | M | T1204 | `prevention.blocked` | EBPF-LSM `bprm_check_security` | FANOTIFY `FAN_OPEN_EXEC_PERM` | fanotify adds exec latency | low | none | attack sim | MISSING | MISSING |
@@ -193,9 +193,9 @@ limits** · **Perf** impact · **Privacy** implications · **Test** method · **
 | BG2 | Low latency (p95 host→Manager < 5 s normal load) | S | Timeliness | – | uplink | – | – | – | – | perf | MISSING | MISSING |
 | BH1 | Strict config + signed versioned policy | M | Tampering | `policy.applied` | config loader + policy engine | – | – | – | none | unit | PARTIAL | PARTIAL |
 | BI1 | Update / rollback | M | Bricked fleet | `sensor.updated` | package + rollback check | – | – | – | none | VM | MISSING | PARTIAL: a `.deb` (`cpack -G DEB`) installs the sensor as a hardened systemd service and survives upgrade, remove and purge, REAL-VM VERIFIED on Ubuntu 22.04. A signed build manifest and `tamper.integrity` (ADR 033) and detection of an older signed build as `manifest_rollback` (ADR 036) are REAL-VM VERIFIED in the integrity e2e; the signed-apt-repository path (`build_signed_deb.sh`, `build_apt_repo.sh`, `run_package_e2e.sh`) is IMPLEMENTED but NOT RUN. No automatic update, no refusal of an older build (detection only), no `sensor.updated` record, no rpm |
-| BJ1 | deb/rpm, systemd units, SBOM, signing | M | Supply chain | – | CPack + scripts | – | signing key is a release secret | – | none | VM install | MISSING | MISSING |
-| BK1 | Kernel/distro compatibility with per-capability fallback | M | Silent failure | `health.coverage` | prober | – | – | – | none | matrix | MISSING | MISSING |
-| BL1 | Performance budgets and governor | M | Host destabilisation | `health.resources`, `loss` | governor | – | – | – | none | perf | MISSING | MISSING |
+| BJ1 | deb/rpm, systemd units, SBOM, signing | M | Supply chain | – | CPack + scripts | – | signed deb and apt repository implemented (package e2e pending); no rpm, no SBOM; signing key is a release secret | – | none | VM install | MISSING | PARTIAL |
+| BK1 | Kernel/distro compatibility with per-capability fallback | M | Silent failure | `health.coverage` | prober | – | per-capability coverage and tiers reported; only kernel 5.15 validated | – | none | matrix | MISSING | PARTIAL |
+| BL1 | Performance budgets and governor | M | Host destabilisation | `health.resources`, `loss` | governor | – | queue, governor and WAL-quota loss stages; idle/overhead/storm measured; ladder and latency pending | – | none | perf | MISSING | PARTIAL |
 | BM1 | Recovery (crash restart, WAL replay, re-attach, resync) | M | Gaps after crash or hook removal | `sensor.started`, `sensor_gap` / `provider_gap` loss | systemd + WAL + reconcile + hook re-attach (S13.16) | – | – | – | none | chaos, live eBPF tests, gdb `close()` on the daemon | PARTIAL | PARTIAL |
 | BN1 | Test infrastructure (unit, ground truth, attack, fuzz, chaos, matrix) | M | Regressions | – | – | – | – | – | – | CI + VM | PARTIAL | PARTIAL |
 | BO1 | Hardening (systemd sandboxing, capability bounding, FORTIFY, PIE/RELRO/NX, stack protector, no shell-outs) | M | Sensor as attack surface | – | build + units | – | – | – | – | checksec + review | PARTIAL | PARTIAL |

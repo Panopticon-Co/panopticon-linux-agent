@@ -135,7 +135,7 @@ Classification of every gap named in the plan, with the decision. "Today" means 
 | Self-protection | PARTIAL (service hardening, integrity detection; no anti-kill, no protected process) | Future; document, do not claim |
 | Binary self-integrity | IMPLEMENTED + REAL-VM VERIFIED | Done; same-host trust anchor is a documented limit |
 | Signed package / update path | IMPLEMENTED — VALIDATION PENDING | Validate today after the soak (`run_package_e2e.sh`); fix what it finds |
-| Missing telemetry categories (package events, library loads, injection, interface/route, USB, log tampering, OS/hardware inventory, cloud identity) | NOT IMPLEMENTED | Future, ranked in the capability matrix; no stubs |
+| Missing telemetry categories (real-time package events and rpm inventory, library loads, injection, route changes, USB hotplug, log tampering, DMI/disk hardware detail, cloud identity) | NOT IMPLEMENTED. Present but only unit tested so far: dpkg package inventory and hourly `package.changed`, device inventory, `interface.changed`, `account.changed`, `posture.changed` | Future, ranked in the capability matrix; no stubs |
 | File telemetry performance | PARTIALLY VERIFIED (mixed workload and FIM; no dedicated file-event storm ladder) | Future: add a file storm to `tests/perf` |
 | Latency measurements (kernel→WAL p99, host→Manager p95) | NOT YET MEASURED | Future: needs a timestamp harness; do not quote numbers |
 | Fuzzing | IMPLEMENTED + SUSTAINED-LOAD VERIFIED for one 900 s campaign | Future: longer campaigns, structure-aware corpora |
@@ -153,7 +153,7 @@ Repeated here so a maintainer does not have to hunt: single validated platform; 
 same host (a root attacker who replaces the binary can replace the keys and manifest); no secure-boot/IMA/TPM anchor;
 killing the sensor, detaching its BPF programs or ptracing it is not reported as `tamper.*` (the next start reports
 the blind interval as `sensor_gap`); no certificate pinning; no independent security review; the package path is not
-verified; telemetry gaps listed above; queue depth is not exposed in health; transport compression is not used (the
+verified; telemetry gaps listed above (the capability matrix still shows package inventory as MISSING; the code has a dpkg inventory); queue depth is not exposed in health; transport compression is not used (the
 Manager route does not accept it). `LINUX_ENDPOINT_SECURITY_MODEL.md` has the threat-by-threat list.
 
 ## Integration boundaries
@@ -193,7 +193,7 @@ Manager route does not accept it). `LINUX_ENDPOINT_SECURITY_MODEL.md` has the th
    branch.
 3. Add what a real deployment needs next: tamper reporting for sensor kill/BPF detach, an externally anchored trust
    root (TPM/IMA or a signed key-distribution message), certificate pinning.
-4. Close the highest-value telemetry gaps (package events, library loads, injection) using the capability matrix.
+4. Confirm the package/device inventory live, then close the highest-value telemetry gaps (library loads, injection, real-time package events) using the capability matrix.
 5. Measure latency and file-event performance; only then consider changing the pipeline threading.
 6. Decide, with Sokhi, when the endpoint is mature enough to connect to the Detection Engine through the Manager.
 
