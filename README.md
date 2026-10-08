@@ -364,6 +364,7 @@ Summary as of the handoff pass:
 
 | Area | State |
 | --- | --- |
+| Release build and unit tests | 21/21 CTest targets passed on the VM at `5491442` (0 compiler warnings); sanitizer and TSan runs predate the last additions |
 | Telemetry providers on 5.15 | IMPLEMENTED + REAL-VM VERIFIED |
 | WAL, uplink, loss accounting | IMPLEMENTED + REAL-VM VERIFIED + chaos (Release and ASan/UBSan) |
 | Command plane | IMPLEMENTED + REAL-VM VERIFIED; `run_command_auth_e2e.sh` re-run after ADR 034 **pending** |
@@ -454,7 +455,7 @@ name, so never run them on a VM that is running a soak.
 ## 20. VM validation
 
 All real-kernel validation ran on one Vagrant/VirtualBox VM (`generic/ubuntu2204`, kernel 5.15.0-91, 8 vCPU, 6 GB).
-The Vagrantfile and sync procedure are in [docs/HANDOFF.md](docs/HANDOFF.md#vm-setup). `docs/VM_VALIDATION_GAPS.md`
+The Vagrantfile is [tests/vm/Vagrantfile](tests/vm/Vagrantfile); setup and rules are in [tests/vm/README.md](tests/vm/README.md) and [docs/HANDOFF.md](docs/HANDOFF.md#vm-setup). `docs/VM_VALIDATION_GAPS.md`
 lists what CI proves versus what needs a VM.
 
 ## 21. Repository structure

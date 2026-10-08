@@ -99,7 +99,7 @@ result below says so.**
 | Progress when last read | 435 samples at 23:49 UTC (3 h 37 min); sensor alive, `healthy` between induced faults; RSS 43 MB at start, 67 MB at 3.6 h (growth under analysis, **no verdict yet**), 12 threads, 90 fds |
 | Induced degraded periods (expected) | Manager outage of 90 s every 30 min, slow acknowledgements, dropped acknowledgements, and signed-policy rollback attempts every fifth publish (which turn health `degraded`, by design) |
 | Unexpected degraded periods | None observed so far; to be checked against the complete log |
-| Perturbation windows | Builds and test runs on the same VM while the soak ran: about 20:27–21:30, 21:37–21:55, 22:00–22:12, 22:30–22:35 UTC. A verdict that depends on those minutes must say so |
+| Perturbation windows | Builds and test runs on the same VM while the soak ran: about 20:27–21:30, 21:37–21:55, 22:00–22:12, 22:30–22:35 UTC, and a niced Release build plus full ctest 23:55–00:05 UTC (the ctest itself 00:03–00:05). A verdict that depends on those minutes must say so |
 | Result | **PENDING.** `/var/tmp/soak/report.txt` and `report.json` are written when it finishes |
 
 The RSS verdict in `tests/soak/soak.py` deliberately prints "NOT ENOUGH DATA" for runs under 2 h. A pass requires:
@@ -113,7 +113,7 @@ a restart is a new run.
 
 | Validation | State |
 | --- | --- |
-| Release unit tests (21 targets) | Passed on the 5.15 VM at each milestone; the latest full run on the final commit is **pending** (a ctest started during the soak pointed at an unbuilt directory and is not evidence) |
+| Release unit tests (21 targets) | **21/21 passed** on the VM, Release build of `5491442` (documentation-only change on top of the last code commit `d90068c`), 2026-10-08 00:03–00:05 UTC, niced, as root, 131 s; 0 compiler warnings in the 143-target build |
 | ASan/UBSan | Full ctest and chaos 16/16 passed once; long repeat pending |
 | TSan | ctest 20/20, 30 min live, 0 reports, before policy sweep and rollback code; re-run pending |
 | Chaos | 16/16 Release and ASan/UBSan; 14 kill -9; two power-loss runs |
@@ -142,7 +142,7 @@ Classification of every gap named in the plan, with the decision. "Today" means 
 | Long soak | VALIDATION PENDING (running) | See above |
 | Long sanitized runs | PARTIALLY VERIFIED | Validate after the soak: ASan/UBSan chaos with `MEMCAP_MB=512`, TSan on the latest code |
 | Pipeline scalability / concurrency | PARTIAL (single pipeline thread, ≈12,000 events/s loss-free; excess shed and reported) | Do not redesign without ladder evidence; sequence, ordering, loss accounting and WAL semantics must survive any change |
-| Manager-side command signing | IMPLEMENTED (Manager branch; signing vectors cross-checked) — PARTIALLY VERIFIED (fake Manager and signer binary, not a deployed Manager) | Future: end-to-end against the real Manager service |
+| Manager-side command signing | IMPLEMENTED + REAL-VM VERIFIED against a real Manager process over HTTPS (S13.17: sign, verify, ledger, action, result; a command rewritten after signing was refused) | Remaining: the Manager branch is not merged; the signing key is a file held online by the Manager process (whoever controls it can sign); distributing the public key at enrollment is not built (see key custody) |
 | Forensic / evidence collection | PARTIAL (process info, file collect with hash, quarantine; no memory capture, no evidence signing or chain of custody) | Future |
 | Secure update / rollback | Rollback **detection** IMPLEMENTED + REAL-VM VERIFIED; automatic update and automatic rollback NOT IMPLEMENTED | Future: out of the current scope |
 | Cross-kernel / distro / architecture | FUTURE — OUT OF SCOPE | 6.x needs BPF verifier fixes (`on_tcp_accept` is rejected); ARM64 needs its own `vmlinux.h`; SELinux unverified |
