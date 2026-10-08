@@ -8,7 +8,7 @@ the table below is the short list of validation that still needs a VM.**
 
 | Gap | Command | Blocking |
 | --- | --- | --- |
-| 6-hour soak (result recorded in the handoff once complete) | `sudo tests/soak/run_soak.sh 6 /var/tmp/soak` | No |
+| 6-hour soak of the current build (an older build completed one; see [HANDOFF](HANDOFF.md#6-hour-soak-status)) | `sudo PANOPTICON_SOURCE_HEAD=$(git rev-parse HEAD) tests/soak/run_soak.sh 6 /var/tmp/soak2` on an idle VM | No |
 | Signed package / apt repository end to end | `sudo tests/e2e/run_package_e2e.sh` (disposable VM only) | Yes, for calling the package path verified |
 | Command authorization after ADR 034 | `sudo tests/e2e/run_command_auth_e2e.sh` | No |
 | Throughput ladder and overload recovery | `sudo python3 tests/perf/ladder.py` and `--recover` | No |

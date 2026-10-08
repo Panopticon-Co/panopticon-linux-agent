@@ -231,7 +231,7 @@ Key custody: [docs/endpoint/LINUX_ENDPOINT_KEY_CUSTODY.md](docs/endpoint/LINUX_E
 | --- | --- | --- |
 | Command authenticity | Per-command ES256, pinned and revocable keyring, signature checked before any other decision | REAL-VM VERIFIED |
 | Command replay / retargeting | Durable ledger, boot and start-time binding, lifetimes, rate limit | REAL-VM VERIFIED, chaos-tested |
-| Policy authenticity | Signed bundle, separate keyring, monotonic version, expiry, key revocation | UNIT TESTED; REAL-VM VERIFIED (policy sweep e2e); soak workload running |
+| Policy authenticity | Signed bundle, separate keyring, monotonic version, expiry, key revocation | UNIT TESTED; REAL-VM VERIFIED (policy sweep e2e); exercised for 6 h in the older-build soak (145 loaded, 35 rollbacks refused) |
 | Trusted configuration | Config, CA bundle and key lists must be regular files owned by root/sensor, not group/world writable, in non-writable directories ([ADR 031](docs/adr/031-trusted-configuration-and-service-unit.md)) | UNIT TESTED |
 | Binary / install integrity | Signed build manifest, running-image hash, `tamper.integrity` | REAL-VM VERIFIED (26 checks); signed package path VALIDATION PENDING |
 | Rollback detection | Signed `built_at` high-water mark | REAL-VM VERIFIED (integrity e2e scenario 8) |
@@ -314,7 +314,7 @@ flowchart LR
 | Crash / power loss | 14 kill -9; two power-loss crashes | REAL-VM VERIFIED |
 | Thread-safety | Full ctest under ThreadSanitizer 20/20, 30-minute live run, 0 reports | SUSTAINED-LOAD VERIFIED (30 min) |
 | Parser robustness | 16 libFuzzer harnesses, 900 s each, seeded corpora | SUSTAINED-LOAD VERIFIED (per campaign) |
-| Long-duration stability | 6-hour Release soak | **VALIDATION PENDING** (running; see [HANDOFF](docs/HANDOFF.md#6-hour-soak-status)) |
+| Long-duration stability | 6-hour Release soak of an **older** build (before ADR 033): completed, 0 missing `seq`, RSS/fds/threads stable, health timer `DRIFT` coinciding with other VM work. Soak of the current build **not run yet** | SUSTAINED-LOAD VERIFIED for the older build only; current build VALIDATION PENDING ([evidence](docs/endpoint/evidence/soak-2026-10-07/README.md), [HANDOFF](docs/HANDOFF.md#6-hour-soak-status)) |
 
 ## 13. Performance
 
@@ -371,7 +371,7 @@ Summary as of the handoff pass:
 | Signed package / apt repository path | IMPLEMENTED — **VALIDATION PENDING** (`tests/e2e/run_package_e2e.sh` never run) |
 | ThreadSanitizer | PASSED (ctest + 30 min live) before the policy-sweep and rollback additions; re-run pending |
 | Long ASan/UBSan chaos | Full suite passed once; long repeat pending |
-| 6-hour soak | **Pending.** See [docs/HANDOFF.md](docs/HANDOFF.md#6-hour-soak-status) for exact status |
+| 6-hour soak | Older build (pre-ADR 033): **completed with one caveat** (health-timer drift while other work ran on the VM; [evidence](docs/endpoint/evidence/soak-2026-10-07/README.md)). Current build: **pending**, see [HANDOFF](docs/HANDOFF.md#6-hour-soak-status) |
 | Performance ladder | Harness written, **run pending** |
 | Other kernels, distros, ARM64, SELinux | Not tested / out of current scope |
 

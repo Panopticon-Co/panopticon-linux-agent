@@ -38,7 +38,7 @@ checks it for chaos and soak runs. Do not loosen its thresholds to make a run pa
 
 See the table in [README.md](README.md#15-current-validation-status) and the handoff status in
 [docs/HANDOFF.md](docs/HANDOFF.md). In short: the unit/live/e2e/chaos/sanitizer/fuzz layers have passed on the
-validation VM; the 6-hour soak, the packaged-path e2e, a re-run of the command-auth e2e after ADR 034, and the
+validation VM; the 6-hour soak of the current build (an older build completed one, see the evidence directory), the packaged-path e2e, a re-run of the command-auth e2e after ADR 034, and the
 performance ladder are pending.
 
 ## GitHub CI

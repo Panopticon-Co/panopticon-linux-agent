@@ -2,7 +2,8 @@
 # Multi-hour soak of the sensor under mixed load, Manager faults and signed dry-run commands (see soak.py).
 #
 # usage: sudo tests/soak/run_soak.sh [hours] [work-dir]
-# Environment: SENSORD, CTL, SIGNER (default build-rel/...), SCALE (workload multiplier, default 1).
+# Environment: SENSORD, CTL, SIGNER (default build-rel/...), SCALE (workload multiplier, default 1),
+#              PANOPTICON_SOURCE_HEAD (the commit that was built, recorded in run.json when the tree has no .git).
 # Results: <work-dir>/report.txt and report.json; the raw samples, store and logs stay beside them.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)

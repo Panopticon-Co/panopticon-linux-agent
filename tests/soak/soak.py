@@ -26,6 +26,7 @@ report.txt and report.json with `analyze`.
 """
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import random
@@ -470,6 +471,28 @@ class Soak:
         with open(self.path("mode"), "w", encoding="utf-8") as handle:
             handle.write(text + "\n")
 
+    def build_identity(self):
+        """What was soaked: the sensor binary's hash and size, and the source tree it sits in (a soak of an older build
+        than the current source says nothing about the current source)."""
+        identity = {"sensord": self.args.sensord}
+        try:
+            with open(self.args.sensord, "rb") as handle:
+                data = handle.read()
+            identity.update({"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
+                             "built_at": datetime.datetime.fromtimestamp(os.path.getmtime(self.args.sensord), datetime.timezone.utc).isoformat()})
+        except OSError as error:
+            identity["error"] = str(error)
+        for key, command in (("source_head", ["git", "rev-parse", "HEAD"]), ("source_dirty", ["git", "status", "--porcelain", "--untracked-files=no"])):
+            try:
+                out = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=20).stdout.strip()
+                identity[key] = out if key == "source_head" else bool(out)
+            except (OSError, subprocess.SubprocessError):
+                identity[key] = None
+        if not identity.get("source_head"):
+            # A tree copied to a VM has no .git: pass the commit that was built in PANOPTICON_SOURCE_HEAD.
+            identity["source_head"] = os.environ.get("PANOPTICON_SOURCE_HEAD") or None
+        return identity
+
     def run(self):
         try:
             return self.soak()
@@ -578,7 +601,8 @@ class Soak:
         victim.kill()
         with open(self.path("run.json"), "w", encoding="utf-8") as handle:
             json.dump({"start": start, "end": time.time(), "hours": hours, "stopped_early": stopped_early, "commands_sent": commands,
-                       "victim_alive_at_end": alive_at_end, "drained": drained, "sensor_exit_code": exit_code, "faults": faults}, handle)
+                       "victim_alive_at_end": alive_at_end, "drained": drained, "sensor_exit_code": exit_code, "faults": faults,
+                       "build": self.build_identity()}, handle)
         integrity = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "chaos", "analyze.py"), self.path("store.ndjson"), "--json"],
                                    capture_output=True, text=True)
         with open(self.path("integrity.json"), "w", encoding="utf-8") as handle:

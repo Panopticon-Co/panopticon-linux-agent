@@ -7,7 +7,7 @@ For engineers taking over the Panopticon Linux endpoint who may not know the his
 **One-sentence summary.** `panopticon-sensord` is a resident C++20 Linux sensor with eBPF/fanotify/audit
 telemetry, a durable write-ahead log, at-least-once delivery to the Manager, signed commands and signed local
 policy, and self-integrity checks; it is validated on one platform (Ubuntu 22.04, kernel 5.15, x86_64, in a VM),
-is not claimed to be production-ready, and four validations are still pending (6-hour soak, package end-to-end,
+is not claimed to be production-ready, and four validations are still pending (a 6-hour soak of the current build, package end-to-end,
 command-auth re-run after ADR 034, performance ladder).
 
 ## Contents
@@ -88,26 +88,46 @@ Labels as defined in the README. Evidence lives in IMPLEMENTATION_STATUS (sectio
 
 ## 6-hour soak status
 
-**Not complete at the time this section was written. Do not read "the soak passed" from this repository until the
-result below says so.**
+Two different statements, kept apart on purpose:
+
+* **Soak 1, an older build: COMPLETED with one caveat** (2026-10-07 20:12:05 to 2026-10-08 02:12:07 UTC).
+* **Soak 2, the current build: NOT RUN YET.** The build that was soaked predates the integrity monitor (ADR 033),
+  the unsigned-command compile-out (ADR 034), the policy sweep (ADR 035) and rollback detection (ADR 036). Do not
+  read "the Linux endpoint passed a 6-hour soak" from this repository.
+
+### Soak 1 result
+
+Full analysis, files and caveats: [endpoint/evidence/soak-2026-10-07/README.md](endpoint/evidence/soak-2026-10-07/README.md).
 
 | Item | Value |
 | --- | --- |
-| Command | `sudo tests/soak/run_soak.sh 6 /var/tmp/soak` (Release build `build-rel`; environment `SENSORD`, `CTL`, `SIGNER`, `SCALE`) |
-| Started | 2026-10-07 20:12:05 UTC (VM clock), sensor pid 248602 |
-| Planned duration / expected end | 6.00 h, ending about 02:12 UTC on 2026-10-08, plus a drain and analysis |
-| Progress when last read | 471 samples at 3.92 h (about 00:08 UTC 2026-10-08); sensor alive in every sample; threads constant at 12; fds 84–92; RSS 43 MB at start, rising to 66.8 MB by about 1.5 h and flat at 66.8 MB since (hours 2 and 3). **Preliminary only; no verdict until the full 6 h is analyzed** |
-| Induced degraded periods (expected) | Manager outage of 90 s every 30 min, slow acknowledgements, dropped acknowledgements, and signed-policy rollback attempts every fifth publish (which turn health `degraded`, by design) |
-| Unexpected degraded periods | None so far: of 471 samples, 124 were `degraded` and all 124 are induced (92 policy-rollback refusals, 32 command polls failing during Manager outages); 347 `healthy`. To be rechecked against the complete log |
-| Perturbation windows | Builds and test runs on the same VM while the soak ran: about 20:27–21:30, 21:37–21:55, 22:00–22:12, 22:30–22:35 UTC, and a niced Release build plus full ctest 23:55–00:05 UTC (the ctest itself 00:03–00:05). A verdict that depends on those minutes must say so |
-| Result | **PENDING.** `/var/tmp/soak/report.txt` and `report.json` are written when it finishes |
+| Command | `sudo tests/soak/run_soak.sh 6 /var/tmp/soak`, Release `build-rel` (binary sha256 prefix `b8c098c06f71ce25`, built 18:12 UTC, before ADR 033) |
+| Duration, samples | 6.00 h, 721 samples; drained; sensor exit code 0; not stopped early |
+| Volume | 3,739,651 events (173 /s), 3,742,620 records stored, first `seq` 1, last 3,742,620, **0 missing**, no conflicts |
+| RSS | 53.4 MiB after warm-up, peak 65.2 MiB; rose for about 1.5 h then flat (second-half slope 0.000 MiB/h): verdict stable |
+| Threads, fds | 12 constant; 84 to 92: stable |
+| CPU | 12.15 % of one core overall under a deliberately heavy mixed workload |
+| Delivery | 38,380 batches, 0 refusals, 0 quarantined, 0 sink errors, 101 retries (induced), at most 26,412 records unacknowledged during an induced fault, 6 at the end |
+| Commands | 180 signed commands, 180 answered, 0 duplicates, victim alive; the 90 kills were rejected `dry_run` |
+| Signed policy | 145 publishes loaded, 35 rollback publishes refused, 146,866 matches, none before their subject |
+| Degraded periods | Only induced ones: `policy` 140 samples (refused rollback), `command_channel` 48 (Manager outages). None unexpected |
+| Loss | 54,904 events at stage `governor`, all inside three windows when builds or test suites ran on the same VM; reported, not silent |
+| Verdicts | 8 of 9 clean. **Health timer: DRIFT** (p99 12.5 s vs 10 s nominal, max 39.2 s). Every long interval except two (22:21 UTC, cause not established) is within a few minutes of other VM work; the last two unperturbed hours had none above 10.9 s |
+| Perturbation windows | Builds and test runs on the same VM during the soak: about 20:27–21:30, 21:37–21:55, 22:00–22:12, 22:30–22:35, 23:55–00:05 UTC |
 
-The RSS verdict in `tests/soak/soak.py` deliberately prints "NOT ENOUGH DATA" for runs under 2 h. A pass requires:
-no unexplained loss or gap, `seq` contiguous, WAL and policy accounting consistent, RSS/fd/thread trends bounded
-after warm-up, and a clean shutdown. Do not call stability proven from a short run.
+### Soak 2 (current build): how to run it
 
-To reproduce or resume: build `build-rel` Release, then run the command above on a quiet VM. It cannot be paused;
-a restart is a new run.
+```bash
+cd panopticon-linux-agent
+cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-rel --parallel
+sudo PANOPTICON_SOURCE_HEAD=$(git rev-parse HEAD) tests/soak/run_soak.sh 6 /var/tmp/soak2
+```
+
+Run it on an otherwise idle VM, with no builds, tests or other sensors for the whole six hours (the report records the
+sensor binary's hash and the commit, so it names what was soaked). It cannot be paused; a restart is a new run.
+`python3 tests/soak/gaps.py /var/tmp/soak2` lists the long health intervals and loss records with times.
+A pass requires no unexplained loss or gap, contiguous `seq`, consistent WAL and policy accounting, bounded
+RSS/fd/thread trends after warm-up, an on-time health timer, and a clean shutdown.
 
 ## Validation evidence and what is pending
 
@@ -134,13 +154,13 @@ Classification of every gap named in the plan, with the decision. "Today" means 
 | Prevention / enforcement | NOT IMPLEMENTED | Future: BPF-LSM or fanotify-permission design needed; out of the current scope |
 | Self-protection | PARTIAL (service hardening, integrity detection; no anti-kill, no protected process) | Future; document, do not claim |
 | Binary self-integrity | IMPLEMENTED + REAL-VM VERIFIED | Done; same-host trust anchor is a documented limit |
-| Signed package / update path | IMPLEMENTED — VALIDATION PENDING | Validate today after the soak (`run_package_e2e.sh`); fix what it finds |
+| Signed package / update path | IMPLEMENTED — VALIDATION PENDING | Validate today (`run_package_e2e.sh`); fix what it finds |
 | Missing telemetry categories (real-time package events and rpm inventory, library loads, injection, route changes, USB hotplug, log tampering, DMI/disk hardware detail, cloud identity) | NOT IMPLEMENTED. Present but only unit tested so far: dpkg package inventory and hourly `package.changed`, device inventory, `interface.changed`, `account.changed`, `posture.changed` | Future, ranked in the capability matrix; no stubs |
 | File telemetry performance | PARTIALLY VERIFIED (mixed workload and FIM; no dedicated file-event storm ladder) | Future: add a file storm to `tests/perf` |
 | Latency measurements (kernel→WAL p99, host→Manager p95) | NOT YET MEASURED | Future: needs a timestamp harness; do not quote numbers |
 | Fuzzing | IMPLEMENTED + SUSTAINED-LOAD VERIFIED for one 900 s campaign | Future: longer campaigns, structure-aware corpora |
-| Long soak | VALIDATION PENDING (running) | See above |
-| Long sanitized runs | PARTIALLY VERIFIED | Validate after the soak: ASan/UBSan chaos with `MEMCAP_MB=512`, TSan on the latest code |
+| Long soak | Older build: COMPLETED with a health-timer caveat (SUSTAINED-LOAD VERIFIED for that build only). Current build: VALIDATION PENDING | Run soak 2 on an idle VM (section above) |
+| Long sanitized runs | PARTIALLY VERIFIED | Validate today: ASan/UBSan chaos with `MEMCAP_MB=512`, TSan on the latest code |
 | Pipeline scalability / concurrency | PARTIAL (single pipeline thread, ≈12,000 events/s loss-free; excess shed and reported) | Do not redesign without ladder evidence; sequence, ordering, loss accounting and WAL semantics must survive any change |
 | Manager-side command signing | IMPLEMENTED + REAL-VM VERIFIED against a real Manager process over HTTPS (S13.17: sign, verify, ledger, action, result; a command rewritten after signing was refused) | Remaining: the Manager branch is not merged; the signing key is a file held online by the Manager process (whoever controls it can sign); distributing the public key at enrollment is not built (see key custody) |
 | Forensic / evidence collection | PARTIAL (process info, file collect with hash, quarantine; no memory capture, no evidence signing or chain of custody) | Future |
@@ -185,8 +205,7 @@ Manager route does not accept it). `LINUX_ENDPOINT_SECURITY_MODEL.md` has the th
 
 ## Recommended next priorities
 
-1. Read the soak report (section above) and record the verdict; run the pending validations in this order on a
-   quiet VM: full Release ctest, `run_package_e2e.sh`, `run_command_auth_e2e.sh`, `tests/perf/ladder.py` (default and
+1. Run the pending validations in this order on a quiet VM, then soak 2 (the soak last, because it needs the VM to itself): full Release ctest, `run_package_e2e.sh`, `run_command_auth_e2e.sh`, `tests/perf/ladder.py` (default and
    `--recover`), long ASan/UBSan chaos, TSan on the latest code. Fix and re-run, and record results in
    IMPLEMENTATION_STATUS.
 2. Get the contracts and Manager branches reviewed and merged by their owners; decide the agent repository's default

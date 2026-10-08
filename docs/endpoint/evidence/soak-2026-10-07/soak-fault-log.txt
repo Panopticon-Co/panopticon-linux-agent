@@ -1,0 +1,39 @@
+[soak 20:12:05] sensor 248602, manager 248601, load 248616, victim 248615; 6.00 h
+[soak 20:27:06] manager outage (90 s)
+[soak 20:28:36] manager back
+[soak 20:52:05] slow acks (120 s)
+[soak 20:57:06] manager outage (90 s)
+[soak 20:58:37] manager back
+[soak 21:02:05] three dropped acks
+[soak 21:27:05] manager outage (90 s)
+[soak 21:28:35] manager back
+[soak 21:52:05] slow acks (120 s)
+[soak 21:57:06] manager outage (90 s)
+[soak 21:58:36] manager back
+[soak 22:02:05] three dropped acks
+[soak 22:27:05] manager outage (90 s)
+[soak 22:28:35] manager back
+[soak 22:52:06] slow acks (120 s)
+[soak 22:57:06] manager outage (90 s)
+[soak 22:58:36] manager back
+[soak 23:02:05] three dropped acks
+[soak 23:27:06] manager outage (90 s)
+[soak 23:28:36] manager back
+[soak 23:52:06] slow acks (120 s)
+[soak 23:57:06] manager outage (90 s)
+[soak 23:58:41] manager back
+[soak 00:02:05] three dropped acks
+[soak 00:27:05] manager outage (90 s)
+[soak 00:28:36] manager back
+[soak 00:52:05] slow acks (120 s)
+[soak 00:57:05] manager outage (90 s)
+[soak 00:58:36] manager back
+[soak 01:02:05] three dropped acks
+[soak 01:27:06] manager outage (90 s)
+[soak 01:28:36] manager back
+[soak 01:52:06] slow acks (120 s)
+[soak 01:57:06] manager outage (90 s)
+[soak 01:58:37] manager back
+[soak 02:02:05] three dropped acks
+[soak 02:12:07] drained=True; stopping the sensor
+[soak 02:17:51] store integrity exit 0
