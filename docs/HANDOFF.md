@@ -7,7 +7,7 @@ For engineers taking over the Panopticon Linux endpoint who may not know the his
 **One-sentence summary.** `panopticon-sensord` is a resident C++20 Linux sensor with eBPF/fanotify/audit
 telemetry, a durable write-ahead log, at-least-once delivery to the Manager, signed commands and signed local
 policy, and self-integrity checks; it is validated on one platform (Ubuntu 22.04, kernel 5.15, x86_64, in a VM),
-is not claimed to be production-ready, and one validation is still pending (a 6-hour soak of the current build).
+is not claimed to be production-ready, and its validation is recorded in this document with the gaps named (notably: the integrity monitor has not been soaked).
 
 ## Contents
 
@@ -90,13 +90,12 @@ Labels as defined in the README. Evidence lives in IMPLEMENTATION_STATUS (sectio
 Two different statements, kept apart on purpose:
 
 * **Soak 1, an older build: COMPLETED with one caveat** (2026-10-07 20:12:05 to 2026-10-08 02:12:07 UTC).
-* **Soak 2, the current build: RUNNING, result pending.** Started 2026-10-08 08:30:02 UTC on VM `panopticon-endpoint-dev`
-  (freshly rebooted, nothing else running), expected end about 14:30 UTC, work dir `/var/tmp/soak2`, build `build-rel`
-  with `PANOPTICON_SOURCE_HEAD=b31d009`; the report appears as `/var/tmp/soak2/report.txt` and the run is finished when
-  `/var/tmp/soak2-run.log` ends in `EXIT=`. Until that report is read and recorded, no claim is made for the current
-  build. The build that was soaked predates the integrity monitor (ADR 033),
-  the unsigned-command compile-out (ADR 034), the policy sweep (ADR 035) and rollback detection (ADR 036). Do not
-  read "the Linux endpoint passed a 6-hour soak" from this repository.
+* **Soak 2, the current build: COMPLETED, DEGRADED BY THE ENVIRONMENT, no sensor defect found** (2026-10-08 08:30:02 to
+  14:30:10 UTC). This is the relevant soak evidence for the current build, with one gap: the self-integrity monitor was
+  not enabled during it.
+* Soak 1 soaked a build that predates the integrity monitor (ADR 033), the unsigned-command compile-out (ADR 034),
+  the policy sweep (ADR 035) and rollback detection (ADR 036), so **it is not validation of the current build**. Do not
+  read "the Linux endpoint passed a 6-hour soak, production-ready" from this repository.
 
 ### Soak 1 result
 
@@ -118,7 +117,32 @@ Full analysis, files and caveats: [endpoint/evidence/soak-2026-10-07/README.md](
 | Verdicts | 8 of 9 clean. **Health timer: DRIFT** (p99 12.5 s vs 10 s nominal, max 39.2 s). Every long interval except two (22:21 UTC, cause not established) is within a few minutes of other VM work; the last two unperturbed hours had none above 10.9 s |
 | Perturbation windows | Builds and test runs on the same VM during the soak: about 20:27–21:30, 21:37–21:55, 22:00–22:12, 22:30–22:35, 23:55–00:05 UTC |
 
-### Soak 2 (current build): how to run it
+### Soak 2 result (current build)
+
+Full analysis, files and caveats: [endpoint/evidence/soak-2026-10-08/README.md](endpoint/evidence/soak-2026-10-08/README.md).
+
+| Item | Value |
+| --- | --- |
+| Command, environment | `sudo PANOPTICON_SOURCE_HEAD=b31d009 tests/soak/run_soak.sh 6 /var/tmp/soak2`; VM `panopticon-endpoint-dev` (Ubuntu 22.04, kernel 5.15.0-91, 8 vCPU, 6 GB, VirtualBox), fresh boot, nothing else running |
+| Build | Release `build-rel`, sha256 `ad05314b48c4cb4e...`, built 02:37 UTC; sources identical to `b31d009` and main (last source change `0e18ee6`); packaged configuration |
+| Start, end, duration | 2026-10-08 08:30:02 UTC to 14:30:10 UTC; 6.00 h; 721 samples; drained; sensor exit code 0; not stopped early |
+| Result | **COMPLETED, DEGRADED BY THE ENVIRONMENT (two VM stalls), no sensor defect found** |
+| Volume, loss | 3,246,765 events (150/s), 3,249,683 records, `seq` 1 to 3,249,683, **0 missing, 0 loss records, 0 provider drops**, 0 sink errors, 0 WAL quota drops |
+| RSS, threads, fds | 52.2 to 52.7 MiB (peak 52.7), slope +0.07 MiB/h; 12 threads; 84 to 91 descriptors |
+| CPU | 12.87 % of one core at about 150 events/s (a heavy mixed load) |
+| Delivery | 38,024 batches, 101 retries, 0 refusals, 0 quarantined, 0 unacknowledged at the end |
+| Commands | 180 signed, 180 answered, 0 duplicates, victim alive; 1 command `expired` while the VM was frozen |
+| Signed policy | 145 loaded, 34 older versions refused (35 sent), 146,974 matches, none before their subject |
+| Degraded periods | Induced: `policy` 135 samples (refused rollback), `command_channel` during Manager outages. **Unexpected: `policy` 4 samples at 09:23 UTC and `command_channel` 1 sample at 11:51 UTC, both during the VM stalls** |
+| Timer drift | median 10.03 s, p99 10.40 s (harness verdict "on time"), **max 249.9 s**; four intervals above 11 s: 109.4 s and 15.2 s at 09:23 UTC, 11.4 s at 11:33 UTC (cause not established), 249.9 s at 11:51 UTC |
+| Cause of the long intervals | Two stalls of the whole VM: the guest kernel logged `soft lockup - CPU#2 stuck for 98s` (09:23:32) and `231s` (11:51:06); the harness's separate sampler and the load generator stopped for the same intervals. What made the host stop the VM is not established (a Hyper-V switch was created on the host five seconds after the first) |
+| Not covered | **Self-integrity monitor and rollback mark (ADR 033, 036): not enabled in this soak** (no `integrity_manifest` in its config), so not soaked; kernel-to-WAL and host-to-Manager latency (not measured); a real Manager; more than one host |
+
+Compared with Soak 1 the quiet VM produced no loss records at all, where Soak 1's 54,904 governor-stage events fell in
+windows when other work was running on its VM. That is consistent with the explanation given there, but the two runs
+are different builds, so it is not a controlled comparison.
+
+### Running a soak (how)
 
 ```bash
 cd panopticon-linux-agent
@@ -127,7 +151,11 @@ sudo PANOPTICON_SOURCE_HEAD=$(git rev-parse HEAD) tests/soak/run_soak.sh 6 /var/
 ```
 
 Run it on an otherwise idle VM, with no builds, tests or other sensors for the whole six hours (the report records the
-sensor binary's hash and the commit, so it names what was soaked). It cannot be paused; a restart is a new run.
+sensor binary's hash and the commit, so it names what was soaked). It cannot be paused; a restart is a new run. Check
+the guest kernel log afterwards for `soft lockup` (`journalctl -k | grep -i lockup`): a VirtualBox VM on a workstation
+can be stalled by the host, and the harness's timer verdict reads p99 and does not flag a long maximum. The harness
+does not yet enable the integrity monitor; a soak that does needs a signed manifest and `integrity_manifest` /
+`integrity_keys` in its sensor config (see `tests/e2e/run_integrity_e2e.sh` for how one is built).
 `python3 tests/soak/gaps.py /var/tmp/soak2` lists the long health intervals and loss records with times.
 A pass requires no unexplained loss or gap, contiguous `seq`, consistent WAL and policy accounting, bounded
 RSS/fd/thread trends after warm-up, an on-time health timer, and a clean shutdown.
@@ -162,7 +190,7 @@ Classification of every gap named in the plan, with the decision. "Today" means 
 | File telemetry performance | PARTIALLY VERIFIED (mixed workload and FIM; no dedicated file-event storm ladder) | Future: add a file storm to `tests/perf` |
 | Latency measurements (kernel→WAL p99, host→Manager p95) | NOT YET MEASURED | Future: needs a timestamp harness; do not quote numbers |
 | Fuzzing | IMPLEMENTED + SUSTAINED-LOAD VERIFIED for one 900 s campaign | Future: longer campaigns, structure-aware corpora |
-| Long soak | Older build: COMPLETED with a health-timer caveat (SUSTAINED-LOAD VERIFIED for that build only). Current build: RUNNING since 2026-10-08 08:30 UTC, result pending | When it ends, run on an idle VM (section above) |
+| Long soak | Older build: COMPLETED with a health-timer caveat (SUSTAINED-LOAD VERIFIED for that build only). Current build (Soak 2): COMPLETED, DEGRADED BY THE ENVIRONMENT (two VM stalls), no sensor defect; integrity monitor not enabled in it | Optional: repeat on a dedicated host with the integrity monitor configured |
 | Long sanitized runs | REAL-VM VERIFIED once on the latest code (ASan/UBSan ctest 21/21, chaos 16/16 at `MEMCAP_MB=512`; TSan ctest 21/21, chaos subset); a long repeat and a long TSan live run remain future | Optional: repeat for hours before a release |
 | Pipeline scalability / concurrency | PARTIAL (single pipeline thread, ≈12,000 events/s loss-free; excess shed and reported) | Do not redesign without ladder evidence; sequence, ordering, loss accounting and WAL semantics must survive any change |
 | Manager-side command signing | IMPLEMENTED + REAL-VM VERIFIED against a real Manager process over HTTPS (S13.17: sign, verify, ledger, action, result; a command rewritten after signing was refused) | Remaining: the Manager branch is not merged; the signing key is a file held online by the Manager process (whoever controls it can sign); distributing the public key at enrollment is not built (see key custody) |
@@ -208,8 +236,8 @@ Manager route does not accept it). `LINUX_ENDPOINT_SECURITY_MODEL.md` has the th
 
 ## Recommended next priorities
 
-1. Soak 2: a 6-hour soak of the current build on an otherwise idle VM (see the soak section above for the command and
-   state). Everything else on the 2026-10-08 validation list (Release ctest 21/21, package e2e 34/34, command-auth
+1. Optional repeat of the soak on a dedicated host with the integrity monitor enabled (Soak 2 had two VM stalls and did
+   not enable it; see the soak section above). Everything else on the 2026-10-08 validation list (Release ctest 21/21, package e2e 34/34, command-auth
    51/51, integrity 26/26, policy sweep 16/16, ladder and recovery, ASan/UBSan and TSan on the latest code) is done;
    latency measurement and a long sanitizer repeat remain optional future work.
 2. Get the contracts and Manager branches reviewed and merged by their owners; decide the agent repository's default

@@ -1,0 +1,599 @@
+{
+ "duration_hours": 6.0,
+ "samples": 721,
+ "warmup_minutes": 20,
+ "rss_mib": {
+  "first": 52.16,
+  "min": 52.16,
+  "max": 52.67,
+  "last": 52.67,
+  "slope_per_hour": 0.069,
+  "slope_per_hour_second_half": 0.135
+ },
+ "fds": {
+  "first": 90.0,
+  "min": 84.0,
+  "max": 91.0,
+  "last": 90.0,
+  "slope_per_hour": -0.011,
+  "slope_per_hour_second_half": -0.002
+ },
+ "threads": {
+  "first": 12.0,
+  "min": 12.0,
+  "max": 12.0,
+  "last": 12.0,
+  "slope_per_hour": 0.0,
+  "slope_per_hour_second_half": 0.0
+ },
+ "wal_disk_mib": {
+  "first": 7.83,
+  "min": 0.03,
+  "max": 63.29,
+  "last": 5.47,
+  "slope_per_hour": 0.119,
+  "slope_per_hour_second_half": 0.217
+ },
+ "peak_rss_mib": 52.7,
+ "cpu_percent_of_one_core": {
+  "overall": 12.87,
+  "per_hour": [
+   12.06,
+   12.94,
+   13.28,
+   12.2,
+   13.86,
+   12.79
+  ]
+ },
+ "events_per_second": 150.3,
+ "records_per_second": 150.4,
+ "events_total": 3246765,
+ "loss_records_total": 0,
+ "sink_errors": 0,
+ "providers": {
+  "ebpf_process": {
+   "state": "active",
+   "events": 1413844,
+   "drops": 0
+  },
+  "netlink_proc": {
+   "state": "standby",
+   "events": 0,
+   "drops": 0
+  },
+  "fanotify_file": {
+   "state": "active",
+   "events": 1053919,
+   "drops": 0
+  },
+  "sensitive_file": {
+   "state": "active",
+   "events": 1095,
+   "drops": 0
+  },
+  "ebpf_network": {
+   "state": "active",
+   "events": 798067,
+   "drops": 0
+  },
+  "sockdiag_network": {
+   "state": "standby",
+   "events": 0,
+   "drops": 0
+  },
+  "ebpf_security": {
+   "state": "active",
+   "events": 22,
+   "drops": 0
+  },
+  "kernel_change": {
+   "state": "active",
+   "events": 0,
+   "drops": 0
+  },
+  "audit_netlink": {
+   "state": "active",
+   "events": 111,
+   "drops": 0
+  },
+  "auth_log": {
+   "state": "standby",
+   "events": 0,
+   "drops": 0
+  },
+  "command_channel": {
+   "state": "active",
+   "events": 181,
+   "drops": 0
+  },
+  "procfs": {
+   "state": "active",
+   "events": 540,
+   "drops": 0
+  },
+  "policy": {
+   "state": "active",
+   "events": 146974,
+   "drops": 0
+  }
+ },
+ "provider_not_active": {
+  "policy": {
+   "samples": 4,
+   "of": 721,
+   "first_minute": 53.5,
+   "last_minute": 53.6,
+   "reasons": [
+    "degraded: policy soak-policy version 21 in force (4 rules, 1 indicators, expires at unix 1791452882 s); its replacement was refused: rollback: version 20 is older than version 21 already accepted here"
+   ]
+  },
+  "command_channel": {
+   "samples": 1,
+   "of": 721,
+   "first_minute": 201.1,
+   "last_minute": 201.1,
+   "reasons": [
+    "degraded: command poll failed: transport: Couldn't connect to server"
+   ]
+  }
+ },
+ "provider_not_active_during_faults": {
+  "policy": {
+   "samples": 135,
+   "of": 721,
+   "first_minute": 10.5,
+   "last_minute": 352.0,
+   "reasons": [
+    "degraded: policy soak-policy version 101 in force (4 rules, 1 indicators, expires at unix 1791464882 s); its replacement was refused: rollback: version 100 is older than version 101 already accepted here",
+    "degraded: policy soak-policy version 105 in force (4 rules, 1 indicators, expires at unix 1791465482 s); its replacement was refused: rollback: version 104 is older than version 105 already accepted here",
+    "degraded: policy soak-policy version 109 in force (4 rules, 1 indicators, expires at unix 1791466082 s); its replacement was refused: rollback: version 108 is older than version 109 already accepted here",
+    "degraded: policy soak-policy version 113 in force (4 rules, 1 indicators, expires at unix 1791466682 s); its replacement was refused: rollback: version 112 is older than version 113 already accepted here",
+    "degraded: policy soak-policy version 117 in force (4 rules, 1 indicators, expires at unix 1791467282 s); its replacement was refused: rollback: version 116 is older than version 117 already accepted here",
+    "degraded: policy soak-policy version 121 in force (4 rules, 1 indicators, expires at unix 1791467882 s); its replacement was refused: rollback: version 120 is older than version 121 already accepted here",
+    "degraded: policy soak-policy version 125 in force (4 rules, 1 indicators, expires at unix 1791468482 s); its replacement was refused: rollback: version 124 is older than version 125 already accepted here",
+    "degraded: policy soak-policy version 129 in force (4 rules, 1 indicators, expires at unix 1791469082 s); its replacement was refused: rollback: version 128 is older than version 129 already accepted here",
+    "degraded: policy soak-policy version 13 in force (4 rules, 1 indicators, expires at unix 1791451682 s); its replacement was refused: rollback: version 12 is older than version 13 already accepted here",
+    "degraded: policy soak-policy version 133 in force (4 rules, 1 indicators, expires at unix 1791469682 s); its replacement was refused: rollback: version 132 is older than version 133 already accepted here",
+    "degraded: policy soak-policy version 137 in force (4 rules, 1 indicators, expires at unix 1791470282 s); its replacement was refused: rollback: version 136 is older than version 137 already accepted here",
+    "degraded: policy soak-policy version 141 in force (4 rules, 1 indicators, expires at unix 1791470882 s); its replacement was refused: rollback: version 140 is older than version 141 already accepted here",
+    "degraded: policy soak-policy version 17 in force (4 rules, 1 indicators, expires at unix 1791452282 s); its replacement was refused: rollback: version 16 is older than version 17 already accepted here",
+    "degraded: policy soak-policy version 21 in force (4 rules, 1 indicators, expires at unix 1791452882 s); its replacement was refused: rollback: version 20 is older than version 21 already accepted here",
+    "degraded: policy soak-policy version 25 in force (4 rules, 1 indicators, expires at unix 1791453482 s); its replacement was refused: rollback: version 24 is older than version 25 already accepted here",
+    "degraded: policy soak-policy version 29 in force (4 rules, 1 indicators, expires at unix 1791454083 s); its replacement was refused: rollback: version 28 is older than version 29 already accepted here",
+    "degraded: policy soak-policy version 33 in force (4 rules, 1 indicators, expires at unix 1791454683 s); its replacement was refused: rollback: version 32 is older than version 33 already accepted here",
+    "degraded: policy soak-policy version 37 in force (4 rules, 1 indicators, expires at unix 1791455282 s); its replacement was refused: rollback: version 36 is older than version 37 already accepted here",
+    "degraded: policy soak-policy version 41 in force (4 rules, 1 indicators, expires at unix 1791455882 s); its replacement was refused: rollback: version 40 is older than version 41 already accepted here",
+    "degraded: policy soak-policy version 45 in force (4 rules, 1 indicators, expires at unix 1791456482 s); its replacement was refused: rollback: version 44 is older than version 45 already accepted here",
+    "degraded: policy soak-policy version 49 in force (4 rules, 1 indicators, expires at unix 1791457082 s); its replacement was refused: rollback: version 48 is older than version 49 already accepted here",
+    "degraded: policy soak-policy version 5 in force (4 rules, 1 indicators, expires at unix 1791450482 s); its replacement was refused: rollback: version 4 is older than version 5 already accepted here",
+    "degraded: policy soak-policy version 53 in force (4 rules, 1 indicators, expires at unix 1791457682 s); its replacement was refused: rollback: version 52 is older than version 53 already accepted here",
+    "degraded: policy soak-policy version 57 in force (4 rules, 1 indicators, expires at unix 1791458282 s); its replacement was refused: rollback: version 56 is older than version 57 already accepted here",
+    "degraded: policy soak-policy version 61 in force (4 rules, 1 indicators, expires at unix 1791458882 s); its replacement was refused: rollback: version 60 is older than version 61 already accepted here",
+    "degraded: policy soak-policy version 65 in force (4 rules, 1 indicators, expires at unix 1791459483 s); its replacement was refused: rollback: version 64 is older than version 65 already accepted here",
+    "degraded: policy soak-policy version 69 in force (4 rules, 1 indicators, expires at unix 1791460082 s); its replacement was refused: rollback: version 68 is older than version 69 already accepted here",
+    "degraded: policy soak-policy version 73 in force (4 rules, 1 indicators, expires at unix 1791460683 s); its replacement was refused: rollback: version 72 is older than version 73 already accepted here",
+    "degraded: policy soak-policy version 77 in force (4 rules, 1 indicators, expires at unix 1791461282 s); its replacement was refused: rollback: version 76 is older than version 77 already accepted here",
+    "degraded: policy soak-policy version 85 in force (4 rules, 1 indicators, expires at unix 1791462482 s); its replacement was refused: rollback: version 84 is older than version 85 already accepted here",
+    "degraded: policy soak-policy version 89 in force (4 rules, 1 indicators, expires at unix 1791463082 s); its replacement was refused: rollback: version 88 is older than version 89 already accepted here",
+    "degraded: policy soak-policy version 9 in force (4 rules, 1 indicators, expires at unix 1791451082 s); its replacement was refused: rollback: version 8 is older than version 9 already accepted here",
+    "degraded: policy soak-policy version 93 in force (4 rules, 1 indicators, expires at unix 1791463682 s); its replacement was refused: rollback: version 92 is older than version 93 already accepted here",
+    "degraded: policy soak-policy version 97 in force (4 rules, 1 indicators, expires at unix 1791464282 s); its replacement was refused: rollback: version 96 is older than version 97 already accepted here"
+   ]
+  },
+  "command_channel": {
+   "samples": 48,
+   "of": 721,
+   "first_minute": 15.5,
+   "last_minute": 347.0,
+   "reasons": [
+    "degraded: command poll failed: transport: Couldn't connect to server"
+   ]
+  }
+ },
+ "provider_standby": {
+  "netlink_proc": "superseded by ebpf_process",
+  "sockdiag_network": "superseded by ebpf_network",
+  "auth_log": "superseded by audit_netlink"
+ },
+ "delivery": {
+  "state": "idle",
+  "batches_sent": 38024,
+  "records_acknowledged": 3249677,
+  "retries": 101,
+  "refusals": 0,
+  "records_quarantined": 0,
+  "quarantine_failures": 0,
+  "max_consecutive_failures": 8,
+  "max_unacknowledged_records": 21122,
+  "unacknowledged_at_end": 0
+ },
+ "wal_dropped_records": 0,
+ "manager_requests": 37943,
+ "sensor_connections": 32,
+ "manager_restarts_seen": 0,
+ "loss_by_stage": {},
+ "health_interval_seconds": {
+  "nominal": 10,
+  "median": 10.032,
+  "p99": 10.396,
+  "max": 249.897,
+  "median_per_hour": [
+   10.029,
+   10.033,
+   10.033,
+   10.03,
+   10.035,
+   10.03
+  ],
+  "max_per_hour": [
+   109.403,
+   10.785,
+   10.544,
+   249.897,
+   10.524,
+   10.468
+  ]
+ },
+ "process_time_to_observed_ms_per_hour": {
+  "-1": {
+   "p50": 17.38,
+   "p99": 18.25,
+   "max": 18.25,
+   "n": 4
+  },
+  "0": {
+   "p50": 20.41,
+   "p99": 250.48,
+   "max": 7954.07,
+   "n": 205697
+  },
+  "1": {
+   "p50": 20.68,
+   "p99": 270.58,
+   "max": 993.12,
+   "n": 212811
+  },
+  "2": {
+   "p50": 21.1,
+   "p99": 272.03,
+   "max": 1310.29,
+   "n": 208683
+  },
+  "3": {
+   "p50": 20.65,
+   "p99": 259.28,
+   "max": 1265.12,
+   "n": 197193
+  },
+  "4": {
+   "p50": 21.01,
+   "p99": 287.56,
+   "max": 803.97,
+   "n": 210568
+  },
+  "5": {
+   "p50": 20.48,
+   "p99": 248.82,
+   "max": 755.58,
+   "n": 211367
+  },
+  "6": {
+   "p50": 21.1,
+   "p99": 35.52,
+   "max": 35.52,
+   "n": 54
+  }
+ },
+ "commands": {
+  "sent": 180,
+  "accepted": 180,
+  "with_result": 180,
+  "duplicate_results": 0,
+  "outcomes": {
+   "COLLECT_PROCESS_INFO succeeded:ok": 90,
+   "KILL_PROCESS rejected:dry_run": 89,
+   "KILL_PROCESS rejected:expired": 1
+  },
+  "result_latency_s_p50": 3.0,
+  "result_latency_s_max": 364.4,
+  "victim_alive_at_end": true
+ },
+ "policy": {
+  "published_good": 145,
+  "published_rollback": 35,
+  "changes": {
+   "loaded:no_previous_state": 1,
+   "loaded:updated": 143,
+   "rejected:rollback": 34
+  },
+  "matches_by_rule": {
+   "soak-echo": 49285,
+   "soak-date": 1138,
+   "soak-dns": 63727,
+   "soak-id": 32824
+  },
+  "matches_total": 146974,
+  "matches_before_their_subject": 0,
+  "last_version": 145,
+  "loaded_shortfall": 1,
+  "refused_shortfall": 1
+ },
+ "integrity": {
+  "stored": 3249683,
+  "first_seq": 1,
+  "last_seq": 3249683,
+  "missing": 0,
+  "accounted": 0,
+  "conflicts": [],
+  "other_loss_reported": {},
+  "problems": []
+ },
+ "run": {
+  "start": 1791448202.1660023,
+  "end": 1791469810.077788,
+  "hours": 6.0,
+  "stopped_early": false,
+  "commands_sent": 180,
+  "victim_alive_at_end": true,
+  "drained": true,
+  "sensor_exit_code": 0,
+  "faults": [
+   [
+    1791448802.5587363,
+    "policy_reject"
+   ],
+   [
+    1791449102.572289,
+    "outage"
+   ],
+   [
+    1791449402.7294168,
+    "policy_reject"
+   ],
+   [
+    1791450002.2088957,
+    "policy_reject"
+   ],
+   [
+    1791450602.6966348,
+    "slow"
+   ],
+   [
+    1791450602.6966348,
+    "policy_reject"
+   ],
+   [
+    1791450902.8309462,
+    "outage"
+   ],
+   [
+    1791451202.865647,
+    "drop_ack"
+   ],
+   [
+    1791451202.865647,
+    "policy_reject"
+   ],
+   [
+    1791451802.4223258,
+    "policy_reject"
+   ],
+   [
+    1791452402.5463421,
+    "policy_reject"
+   ],
+   [
+    1791452703.1378794,
+    "outage"
+   ],
+   [
+    1791453003.150966,
+    "policy_reject"
+   ],
+   [
+    1791453602.5428388,
+    "policy_reject"
+   ],
+   [
+    1791454202.6210308,
+    "slow"
+   ],
+   [
+    1791454202.6210308,
+    "policy_reject"
+   ],
+   [
+    1791454502.5376887,
+    "outage"
+   ],
+   [
+    1791454802.2081892,
+    "drop_ack"
+   ],
+   [
+    1791454802.2081892,
+    "policy_reject"
+   ],
+   [
+    1791455402.8660483,
+    "policy_reject"
+   ],
+   [
+    1791456002.846222,
+    "policy_reject"
+   ],
+   [
+    1791456302.7468917,
+    "outage"
+   ],
+   [
+    1791456602.9228587,
+    "policy_reject"
+   ],
+   [
+    1791457202.3318677,
+    "policy_reject"
+   ],
+   [
+    1791457802.5349026,
+    "slow"
+   ],
+   [
+    1791457802.5349026,
+    "policy_reject"
+   ],
+   [
+    1791458102.5025444,
+    "outage"
+   ],
+   [
+    1791458402.2803378,
+    "drop_ack"
+   ],
+   [
+    1791458402.2803378,
+    "policy_reject"
+   ],
+   [
+    1791459002.683365,
+    "policy_reject"
+   ],
+   [
+    1791459602.4578469,
+    "policy_reject"
+   ],
+   [
+    1791459902.7367668,
+    "outage"
+   ],
+   [
+    1791460268.0019085,
+    "policy_reject"
+   ],
+   [
+    1791460803.0968227,
+    "policy_reject"
+   ],
+   [
+    1791461403.1185772,
+    "slow"
+   ],
+   [
+    1791461403.1185772,
+    "policy_reject"
+   ],
+   [
+    1791461702.583037,
+    "outage"
+   ],
+   [
+    1791462003.156145,
+    "drop_ack"
+   ],
+   [
+    1791462003.156145,
+    "policy_reject"
+   ],
+   [
+    1791462602.2880862,
+    "policy_reject"
+   ],
+   [
+    1791463202.9467957,
+    "policy_reject"
+   ],
+   [
+    1791463502.9937885,
+    "outage"
+   ],
+   [
+    1791463802.7934134,
+    "policy_reject"
+   ],
+   [
+    1791464402.3912253,
+    "policy_reject"
+   ],
+   [
+    1791465002.9079769,
+    "slow"
+   ],
+   [
+    1791465002.9079769,
+    "policy_reject"
+   ],
+   [
+    1791465302.8909404,
+    "outage"
+   ],
+   [
+    1791465602.7427032,
+    "drop_ack"
+   ],
+   [
+    1791465602.7427032,
+    "policy_reject"
+   ],
+   [
+    1791466202.8872218,
+    "policy_reject"
+   ],
+   [
+    1791466802.251317,
+    "policy_reject"
+   ],
+   [
+    1791467102.237493,
+    "outage"
+   ],
+   [
+    1791467402.3656473,
+    "policy_reject"
+   ],
+   [
+    1791468003.1548896,
+    "policy_reject"
+   ],
+   [
+    1791468602.6487117,
+    "slow"
+   ],
+   [
+    1791468602.6487117,
+    "policy_reject"
+   ],
+   [
+    1791468902.2760808,
+    "outage"
+   ],
+   [
+    1791469202.3330932,
+    "drop_ack"
+   ],
+   [
+    1791469202.3330932,
+    "policy_reject"
+   ]
+  ],
+  "build": {
+   "sensord": "/home/vagrant/src/panopticon-linux-agent/build-rel/panopticon-sensord",
+   "sha256": "ad05314b48c4cb4302ccec37083cf6e9ddcdf064b5c16a4f5fc1752a1442ec8e",
+   "bytes": 3046216,
+   "built_at": "2026-10-08T02:37:54.980519+00:00",
+   "source_head": "b31d0091ad2fee7ab6c5dbd3a6889623e8e203b1",
+   "source_dirty": false
+  }
+ },
+ "verdicts": {
+  "rss": "stable",
+  "fds": "stable",
+  "threads": "stable",
+  "timer": "on time",
+  "providers": "NOT ALWAYS ACTIVE",
+  "commands": "all answered, victim alive",
+  "policy": "every publish accounted for, matches ordered",
+  "store": "consistent",
+  "sensor": "ran to the end"
+ }
+}

@@ -38,7 +38,7 @@ checks it for chaos and soak runs. Do not loosen its thresholds to make a run pa
 
 See the table in [README.md](README.md#15-current-validation-status) and the handoff status in
 [docs/HANDOFF.md](docs/HANDOFF.md). In short: the unit/live/e2e/chaos/sanitizer/fuzz layers have passed on the
-validation VM; the 6-hour soak of the current build (an older build completed one, see the evidence directory), is pending. The command-auth e2e (51/51, packaged build), integrity e2e (26/26), policy-sweep e2e (16/16), package e2e (34/34) and
+validation VM; the 6-hour soak of the current build completed on 2026-10-08, degraded by two VM stalls and without the integrity monitor enabled (see the evidence directory); a soak with it enabled is open. The command-auth e2e (51/51, packaged build), integrity e2e (26/26), policy-sweep e2e (16/16), package e2e (34/34) and
 the performance ladder were run on the current build on 2026-10-08; see `docs/endpoint/evidence/`.
 
 ## GitHub CI

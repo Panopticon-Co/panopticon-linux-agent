@@ -1,0 +1,7 @@
+health records: 2117
+health intervals above 11 s (UTC time the interval ended, seconds):
+  09:23:32 109.4
+  09:23:48 15.2
+  11:33:13 11.4
+  11:51:07 249.9
+loss records (UTC time, stage, events):

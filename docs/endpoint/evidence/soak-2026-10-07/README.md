@@ -68,3 +68,5 @@ This is analysis, not a proven cause.
   deliberately heavy mixed workload; it must not be compared with the 0.4 % idle figure.
 
 What would remove the caveat: a soak of the current build with nothing else running on the VM for its whole length (and `PANOPTICON_SOURCE_HEAD` set, so the report names what was soaked).
+
+**Update:** that soak was run on 2026-10-08, see [../soak-2026-10-08/](../soak-2026-10-08/). It covers the current build but did not enable the integrity monitor, and it was degraded by two VM stalls.

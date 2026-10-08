@@ -1,0 +1,18 @@
+panopticon-sensord: delivering to https://127.0.0.1:18563
+panopticon-sensord: command signing: 1 key(s) pinned
+panopticon-sensord: command channel dry_run
+panopticon-sensord: provider ebpf_process active
+panopticon-sensord: provider netlink_proc standby: superseded by ebpf_process
+panopticon-sensord: provider fanotify_file active
+panopticon-sensord: provider sensitive_file active
+panopticon-sensord: provider ebpf_network active
+panopticon-sensord: provider sockdiag_network standby: superseded by ebpf_network
+panopticon-sensord: provider ebpf_security active
+panopticon-sensord: provider kernel_change active
+panopticon-sensord: provider audit_netlink active
+panopticon-sensord: provider auth_log standby: superseded by audit_netlink
+panopticon-sensord: provider command_channel active
+panopticon-sensord: provider procfs active
+panopticon-sensord: provider policy active: policy soak-policy version 1 in force (4 rules, 1 indicators, expires at unix 1791449999 s)
+panopticon-sensord: uplink idle; batches=38026 acknowledged=3249683 through seq 3249683 retries=101 refusals=0 quarantined=0
+panopticon-sensord: stopped; records=3249684 events=3246766 losses=0 sink_errors=0

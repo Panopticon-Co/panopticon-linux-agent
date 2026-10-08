@@ -8,7 +8,7 @@ the table below is the short list of validation that still needs a VM.**
 
 | Gap | Command | Blocking |
 | --- | --- | --- |
-| 6-hour soak of the current build (**running since 2026-10-08 08:30 UTC, ends about 14:30 UTC**; an older build completed one; see [HANDOFF](HANDOFF.md#6-hour-soak-status)) | `sudo PANOPTICON_SOURCE_HEAD=$(git rev-parse HEAD) tests/soak/run_soak.sh 6 /var/tmp/soak2` on an idle VM | No |
+| ~~6-hour soak of the current build~~ | Done 2026-10-08 (Soak 2: completed, degraded by two VM stalls, no sensor defect; [evidence](endpoint/evidence/soak-2026-10-08/README.md)). Remaining: a soak with the integrity monitor enabled, ideally on a dedicated host | - |
 | ~~Signed package / apt repository end to end~~ | Done 2026-10-08: 34/34 (`tests/e2e/run_package_e2e.sh`; [log](endpoint/evidence/package-e2e-2026-10-08/package-e2e.txt)). Remaining: a remote repository and key custody | – |
 | ~~Command authorization after ADR 034~~ | Done 2026-10-08: 51/51 on the packaged build (scenario 7 packaged variant; the lab-build variant was not re-run) | – |
 | ~~Throughput ladder and overload recovery~~ | Done 2026-10-08 (performance doc §8) | – |
