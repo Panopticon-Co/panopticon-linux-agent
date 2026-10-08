@@ -90,7 +90,11 @@ Labels as defined in the README. Evidence lives in IMPLEMENTATION_STATUS (sectio
 Two different statements, kept apart on purpose:
 
 * **Soak 1, an older build: COMPLETED with one caveat** (2026-10-07 20:12:05 to 2026-10-08 02:12:07 UTC).
-* **Soak 2, the current build: NOT RUN YET.** The build that was soaked predates the integrity monitor (ADR 033),
+* **Soak 2, the current build: RUNNING, result pending.** Started 2026-10-08 08:30:02 UTC on VM `panopticon-endpoint-dev`
+  (freshly rebooted, nothing else running), expected end about 14:30 UTC, work dir `/var/tmp/soak2`, build `build-rel`
+  with `PANOPTICON_SOURCE_HEAD=b31d009`; the report appears as `/var/tmp/soak2/report.txt` and the run is finished when
+  `/var/tmp/soak2-run.log` ends in `EXIT=`. Until that report is read and recorded, no claim is made for the current
+  build. The build that was soaked predates the integrity monitor (ADR 033),
   the unsigned-command compile-out (ADR 034), the policy sweep (ADR 035) and rollback detection (ADR 036). Do not
   read "the Linux endpoint passed a 6-hour soak" from this repository.
 
@@ -158,7 +162,7 @@ Classification of every gap named in the plan, with the decision. "Today" means 
 | File telemetry performance | PARTIALLY VERIFIED (mixed workload and FIM; no dedicated file-event storm ladder) | Future: add a file storm to `tests/perf` |
 | Latency measurements (kernel→WAL p99, host→Manager p95) | NOT YET MEASURED | Future: needs a timestamp harness; do not quote numbers |
 | Fuzzing | IMPLEMENTED + SUSTAINED-LOAD VERIFIED for one 900 s campaign | Future: longer campaigns, structure-aware corpora |
-| Long soak | Older build: COMPLETED with a health-timer caveat (SUSTAINED-LOAD VERIFIED for that build only). Current build: VALIDATION PENDING | Run soak 2 on an idle VM (section above) |
+| Long soak | Older build: COMPLETED with a health-timer caveat (SUSTAINED-LOAD VERIFIED for that build only). Current build: RUNNING since 2026-10-08 08:30 UTC, result pending | When it ends, run on an idle VM (section above) |
 | Long sanitized runs | REAL-VM VERIFIED once on the latest code (ASan/UBSan ctest 21/21, chaos 16/16 at `MEMCAP_MB=512`; TSan ctest 21/21, chaos subset); a long repeat and a long TSan live run remain future | Optional: repeat for hours before a release |
 | Pipeline scalability / concurrency | PARTIAL (single pipeline thread, ≈12,000 events/s loss-free; excess shed and reported) | Do not redesign without ladder evidence; sequence, ordering, loss accounting and WAL semantics must survive any change |
 | Manager-side command signing | IMPLEMENTED + REAL-VM VERIFIED against a real Manager process over HTTPS (S13.17: sign, verify, ledger, action, result; a command rewritten after signing was refused) | Remaining: the Manager branch is not merged; the signing key is a file held online by the Manager process (whoever controls it can sign); distributing the public key at enrollment is not built (see key custody) |
