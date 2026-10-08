@@ -96,9 +96,9 @@ result below says so.**
 | Command | `sudo tests/soak/run_soak.sh 6 /var/tmp/soak` (Release build `build-rel`; environment `SENSORD`, `CTL`, `SIGNER`, `SCALE`) |
 | Started | 2026-10-07 20:12:05 UTC (VM clock), sensor pid 248602 |
 | Planned duration / expected end | 6.00 h, ending about 02:12 UTC on 2026-10-08, plus a drain and analysis |
-| Progress when last read | 435 samples at 23:49 UTC (3 h 37 min); sensor alive, `healthy` between induced faults; RSS 43 MB at start, 67 MB at 3.6 h (growth under analysis, **no verdict yet**), 12 threads, 90 fds |
+| Progress when last read | 471 samples at 3.92 h (about 00:08 UTC 2026-10-08); sensor alive in every sample; threads constant at 12; fds 84–92; RSS 43 MB at start, rising to 66.8 MB by about 1.5 h and flat at 66.8 MB since (hours 2 and 3). **Preliminary only; no verdict until the full 6 h is analyzed** |
 | Induced degraded periods (expected) | Manager outage of 90 s every 30 min, slow acknowledgements, dropped acknowledgements, and signed-policy rollback attempts every fifth publish (which turn health `degraded`, by design) |
-| Unexpected degraded periods | None observed so far; to be checked against the complete log |
+| Unexpected degraded periods | None so far: of 471 samples, 124 were `degraded` and all 124 are induced (92 policy-rollback refusals, 32 command polls failing during Manager outages); 347 `healthy`. To be rechecked against the complete log |
 | Perturbation windows | Builds and test runs on the same VM while the soak ran: about 20:27–21:30, 21:37–21:55, 22:00–22:12, 22:30–22:35 UTC, and a niced Release build plus full ctest 23:55–00:05 UTC (the ctest itself 00:03–00:05). A verdict that depends on those minutes must say so |
 | Result | **PENDING.** `/var/tmp/soak/report.txt` and `report.json` are written when it finishes |
 
