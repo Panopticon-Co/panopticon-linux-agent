@@ -333,6 +333,13 @@ void test_configuration_rejects_unknown_and_insecure_values() {
     std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
                                            std::filesystem::perms::group_read | std::filesystem::perms::others_read);
     require(succeeded(load_config_file(path)), "regular configuration file must load");
+#ifdef __linux__
+    for (const auto writable : {std::filesystem::perms::group_write, std::filesystem::perms::others_write}) {
+        std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                           std::filesystem::perms::owner_write | writable);
+        require(!succeeded(load_config_file(path)), "group or world writable configuration must fail");
+    }
+#endif
 }
 
 void test_command_gate_rejects_expiry_replay_and_pid_one() {
