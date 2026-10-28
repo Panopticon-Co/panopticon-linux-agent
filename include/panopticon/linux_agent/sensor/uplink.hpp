@@ -130,6 +130,7 @@ struct https_poster_options {
     std::filesystem::path ca_bundle;  // empty: the system trust store
     long timeout_seconds{20L};
     std::size_t maximum_response_bytes{256U * 1024U};
+    std::string response_profile;  // command polls only: Base64 UTF-8 JSON runtime profile
 };
 [[nodiscard]] std::unique_ptr<record_poster> make_https_poster(https_poster_options options);
 [[nodiscard]] bool https_poster_built() noexcept;

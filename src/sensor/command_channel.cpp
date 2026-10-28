@@ -948,6 +948,49 @@ command_outcome command_processor::unreadable(const command_unreadable& failure)
     return result;
 }
 
+std::string response_profile_json(const command_processor_options& options) {
+    json_writer out;
+    out.begin_object();
+    out.field("schema_version", "1");
+    out.field("platform", "linux");
+    out.field("host_id", options.host_id);
+    if (options.boot_digest.empty()) out.field_null("boot_id");
+    else out.field("boot_id", options.boot_digest);
+    out.field("mode", to_string(options.policy.mode));
+    for (const auto key : {"implemented_actions", "allowed_actions"}) {
+        out.key(key).begin_array();
+        for (const auto action : {command_action::kill_process, command_action::collect_process_info,
+                                  command_action::collect_network_connections, command_action::collect_file,
+                                  command_action::quarantine_file, command_action::isolate_host,
+                                  command_action::release_host_isolation}) {
+            if (command_action_implemented(action) &&
+                (std::string_view{key} == "implemented_actions" || options.policy.allowed.contains(action)))
+                out.value(to_string(action));
+        }
+        out.end_array();
+    }
+    out.field("require_boot_binding", options.policy.require_boot_binding);
+    out.field("require_signature", options.policy.require_signature || static_cast<bool>(options.keyring));
+    out.end_object();
+    return out.take();
+}
+
+std::string response_profile_header(const std::string_view json) {
+    constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string encoded;
+    encoded.reserve(((json.size() + 2U) / 3U) * 4U);
+    for (std::size_t i = 0; i < json.size(); i += 3U) {
+        const auto a = static_cast<unsigned char>(json[i]);
+        const auto b = i + 1U < json.size() ? static_cast<unsigned char>(json[i + 1U]) : 0U;
+        const auto c = i + 2U < json.size() ? static_cast<unsigned char>(json[i + 2U]) : 0U;
+        encoded += alphabet[a >> 2U];
+        encoded += alphabet[((a & 3U) << 4U) | (b >> 4U)];
+        encoded += i + 1U < json.size() ? alphabet[((b & 15U) << 2U) | (c >> 6U)] : '=';
+        encoded += i + 2U < json.size() ? alphabet[c & 63U] : '=';
+    }
+    return encoded;
+}
+
 std::string command_result_json(const command_outcome& outcome) {
     json_writer out;
     out.begin_object();

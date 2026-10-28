@@ -88,6 +88,10 @@ private:
         headers = curl_slist_append(headers, auth_header.c_str());
         headers = curl_slist_append(headers, "Accept: application/json");
         if (post) headers = curl_slist_append(headers, "Content-Type: application/json");
+        if (!post && !options_.response_profile.empty()) {
+            const auto profile = "X-Panopticon-Response-Profile: " + options_.response_profile;
+            headers = curl_slist_append(headers, profile.c_str());
+        }
         curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
         curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
         if (post) {

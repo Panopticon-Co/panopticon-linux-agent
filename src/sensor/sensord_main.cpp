@@ -296,6 +296,8 @@ int main(int argc, char** argv) {
                 if (!own.empty()) executor.files.protected_paths.push_back(own);
             }
             if (keys_ok) {
+                manager_connection->response_profile = sensor::response_profile_header(
+                    sensor::response_profile_json(channel.processor));
                 providers.push_back(std::make_unique<sensor::command_channel_provider>(
                     std::move(channel), sensor::make_https_command_transport(*manager_connection), sensor::make_local_executor(std::move(executor))));
                 std::fprintf(stderr, "panopticon-sensord: command channel %s\n", sensor::to_string(mode));
