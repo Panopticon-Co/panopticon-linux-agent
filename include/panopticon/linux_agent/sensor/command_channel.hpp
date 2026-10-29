@@ -302,6 +302,10 @@ private:
 // The audit payload for the record stream; the pipeline attaches the target process it knows.
 [[nodiscard]] raw_response_action response_audit(const command_outcome& outcome);
 
+// Current loaded policy, sent directly with each authenticated poll (never via the WAL).
+[[nodiscard]] std::string response_profile_json(const command_processor_options& options);
+[[nodiscard]] std::string response_profile_header(std::string_view json);
+
 // The seam between the channel and the network, so the channel is tested without a socket.
 class command_transport {
 public:

@@ -621,6 +621,35 @@ void test_processor_unreadable() {
 
 // ---- result and record ----------------------------------------------------------------------
 
+void test_runtime_profile() {
+    command_processor_options options;
+    options.host_id = "host-1";
+    options.boot_digest = "boot_" + std::string(64U, 'a');
+    options.policy.mode = response_mode::dry_run;
+    options.policy.allowed = {command_action::collect_process_info};
+    options.policy.require_boot_binding = true;
+    options.policy.require_signature = true;
+    const auto text = response_profile_json(options);
+    const auto doc = parse_json(text, json_limits{}, nullptr);
+    require(doc && doc->is_object(), "current runtime profile is JSON");
+    require(*doc->find("mode")->as_string() == "dry_run", "mode comes from loaded policy");
+    require(doc->find("implemented_actions")->items().size() == 7U, "closed native action support");
+    require(doc->find("allowed_actions")->items().size() == 1U, "policy subset is distinct");
+    require(*doc->find("require_signature")->as_boolean(), "signature requirement is explicit");
+    require(*doc->find("require_boot_binding")->as_boolean(), "boot requirement is explicit");
+    const auto decoded = decode_base64(response_profile_header(text));
+    require(decoded && std::string(decoded->begin(), decoded->end()) == text, "HTTP header round trip");
+    for (const auto example : {"a", "ab", "abc", "abcd"}) {
+        const auto bytes = decode_base64(response_profile_header(example));
+        require(bytes && std::string(bytes->begin(), bytes->end()) == example, "all Base64 padding lengths");
+    }
+    options.boot_digest.clear();
+    options.policy.mode = response_mode::off;
+    const auto off = parse_json(response_profile_json(options), json_limits{}, nullptr);
+    require(off->find("boot_id")->type() == json_value::kind::null, "unknown boot is never fabricated");
+    require(*off->find("mode")->as_string() == "off", "off policy stays explicit");
+}
+
 void test_result_json() {
     command_outcome outcome;
     outcome.command_id = "c1";
@@ -1653,6 +1682,7 @@ int main() {
         {"processor_crash_recovery", test_processor_crash_recovery},
         {"processor_ledger_failure_is_fail_closed", test_processor_ledger_failure_is_fail_closed},
         {"processor_unreadable", test_processor_unreadable},
+        {"runtime_profile", test_runtime_profile},
         {"result_json", test_result_json},
         {"response_record_shape", test_response_record_shape},
         {"local_executor_real_processes", test_local_executor_real_processes},
