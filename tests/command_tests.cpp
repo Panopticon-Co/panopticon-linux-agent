@@ -3,9 +3,11 @@
 // a fake Manager.
 
 #include "panopticon/linux_agent/keypair.hpp"
+#include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/sensor/clock.hpp"
 #include "panopticon/linux_agent/sensor/command_channel.hpp"
 #include "panopticon/linux_agent/sensor/json_reader.hpp"
+#include "panopticon/linux_agent/sensor/json.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 #include "panopticon/linux_agent/sensor/serializer.hpp"
 #include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
@@ -1777,6 +1779,91 @@ void test_configuration() {
 
 }  // namespace
 
+void test_resumable_signed_artifact() {
+    const auto generated = generate_ec_p256_keypair();
+    require(succeeded(generated), "resumable signing key");
+    const auto content = std::string{"{\"evidence\":\""} + std::string(400000U, 'x') + "\"}";
+    const auto encoded = sign_artifact_payload(make_artifact_payload("command-1", "correlation-1",
+        "host-1", "process_snapshot", content), "agent-1", std::get<ec_keypair>(generated), 1793232000U);
+    require(succeeded(encoded), "resumable signed original");
+    const auto payload = std::get<std::string>(encoded);
+    const auto parsed = parse_json(payload, json_limits{}, nullptr);
+    const auto* manifest = parsed->find("manifest");
+    const auto id = std::string(*manifest->find("artifact_id")->as_string());
+    const auto sha = std::string(*manifest->find("sha256")->as_string());
+    const std::string manifest_sha(64U, 'b');
+    std::string received;
+    unsigned requests = 0U, uploads = 0U, completions = 0U;
+    bool lose_chunk = true, lose_final = true, retained = false;
+    const auto progress = [&] {
+        json_writer out;
+        out.begin_object().field("schema_version", "1").field("artifact_id", id).field("sha256", sha);
+        out.field("manifest_sha256", manifest_sha).field("received_bytes", static_cast<std::uint64_t>(received.size()));
+        out.field("chunk_bytes", 65536U).field("complete", retained);
+        if (retained) out.field_null("expires_at"); else out.field("expires_at", "2026-10-30T00:00:00Z");
+        out.end_object(); return out.take();
+    };
+    const artifact_exchange server = [&](const std::string_view method, const std::string_view suffix,
+            const std::string_view type, const std::string& body, const std::string& digest) -> std::optional<std::string> {
+        ++requests;
+        if (suffix.empty()) {
+            require(method == "POST" && type == "application/json", "admission framing");
+            const auto actual = artifact_manifest_signing_input(body);
+            const auto original = artifact_manifest_signing_input(payload);
+            require(succeeded(actual) && succeeded(original) &&
+                std::get<std::string>(actual) == std::get<std::string>(original), "resume preserves signed context");
+            const auto request = parse_json(body, json_limits{}, nullptr);
+            require(request->find("manifest")->find("authorization")->find("signature")->as_string() ==
+                manifest->find("authorization")->find("signature")->as_string(), "resume never resigns");
+            return progress();
+        }
+        if (method == "PUT") {
+            ++uploads;
+            const auto offset = std::stoull(std::string{suffix.substr(suffix.find_last_of('/') + 1U)});
+            require(offset == received.size() && body == content.substr(received.size(), 65536U), "only missing original bytes transferred");
+            require(type == "application/octet-stream" && digest == sha256_hex(body), "chunk digest and type bound");
+            received += body;
+            if (lose_chunk) { lose_chunk = false; return std::nullopt; }
+            return progress();
+        }
+        ++completions;
+        require(received == content, "whole original precedes final receipt");
+        const auto request = parse_json(body, json_limits{}, nullptr);
+        require(request->find("manifest_sha256")->as_string() == manifest_sha, "completion manifest binding");
+        retained = true;
+        if (lose_final) { lose_final = false; return std::nullopt; }
+        return "{\"artifact_id\":\"" + id + "\",\"sha256\":\"" + sha + "\",\"retained\":true}";
+    };
+    const auto dir = scratch("resumable-artifacts");
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "resumable private outbox");
+        auto& box = std::get<std::unique_ptr<artifact_outbox>>(opened);
+        require(succeeded(box->save(payload)), "original commits before transfer");
+        const auto result = box->flush([&](const std::string& original) {
+            return resume_artifact_upload(original, server).value_or(""); });
+        require(succeeded(result) && std::get<std::size_t>(result) == 0U && box->pending() == 1U, "lost chunk ACK preserves original");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "restart recovers original");
+        auto& box = std::get<std::unique_ptr<artifact_outbox>>(opened);
+        for (unsigned attempt = 0; attempt < 5U && box->pending(); ++attempt) {
+            requests = 0U; bool made_progress = false;
+            const auto step = box->flush([&](const std::string& original) {
+                require(original == payload, "restart never recollects or edits signed evidence");
+                return resume_artifact_upload(original, server, &made_progress).value_or("");
+            });
+            require(succeeded(step) && requests <= 6U, "bounded network work per step");
+        }
+        require(box->pending() == 0U && completions == 2U && uploads == 7U,
+            "lost final receipt retries without duplicate chunks or early retirement");
+    }
+    require(!resume_artifact_upload(payload, [](auto, auto, auto, const auto&, const auto&)
+        -> std::optional<std::string> { return "{}"; }), "unverified progress cannot authorize retention");
+    std::filesystem::remove_all(dir);
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string_view{argv[1]} == "--emit-signed-artifact-fixture") {
         const auto key = generate_ec_p256_keypair();
@@ -1828,6 +1915,7 @@ int main(int argc, char** argv) {
         {"runtime_profile", test_runtime_profile},
         {"artifact_outbox", test_artifact_outbox},
         {"signed_artifact_manifest", test_signed_artifact_manifest},
+        {"resumable_signed_artifact", test_resumable_signed_artifact},
         {"artifact_commit_precedes_success", test_artifact_commit_precedes_success},
         {"result_json", test_result_json},
         {"response_record_shape", test_response_record_shape},

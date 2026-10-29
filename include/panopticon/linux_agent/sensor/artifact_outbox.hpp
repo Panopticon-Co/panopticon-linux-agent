@@ -4,6 +4,7 @@
 #include "panopticon/linux_agent/keypair.hpp"
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace panopticon::linux_agent::sensor {
@@ -15,6 +16,11 @@ namespace panopticon::linux_agent::sensor {
 [[nodiscard]] result<std::string> artifact_manifest_signing_input(std::string_view manifest);
 [[nodiscard]] result<std::string> sign_artifact_payload(const std::string& payload,
     const std::string& agent, const ec_keypair& keypair, std::uint64_t produced_at_unix);
+using artifact_exchange = std::function<std::optional<std::string>(std::string_view method,
+    std::string_view suffix, std::string_view content_type, const std::string& body,
+    const std::string& chunk_sha256)>;
+[[nodiscard]] std::optional<std::string> resume_artifact_upload(const std::string& payload,
+    const artifact_exchange& exchange, bool* made_progress = nullptr);
 
 // Private, identity-scoped WAL; admission prevents quota eviction of originals.
 class artifact_outbox {

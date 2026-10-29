@@ -105,6 +105,81 @@ bool valid_artifact_ack(const std::string_view payload, const std::string_view r
         && !text(*manifest, "sha256").empty() && text(*ack, "sha256") == text(*manifest, "sha256");
 }
 
+std::optional<std::string> resume_artifact_upload(const std::string& payload,
+    const artifact_exchange& exchange, bool* made_progress) {
+    if (made_progress) *made_progress = false;
+    const auto envelope = parse_json(payload, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
+    const auto* manifest = envelope ? envelope->find("manifest") : nullptr;
+    if (!envelope || envelope->keys().size() != 2U || !manifest ||
+        !succeeded(artifact_manifest_signing_input(payload))) return std::nullopt;
+    const auto hexadecimal = [](const std::string& value) {
+        return value.size() == 64U && std::all_of(value.begin(), value.end(), [](const char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+    };
+    const auto id = text(*manifest, "artifact_id"), sha = text(*manifest, "sha256");
+    if (!id.starts_with("art_") || !hexadecimal(id.substr(4U)) || !hexadecimal(sha)) return std::nullopt;
+    const auto* count = manifest->find("content_bytes");
+    const auto* authorization = manifest->find("authorization");
+    const auto encoded = text(*envelope, "content_base64");
+    const auto decoded = decode_base64(encoded);
+    if (!decoded || decoded->empty() || decoded->size() > 1024U * 1024U || !count ||
+        count->as_unsigned() != decoded->size() || !authorization ||
+        text(*authorization, "signature").size() != 88U) return std::nullopt;
+    const std::string content{reinterpret_cast<const char*>(decoded->data()), decoded->size()};
+    if (response_profile_header(content) != encoded || sha256_hex(content) != sha) return std::nullopt;
+    json_writer serialized;
+    serialized.begin_object();
+    for (const auto* name : {"schema_version", "artifact_id", "agent_id", "host_id", "command_id", "correlation_id", "kind", "media_type", "sha256"})
+        serialized.field(name, text(*manifest, name));
+    serialized.field("content_bytes", *count->as_unsigned());
+    serialized.field("produced_at_unix", *manifest->find("produced_at_unix")->as_unsigned());
+    serialized.key("authorization").begin_object();
+    for (const auto* name : {"algorithm", "key_id", "signature"}) serialized.field(name, text(*authorization, name));
+    serialized.end_object().end_object();
+    std::string manifest_sha;
+    const auto read_progress = [&](const std::string& body) -> std::optional<std::size_t> {
+        const auto value = parse_json(body, json_limits{4096U, 2U, 32U}, nullptr);
+        if (!value || value->keys().size() != 8U || text(*value, "schema_version") != "1" ||
+            text(*value, "artifact_id") != id || text(*value, "sha256") != sha) return std::nullopt;
+        const auto digest = text(*value, "manifest_sha256");
+        if (!hexadecimal(digest) || (!manifest_sha.empty() && digest != manifest_sha)) return std::nullopt;
+        const auto* received = value->find("received_bytes");
+        const auto* chunk = value->find("chunk_bytes");
+        const auto* complete = value->find("complete");
+        const auto* expires = value->find("expires_at");
+        if (!received || !received->as_unsigned() || !chunk || chunk->as_unsigned() != 65536U ||
+            !complete || !complete->as_boolean().has_value() || !expires) return std::nullopt;
+        const auto offset = *received->as_unsigned();
+        const bool done = *complete->as_boolean();
+        if (offset > content.size() || (offset != content.size() && offset % 65536U != 0U) ||
+            (done && (offset != content.size() || expires->type() != json_value::kind::null)) ||
+            (!done && (!expires->as_string() || expires->as_string()->empty()))) return std::nullopt;
+        manifest_sha = digest;
+        return static_cast<std::size_t>(offset);
+    };
+    json_writer request;
+    request.begin_object().field("schema_version", "1").key("manifest").raw(serialized.str()).end_object();
+    const auto admitted = exchange("POST", "", "application/json", request.str(), "");
+    if (!admitted) return std::nullopt;
+    auto received = read_progress(*admitted);
+    if (!received) return std::nullopt;
+    for (unsigned step = 0; step < 4U && *received < content.size(); ++step) {
+        const auto part = content.substr(*received, 65536U);
+        const auto reply = exchange("PUT", "/" + id + "/chunks/" + std::to_string(*received),
+            "application/octet-stream", part, sha256_hex(part));
+        if (!reply) return std::nullopt;
+        const auto next = read_progress(*reply);
+        if (!next || *next != *received + part.size()) return std::nullopt;
+        received = next;
+        if (made_progress) *made_progress = true;
+    }
+    if (*received != content.size()) return std::nullopt;
+    json_writer completion;
+    completion.begin_object().field("schema_version", "1").field("manifest_sha256", manifest_sha).end_object();
+    const auto receipt = exchange("POST", "/" + id + "/complete", "application/json", completion.str(), "");
+    return receipt && valid_artifact_ack(payload, *receipt) ? receipt : std::nullopt;
+}
+
 artifact_outbox::artifact_outbox(std::unique_ptr<write_ahead_log> log, std::string agent,
     std::string host, const std::uint64_t quota)
     : log_{std::move(log)}, agent_{std::move(agent)}, host_{std::move(host)}, quota_{quota} {}

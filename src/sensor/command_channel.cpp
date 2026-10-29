@@ -1191,12 +1191,15 @@ void command_channel_provider::run_artifacts() {
     std::uint64_t delay = 1000U;
     while (running_.load()) {
         try {
-            auto flushed = artifacts_->flush([this](const std::string& payload) {
+            bool made_progress = false;
+            auto flushed = artifacts_->flush([this, &made_progress](const std::string& payload) {
                 const auto parsed = parse_json(payload, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
                 const auto* manifest = parsed ? parsed->find("manifest") : nullptr;
                 const auto* field = manifest ? manifest->find("command_id") : nullptr;
                 if (!field || !field->as_string()) return std::string{};
-                const auto reply = artifact_transport_->submit_artifact(std::string(*field->as_string()), payload);
+                bool step_progress = false;
+                const auto reply = artifact_transport_->submit_artifact(std::string(*field->as_string()), payload, &step_progress);
+                made_progress = made_progress || step_progress;
                 return reply.status == post_status::answered ? reply.body : std::string{};
             });
             const auto pending = artifacts_->pending();
@@ -1205,9 +1208,9 @@ void command_channel_provider::run_artifacts() {
                 std::lock_guard lock{mutex_};
                 metrics_.artifacts_pending = pending;
                 metrics_.artifacts_reported += retired;
-                if (!succeeded(flushed) || (pending && !retired)) ++metrics_.artifact_failures;
+                if (!succeeded(flushed) || (pending && !retired && !made_progress)) ++metrics_.artifact_failures;
             }
-            delay = pending && !retired ? std::min<std::uint64_t>(60000U, delay * 2U) : 1000U;
+            delay = pending && !retired && !made_progress ? std::min<std::uint64_t>(60000U, delay * 2U) : 1000U;
         } catch (const std::exception&) {
             std::lock_guard lock{mutex_}; ++metrics_.artifact_failures;
             delay = std::min<std::uint64_t>(60000U, delay * 2U);

@@ -316,7 +316,8 @@ public:
     virtual ~command_transport() = default;
     [[nodiscard]] virtual post_response poll() = 0;                                  // GET .../commands?delivery_mode=durable&command_auth=ES256
     [[nodiscard]] virtual post_response accept(const std::string& command_id) = 0;   // POST .../commands/{id}/accept
-    [[nodiscard]] virtual post_response submit_artifact(const std::string&, const std::string&) {
+    [[nodiscard]] virtual post_response submit_artifact(const std::string&, const std::string&, bool* made_progress = nullptr) {
+        if (made_progress) *made_progress = false;
         post_response result; result.status = post_status::refused; return result;
     }
     [[nodiscard]] virtual post_response submit(const std::string& result_json) = 0;  // POST .../command-results
