@@ -49,6 +49,24 @@ public:
         return exchange(true, base_ + "/commands/" + command_id + "/accept", {});
     }
 
+    post_response submit_artifact(const std::string& command_id, const std::string& payload, bool* made_progress) override {
+        if (made_progress) *made_progress = false;
+        if (!is_valid_identifier(command_id)) return refused("artifact command id is invalid");
+        const auto base = base_ + "/commands/" + command_id + "/artifact-transfers";
+        post_response last;
+        const auto receipt = resume_artifact_upload(payload, [&](const std::string_view method,
+                const std::string_view suffix, const std::string_view type, const std::string& body,
+                const std::string& digest) -> std::optional<std::string> {
+            last = exchange(true, base + std::string{suffix}, body, method, type, digest);
+            return last.status == post_status::answered ? std::optional<std::string>{last.body} : std::nullopt;
+        }, made_progress);
+        if (receipt) last.body = *receipt;
+        else if (!made_progress || !*made_progress) {
+            if (last.status == post_status::answered) return refused("invalid artifact transfer reply");
+        }
+        return last;
+    }
+
     post_response submit(const std::string& result_json) override {
         if (result_json.empty()) return refused("there is no result to send");
         return exchange(true, base_ + "/command-results", result_json);
@@ -62,7 +80,9 @@ private:
         return result;
     }
 
-    post_response exchange(const bool post, const std::string& url, const std::string& body) {
+    post_response exchange(const bool post, const std::string& url, const std::string& body,
+        const std::string_view method = "POST", const std::string_view type = "application/json",
+        const std::string& chunk_digest = {}) {
         if (options_.manager_url.rfind("https://", 0U) != 0U || options_.identity.bearer_token.empty() ||
             !is_valid_identifier(options_.identity.agent_id)) {
             return refused("manager_url must be https:// and an enrolled identity is required");
@@ -87,16 +107,25 @@ private:
         const auto auth_header = "Authorization: Bearer " + options_.identity.bearer_token;
         headers = curl_slist_append(headers, auth_header.c_str());
         headers = curl_slist_append(headers, "Accept: application/json");
-        if (post) headers = curl_slist_append(headers, "Content-Type: application/json");
+        if (post) {
+            const auto content_header = "Content-Type: " + std::string{type};
+            headers = curl_slist_append(headers, content_header.c_str());
+        }
+        if (!chunk_digest.empty()) {
+            const auto hash_header = "X-Panopticon-Chunk-SHA256: " + chunk_digest;
+            headers = curl_slist_append(headers, hash_header.c_str());
+        }
         if (!post && !options_.response_profile.empty()) {
             const auto profile = "X-Panopticon-Response-Profile: " + options_.response_profile;
             headers = curl_slist_append(headers, profile.c_str());
         }
         curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
         curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, nullptr);
         if (post) {
             curl_easy_setopt(handle, CURLOPT_POSTFIELDS, body.data());
             curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.size()));
+            if (method == "PUT") curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "PUT");
         } else {
             curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L);
         }

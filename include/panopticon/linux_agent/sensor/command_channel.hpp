@@ -1,6 +1,7 @@
 #pragma once
 
 #include "panopticon/linux_agent/error.hpp"
+#include "panopticon/linux_agent/sensor/artifact_outbox.hpp"
 #include "panopticon/linux_agent/sensor/command_auth.hpp"
 #include "panopticon/linux_agent/sensor/file_actions.hpp"
 #include "panopticon/linux_agent/sensor/json_reader.hpp"
@@ -202,6 +203,8 @@ struct execution_result {
     std::string mode;     // "pidfd" or "pid_fallback" when a signal path was chosen
     std::uint32_t affected{};
     std::shared_ptr<const response_evidence> evidence;  // what a collection gathered, emitted as state
+    std::string artifact_json{};
+    std::string artifact_kind{};
 };
 
 // The one place an action touches the host. A test supplies its own; the sensor supplies the local one.
@@ -264,6 +267,7 @@ struct command_processor_options {
     // Called once a command has passed every check and its intent is durably recorded, just before it
     // is carried out (the Manager's DISPATCHED to ACCEPTED step). Failures here never block execution.
     std::function<void(const endpoint_command&)> on_accepted;
+    std::function<result<std::string>(const endpoint_command&, const std::string&, const std::string&)> on_collected{};
 };
 
 // The decision procedure, free of any network: envelope identity, expiry and lifetime bound, replay,
@@ -312,6 +316,10 @@ public:
     virtual ~command_transport() = default;
     [[nodiscard]] virtual post_response poll() = 0;                                  // GET .../commands?delivery_mode=durable&command_auth=ES256
     [[nodiscard]] virtual post_response accept(const std::string& command_id) = 0;   // POST .../commands/{id}/accept
+    [[nodiscard]] virtual post_response submit_artifact(const std::string&, const std::string&, bool* made_progress = nullptr) {
+        if (made_progress) *made_progress = false;
+        post_response result; result.status = post_status::refused; return result;
+    }
     [[nodiscard]] virtual post_response submit(const std::string& result_json) = 0;  // POST .../command-results
 };
 [[nodiscard]] std::unique_ptr<command_transport> make_https_command_transport(https_poster_options options);
@@ -322,6 +330,7 @@ struct command_channel_options {
     std::size_t maximum_ledger_entries{4096U};
     std::uint64_t poll_interval_ms{5000U};
     std::uint64_t maximum_backoff_ms{60'000U};
+    std::filesystem::path artifact_key_path{};
 };
 
 struct command_channel_metrics {
@@ -333,6 +342,7 @@ struct command_channel_metrics {
     std::uint64_t result_failures{};
     std::uint64_t unreadable{};
     std::uint64_t authorization_refused{};  // refused for a missing, unknown or invalid signature
+    std::uint64_t artifacts_pending{}, artifacts_reported{}, artifact_failures{};
     std::string last_error;
 };
 
@@ -342,7 +352,8 @@ struct command_channel_metrics {
 class command_channel_provider final : public provider {
 public:
     command_channel_provider(command_channel_options options, std::unique_ptr<command_transport> transport,
-                             std::unique_ptr<command_executor> executor);
+                             std::unique_ptr<command_executor> executor,
+                             std::unique_ptr<command_transport> artifact_transport = nullptr);
     ~command_channel_provider() override;
 
     [[nodiscard]] std::string_view name() const noexcept override { return "command_channel"; }
@@ -362,11 +373,15 @@ public:
 
 private:
     void run();
+    void run_artifacts();
     void report(const command_outcome& outcome, record_queue& queue, bool audit);
 
     command_channel_options options_;
     std::unique_ptr<command_transport> transport_;
     std::unique_ptr<command_executor> executor_;
+    std::unique_ptr<command_transport> artifact_transport_;
+    std::unique_ptr<artifact_outbox> artifacts_;
+    std::optional<ec_keypair> artifact_key_;
     std::unique_ptr<command_ledger> ledger_;
     std::unique_ptr<command_processor> processor_;
     record_queue* queue_{nullptr};
@@ -374,6 +389,7 @@ private:
     command_channel_metrics metrics_;
     std::uint64_t backoff_ms_{};
     std::thread thread_;
+    std::thread artifact_thread_;
     std::mutex wait_mutex_;
     std::condition_variable wake_;
     std::atomic<bool> running_{false};

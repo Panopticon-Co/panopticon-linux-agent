@@ -3,9 +3,11 @@
 // a fake Manager.
 
 #include "panopticon/linux_agent/keypair.hpp"
+#include "panopticon/linux_agent/event.hpp"
 #include "panopticon/linux_agent/sensor/clock.hpp"
 #include "panopticon/linux_agent/sensor/command_channel.hpp"
 #include "panopticon/linux_agent/sensor/json_reader.hpp"
+#include "panopticon/linux_agent/sensor/json.hpp"
 #include "panopticon/linux_agent/sensor/pipeline.hpp"
 #include "panopticon/linux_agent/sensor/serializer.hpp"
 #include "panopticon/linux_agent/sensor/sockdiag_network.hpp"
@@ -650,6 +652,126 @@ void test_runtime_profile() {
     require(*off->find("mode")->as_string() == "off", "off policy stays explicit");
 }
 
+void test_artifact_outbox() {
+    const auto dir = scratch("artifacts");
+    const auto payload = make_artifact_payload("command-1", "correlation-1", "host-1", "process_snapshot", "{\"pid\":42}");
+    const auto value = parse_json(payload, json_limits{}, nullptr);
+    const auto id = std::string(*value->find("artifact_id")->as_string());
+    const auto digest = std::string(*value->find("sha256")->as_string());
+    const auto ack = "{\"artifact_id\":\"" + id + "\",\"sha256\":\"" + digest + "\",\"retained\":true}";
+    require(valid_artifact_ack(payload, ack), "exact artifact/digest receipt");
+    require(!valid_artifact_ack(payload, "{}"), "HTTP200 is not evidence retention");
+    require(!valid_artifact_ack(payload, ack.substr(0, ack.size() - 1U) + ",\"retained\":true}"), "duplicate receipt keys rejected");
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "private artifact outbox");
+        auto box = std::move(std::get<std::unique_ptr<artifact_outbox>>(opened));
+        require(succeeded(box->save(payload)), "sync before collection acceptance");
+        const auto retired = box->flush([](const std::string&) { return std::string{"{}"}; });
+        require(succeeded(retired) && std::get<std::size_t>(retired) == 0U && box->pending() == 1U, "bad receipt retains original");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "other-agent", "host-1");
+        require(succeeded(opened), "original store remains readable");
+        auto box = std::move(std::get<std::unique_ptr<artifact_outbox>>(opened));
+        require(!succeeded(box->flush([&](const std::string&) { return ack; })) && box->pending() == 1U,
+                "changed identity cannot deliver retained artifact");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "artifact survives restart");
+        auto box = std::move(std::get<std::unique_ptr<artifact_outbox>>(opened));
+        auto flushed = box->flush([&](const std::string& replay) {
+            require(replay == payload, "restart sends exact envelope bytes"); return ack;
+        });
+        require(succeeded(flushed) && std::get<std::size_t>(flushed) == 1U && box->pending() == 0U,
+                "exact digest receipt retires only acknowledged original");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "quota", "agent-1", "host-1", 8192U);
+        require(succeeded(opened), "bounded artifact fixture quota");
+        auto box = std::move(std::get<std::unique_ptr<artifact_outbox>>(opened));
+        const auto large = make_artifact_payload("command-2", "correlation-2", "host-1", "process_snapshot",
+            "{\"value\":\"" + std::string(1800U, 'a') + "\"}");
+        std::uint64_t saved = 0U;
+        while (saved < 100U && succeeded(box->save(large))) ++saved;
+        require(saved > 0U && saved < 100U && box->pending() == saved, "quota refuses admission without evicting originals");
+    }
+    const auto parent = fs::weakly_canonical(dir.parent_path());
+    require(parent == fs::weakly_canonical(fs::temp_directory_path()) && dir.filename().string().starts_with("panopticon-command-tests-"), "owned artifact fixture cleanup");
+    fs::remove_all(dir);
+}
+
+void test_artifact_commit_precedes_success() {
+    world w{"artifact-commit"};
+    command_processor_options options;
+    options.agent_id = "agent-1"; options.host_id = "host-1";
+    options.boot_digest = linux_boot_digest(test_kernel_boot);
+    options.policy.mode = response_mode::enforce;
+    options.now_unix = [&] { return w.clock; };
+    bool attempted = false;
+    options.on_collected = [&](const endpoint_command& command, const std::string&, const std::string&) -> result<std::string> {
+        attempted = true;
+        require(w.ledger->find(command.command_id)->state == command_ledger::phase::received,
+                "artifact commits before durable command completion");
+        return error{error_code::resource_limit, "artifact disk quota"};
+    };
+    command_processor processor{options, *w.ledger, w.executor};
+    w.executor.next.artifact_kind = "process_snapshot"; w.executor.next.artifact_json = "{\"pid\":42}";
+    const auto command = w.make("collect-artifact", "COLLECT_PROCESS_INFO");
+    const auto outcome = processor.handle(command);
+    require(attempted && outcome.outcome == "indeterminate" && outcome.reason == "artifact_commit_failed",
+            "collection cannot falsely claim durable evidence on a storage refusal");
+    (void)processor.handle(command);
+    require(w.executor.calls.size() == 1U, "artifact failure never reruns an accepted command");
+}
+
+void test_signed_artifact_manifest() {
+    const auto generated = generate_ec_p256_keypair();
+    require(succeeded(generated), "artifact signing identity");
+    const auto& key = std::get<ec_keypair>(generated);
+    const auto unsigned_payload = make_artifact_payload("command-1", "correlation-1", "host-1", "process_snapshot", "{\"pid\":42}");
+    const auto signed_value = sign_artifact_payload(unsigned_payload, "agent-1", key, 1793232000U);
+    require(succeeded(signed_value), "collection manifest signed before outbox commit");
+    const auto& payload = std::get<std::string>(signed_value);
+    const auto value = parse_json(payload, json_limits{}, nullptr);
+    require(value.has_value(), "signed envelope parses");
+    const auto* manifest = value->find("manifest");
+    require(manifest && manifest->find("schema_version")->as_string() == "2", "manifest version 2");
+    const auto input = artifact_manifest_signing_input(payload);
+    require(succeeded(input), "artifact domain-separated signing input");
+    const auto& data = std::get<std::string>(input);
+    const auto signature = decode_base64(*manifest->find("authorization")->find("signature")->as_string());
+    require(signature && signature->size() == 64U, "raw P-256 r/s signature");
+    ec_raw_signature raw{};
+    std::copy(signature->begin(), signature->end(), raw.begin());
+    const auto verified = verify_raw(key.public_point, std::vector<std::uint8_t>(data.begin(), data.end()), raw);
+    require(succeeded(verified) && std::get<bool>(verified), "signature verifies against endpoint public key");
+    auto edited = data; edited.push_back('x');
+    const auto invalid = verify_raw(key.public_point, std::vector<std::uint8_t>(edited.begin(), edited.end()), raw);
+    require(succeeded(invalid) && !std::get<bool>(invalid), "signature rejects edited manifest bytes");
+    const auto id = std::string(*manifest->find("artifact_id")->as_string());
+    const auto digest = std::string(*manifest->find("sha256")->as_string());
+    const auto ack = "{\"artifact_id\":\"" + id + "\",\"sha256\":\"" + digest + "\",\"retained\":true}";
+    const auto dir = scratch("signed-artifacts");
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "signed outbox opens");
+        auto& box = std::get<std::unique_ptr<artifact_outbox>>(opened);
+        require(succeeded(box->save(payload)), "signed artifact durably saved");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "signed outbox recovers");
+        auto& box = std::get<std::unique_ptr<artifact_outbox>>(opened);
+        const auto retired = box->flush([&](const std::string& retry) {
+            require(retry == payload, "restart retries exact signed envelope without recollection or resigning"); return ack;
+        });
+        require(succeeded(retired) && std::get<std::size_t>(retired) == 1U, "signed exact receipt retires artifact");
+    }
+    std::filesystem::remove_all(dir);
+}
+
 void test_result_json() {
     command_outcome outcome;
     outcome.command_id = "c1";
@@ -765,6 +887,7 @@ void test_local_executor_real_processes() {
     require(alive(victim), "and is left alone");
 
     const auto info = executor->execute(real_command("i1", command_action::collect_process_info, victim, ticks), false);
+    require(!info.artifact_json.empty() && info.artifact_kind == "process_snapshot", "actual process collection produces a structured artifact");
     require(info.outcome == "succeeded" && info.detail.find("ppid=" + std::to_string(::getpid())) != std::string::npos, "collection reads the process");
     const auto stale_info = executor->execute(real_command("i2", command_action::collect_process_info, victim, ticks + 5U), false);
     require(stale_info.reason == "target_mismatch", "collection checks the identity too");
@@ -833,6 +956,7 @@ void test_local_executor_collects_connections() {
     // A read: dry_run does not suppress it, and nothing about the host changes.
     const auto collected = executor->execute(real_command("n1", command_action::collect_network_connections, 0, 0), true);
     require(collected.outcome == "succeeded" && collected.reason == "ok" && collected.evidence != nullptr, "collected");
+    require(!collected.artifact_json.empty() && collected.artifact_kind == "network_snapshot", "actual network collection produces a structured artifact");
     const auto& evidence = *collected.evidence;
     require(evidence.object == "connections" && evidence.snapshot_id == "response-n1" && evidence.mechanism == "SOCKDIAG+PROCFS", "the snapshot names");
     require(collected.affected == evidence.items.size() && !evidence.items.empty(), "affected counts the sockets reported");
@@ -1655,7 +1779,113 @@ void test_configuration() {
 
 }  // namespace
 
-int main() {
+void test_resumable_signed_artifact() {
+    const auto generated = generate_ec_p256_keypair();
+    require(succeeded(generated), "resumable signing key");
+    const auto content = std::string{"{\"evidence\":\""} + std::string(400000U, 'x') + "\"}";
+    const auto encoded = sign_artifact_payload(make_artifact_payload("command-1", "correlation-1",
+        "host-1", "process_snapshot", content), "agent-1", std::get<ec_keypair>(generated), 1793232000U);
+    require(succeeded(encoded), "resumable signed original");
+    const auto payload = std::get<std::string>(encoded);
+    const auto parsed = parse_json(payload, json_limits{}, nullptr);
+    const auto* manifest = parsed->find("manifest");
+    const auto id = std::string(*manifest->find("artifact_id")->as_string());
+    const auto sha = std::string(*manifest->find("sha256")->as_string());
+    const std::string manifest_sha(64U, 'b');
+    std::string received;
+    unsigned requests = 0U, uploads = 0U, completions = 0U;
+    bool lose_chunk = true, lose_final = true, retained = false;
+    const auto progress = [&] {
+        json_writer out;
+        out.begin_object().field("schema_version", "1").field("artifact_id", id).field("sha256", sha);
+        out.field("manifest_sha256", manifest_sha).field("received_bytes", static_cast<std::uint64_t>(received.size()));
+        out.field("chunk_bytes", 65536U).field("complete", retained);
+        if (retained) out.field_null("expires_at"); else out.field("expires_at", "2026-10-30T00:00:00Z");
+        out.end_object(); return out.take();
+    };
+    const artifact_exchange server = [&](const std::string_view method, const std::string_view suffix,
+            const std::string_view type, const std::string& body, const std::string& digest) -> std::optional<std::string> {
+        ++requests;
+        if (suffix.empty()) {
+            require(method == "POST" && type == "application/json", "admission framing");
+            const auto actual = artifact_manifest_signing_input(body);
+            const auto original = artifact_manifest_signing_input(payload);
+            require(succeeded(actual) && succeeded(original) &&
+                std::get<std::string>(actual) == std::get<std::string>(original), "resume preserves signed context");
+            const auto request = parse_json(body, json_limits{}, nullptr);
+            require(request->find("manifest")->find("authorization")->find("signature")->as_string() ==
+                manifest->find("authorization")->find("signature")->as_string(), "resume never resigns");
+            return progress();
+        }
+        if (method == "PUT") {
+            ++uploads;
+            const auto offset = std::stoull(std::string{suffix.substr(suffix.find_last_of('/') + 1U)});
+            require(offset == received.size() && body == content.substr(received.size(), 65536U), "only missing original bytes transferred");
+            require(type == "application/octet-stream" && digest == sha256_hex(body), "chunk digest and type bound");
+            received += body;
+            if (lose_chunk) { lose_chunk = false; return std::nullopt; }
+            return progress();
+        }
+        ++completions;
+        require(received == content, "whole original precedes final receipt");
+        const auto request = parse_json(body, json_limits{}, nullptr);
+        require(request->find("manifest_sha256")->as_string() == manifest_sha, "completion manifest binding");
+        retained = true;
+        if (lose_final) { lose_final = false; return std::nullopt; }
+        return "{\"artifact_id\":\"" + id + "\",\"sha256\":\"" + sha + "\",\"retained\":true}";
+    };
+    const auto dir = scratch("resumable-artifacts");
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "resumable private outbox");
+        auto& box = std::get<std::unique_ptr<artifact_outbox>>(opened);
+        require(succeeded(box->save(payload)), "original commits before transfer");
+        const auto result = box->flush([&](const std::string& original) {
+            return resume_artifact_upload(original, server).value_or(""); });
+        require(succeeded(result) && std::get<std::size_t>(result) == 0U && box->pending() == 1U, "lost chunk ACK preserves original");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "restart recovers original");
+        auto& box = std::get<std::unique_ptr<artifact_outbox>>(opened);
+        for (unsigned attempt = 0; attempt < 5U && box->pending(); ++attempt) {
+            requests = 0U; bool made_progress = false;
+            const auto step = box->flush([&](const std::string& original) {
+                require(original == payload, "restart never recollects or edits signed evidence");
+                return resume_artifact_upload(original, server, &made_progress).value_or("");
+            });
+            require(succeeded(step) && requests <= 6U, "bounded network work per step");
+        }
+        require(box->pending() == 0U && completions == 2U && uploads == 7U,
+            "lost final receipt retries without duplicate chunks or early retirement");
+    }
+    require(!resume_artifact_upload(payload, [](auto, auto, auto, const auto&, const auto&)
+        -> std::optional<std::string> { return "{}"; }), "unverified progress cannot authorize retention");
+    std::filesystem::remove_all(dir);
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view{argv[1]} == "--emit-signed-artifact-fixture") {
+        const auto key = generate_ec_p256_keypair();
+        if (!succeeded(key)) return 2;
+        const auto payload = make_artifact_payload("fixture-command", "fixture-correlation", "host-1", "process_snapshot",
+            "{\"pid\":42,\"start_time_ticks\":\"18446744073709551615\"}\n");
+        const auto signed_payload = sign_artifact_payload(payload, "agent-1", std::get<ec_keypair>(key), 1793232000U);
+        if (!succeeded(signed_payload)) return 2;
+        auto result = std::get<std::string>(signed_payload);
+        result.pop_back();
+        static constexpr char digits[] = "0123456789abcdef";
+        std::string point;
+        for (const auto byte : std::get<ec_keypair>(key).public_point) { point += digits[byte >> 4]; point += digits[byte & 15U]; }
+        result += ",\"test_public_point_hex\":\"" + point + "\"}";
+        std::puts(result.c_str());
+        return 0;
+    }
+    if (argc == 2 && std::string_view{argv[1]} == "--emit-artifact-fixture") {
+        std::puts(make_artifact_payload("fixture-command", "fixture-correlation", "host-1", "process_snapshot",
+            "{\"pid\":42,\"start_time_ticks\":\"18446744073709551615\"}\n").c_str());
+        return 0;
+    }
     // The sensor refuses key files another user can write; a login umask of 002 (Ubuntu's user-private groups) would
     // make every file these tests create group-writable.
     ::umask(0022);
@@ -1683,6 +1913,10 @@ int main() {
         {"processor_ledger_failure_is_fail_closed", test_processor_ledger_failure_is_fail_closed},
         {"processor_unreadable", test_processor_unreadable},
         {"runtime_profile", test_runtime_profile},
+        {"artifact_outbox", test_artifact_outbox},
+        {"signed_artifact_manifest", test_signed_artifact_manifest},
+        {"resumable_signed_artifact", test_resumable_signed_artifact},
+        {"artifact_commit_precedes_success", test_artifact_commit_precedes_success},
         {"result_json", test_result_json},
         {"response_record_shape", test_response_record_shape},
         {"local_executor_real_processes", test_local_executor_real_processes},
