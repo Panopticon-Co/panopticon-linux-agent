@@ -39,6 +39,7 @@ struct file_action_result {
     std::string reason;   // [a-z_]+
     std::string detail;   // printable, bounded by the caller
     std::uint32_t affected{};
+    std::string artifact_json{};
 };
 
 // Read-only: type, size, mode, owner, times and SHA-256 of one regular file (a symlink is reported as a

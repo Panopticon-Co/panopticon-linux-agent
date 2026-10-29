@@ -650,6 +650,80 @@ void test_runtime_profile() {
     require(*off->find("mode")->as_string() == "off", "off policy stays explicit");
 }
 
+void test_artifact_outbox() {
+    const auto dir = scratch("artifacts");
+    const auto payload = make_artifact_payload("command-1", "correlation-1", "host-1", "process_snapshot", "{\"pid\":42}");
+    const auto value = parse_json(payload, json_limits{}, nullptr);
+    const auto id = std::string(*value->find("artifact_id")->as_string());
+    const auto digest = std::string(*value->find("sha256")->as_string());
+    const auto ack = "{\"artifact_id\":\"" + id + "\",\"sha256\":\"" + digest + "\",\"retained\":true}";
+    require(valid_artifact_ack(payload, ack), "exact artifact/digest receipt");
+    require(!valid_artifact_ack(payload, "{}"), "HTTP200 is not evidence retention");
+    require(!valid_artifact_ack(payload, ack.substr(0, ack.size() - 1U) + ",\"retained\":true}"), "duplicate receipt keys rejected");
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "private artifact outbox");
+        auto box = std::move(std::get<std::unique_ptr<artifact_outbox>>(opened));
+        require(succeeded(box->save(payload)), "sync before collection acceptance");
+        const auto retired = box->flush([](const std::string&) { return std::string{"{}"}; });
+        require(succeeded(retired) && std::get<std::size_t>(retired) == 0U && box->pending() == 1U, "bad receipt retains original");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "other-agent", "host-1");
+        require(succeeded(opened), "original store remains readable");
+        auto box = std::move(std::get<std::unique_ptr<artifact_outbox>>(opened));
+        require(!succeeded(box->flush([&](const std::string&) { return ack; })) && box->pending() == 1U,
+                "changed identity cannot deliver retained artifact");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "artifact survives restart");
+        auto box = std::move(std::get<std::unique_ptr<artifact_outbox>>(opened));
+        auto flushed = box->flush([&](const std::string& replay) {
+            require(replay == payload, "restart sends exact envelope bytes"); return ack;
+        });
+        require(succeeded(flushed) && std::get<std::size_t>(flushed) == 1U && box->pending() == 0U,
+                "exact digest receipt retires only acknowledged original");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "quota", "agent-1", "host-1", 8192U);
+        require(succeeded(opened), "bounded artifact fixture quota");
+        auto box = std::move(std::get<std::unique_ptr<artifact_outbox>>(opened));
+        const auto large = make_artifact_payload("command-2", "correlation-2", "host-1", "process_snapshot",
+            "{\"value\":\"" + std::string(1800U, 'a') + "\"}");
+        std::uint64_t saved = 0U;
+        while (saved < 100U && succeeded(box->save(large))) ++saved;
+        require(saved > 0U && saved < 100U && box->pending() == saved, "quota refuses admission without evicting originals");
+    }
+    const auto parent = fs::weakly_canonical(dir.parent_path());
+    require(parent == fs::weakly_canonical(fs::temp_directory_path()) && dir.filename().string().starts_with("panopticon-command-tests-"), "owned artifact fixture cleanup");
+    fs::remove_all(dir);
+}
+
+void test_artifact_commit_precedes_success() {
+    world w{"artifact-commit"};
+    command_processor_options options;
+    options.agent_id = "agent-1"; options.host_id = "host-1";
+    options.boot_digest = linux_boot_digest(test_kernel_boot);
+    options.policy.mode = response_mode::enforce;
+    options.now_unix = [&] { return w.clock; };
+    bool attempted = false;
+    options.on_collected = [&](const endpoint_command& command, const std::string&, const std::string&) -> result<std::string> {
+        attempted = true;
+        require(w.ledger->find(command.command_id)->state == command_ledger::phase::received,
+                "artifact commits before durable command completion");
+        return error{error_code::resource_limit, "artifact disk quota"};
+    };
+    command_processor processor{options, *w.ledger, w.executor};
+    w.executor.next.artifact_kind = "process_snapshot"; w.executor.next.artifact_json = "{\"pid\":42}";
+    const auto command = w.make("collect-artifact", "COLLECT_PROCESS_INFO");
+    const auto outcome = processor.handle(command);
+    require(attempted && outcome.outcome == "indeterminate" && outcome.reason == "artifact_commit_failed",
+            "collection cannot falsely claim durable evidence on a storage refusal");
+    (void)processor.handle(command);
+    require(w.executor.calls.size() == 1U, "artifact failure never reruns an accepted command");
+}
+
 void test_result_json() {
     command_outcome outcome;
     outcome.command_id = "c1";
@@ -765,6 +839,7 @@ void test_local_executor_real_processes() {
     require(alive(victim), "and is left alone");
 
     const auto info = executor->execute(real_command("i1", command_action::collect_process_info, victim, ticks), false);
+    require(!info.artifact_json.empty() && info.artifact_kind == "process_snapshot", "actual process collection produces a structured artifact");
     require(info.outcome == "succeeded" && info.detail.find("ppid=" + std::to_string(::getpid())) != std::string::npos, "collection reads the process");
     const auto stale_info = executor->execute(real_command("i2", command_action::collect_process_info, victim, ticks + 5U), false);
     require(stale_info.reason == "target_mismatch", "collection checks the identity too");
@@ -833,6 +908,7 @@ void test_local_executor_collects_connections() {
     // A read: dry_run does not suppress it, and nothing about the host changes.
     const auto collected = executor->execute(real_command("n1", command_action::collect_network_connections, 0, 0), true);
     require(collected.outcome == "succeeded" && collected.reason == "ok" && collected.evidence != nullptr, "collected");
+    require(!collected.artifact_json.empty() && collected.artifact_kind == "network_snapshot", "actual network collection produces a structured artifact");
     const auto& evidence = *collected.evidence;
     require(evidence.object == "connections" && evidence.snapshot_id == "response-n1" && evidence.mechanism == "SOCKDIAG+PROCFS", "the snapshot names");
     require(collected.affected == evidence.items.size() && !evidence.items.empty(), "affected counts the sockets reported");
@@ -1655,7 +1731,12 @@ void test_configuration() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view{argv[1]} == "--emit-artifact-fixture") {
+        std::puts(make_artifact_payload("fixture-command", "fixture-correlation", "host-1", "process_snapshot",
+            "{\"pid\":42,\"start_time_ticks\":\"18446744073709551615\"}\n").c_str());
+        return 0;
+    }
     // The sensor refuses key files another user can write; a login umask of 002 (Ubuntu's user-private groups) would
     // make every file these tests create group-writable.
     ::umask(0022);
@@ -1683,6 +1764,8 @@ int main() {
         {"processor_ledger_failure_is_fail_closed", test_processor_ledger_failure_is_fail_closed},
         {"processor_unreadable", test_processor_unreadable},
         {"runtime_profile", test_runtime_profile},
+        {"artifact_outbox", test_artifact_outbox},
+        {"artifact_commit_precedes_success", test_artifact_commit_precedes_success},
         {"result_json", test_result_json},
         {"response_record_shape", test_response_record_shape},
         {"local_executor_real_processes", test_local_executor_real_processes},

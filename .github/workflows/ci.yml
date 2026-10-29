@@ -10,6 +10,19 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install --yes clang libelf-dev zlib1g-dev libcurl4-openssl-dev libssl-dev libmnl-dev libnftnl-dev
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build --parallel
+      - uses: actions/checkout@v4
+        with:
+          repository: Panopticon-Co/panopticon-contracts
+          ref: "dddd4b5b6ada5240962ceb6f4748a554ea487ccf"
+          path: artifact-contracts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate native artifact producer against central exact-byte contract
+        run: |
+          python -m pip install jsonschema
+          ./build/panopticon-command-tests --emit-artifact-fixture > artifact-fixture.json
+          python artifact-contracts/scripts/validate_artifact_producer.py artifact-fixture.json
       - run: ctest --test-dir build --output-on-failure
       - name: Sensor tests as root (live netlink proc connector)
         run: sudo ./build/panopticon-sensor-tests

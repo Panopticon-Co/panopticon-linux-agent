@@ -291,15 +291,20 @@ int main(int argc, char** argv) {
             // The sensor never quarantines its own configuration, keys, ledger, WAL, identity or CA.
             const std::vector<std::filesystem::path> own_files{std::filesystem::path{config_path}, config.identity_path, config.ca_bundle,
                                                                 config.response_signing_keys, channel.ledger_path, config.wal_path,
-                                                                std::filesystem::path{config.wal_path.string() + ".commands"}};
+                                                                std::filesystem::path{config.wal_path.string() + ".commands"},
+                                                                std::filesystem::path{channel.ledger_path.string() + ".artifacts"}};
             for (const auto& own : own_files) {
                 if (!own.empty()) executor.files.protected_paths.push_back(own);
             }
             if (keys_ok) {
                 manager_connection->response_profile = sensor::response_profile_header(
                     sensor::response_profile_json(channel.processor));
+                auto artifact_connection = *manager_connection;
+                artifact_connection.timeout_seconds = 5L;
+                artifact_connection.maximum_response_bytes = 4096U;
                 providers.push_back(std::make_unique<sensor::command_channel_provider>(
-                    std::move(channel), sensor::make_https_command_transport(*manager_connection), sensor::make_local_executor(std::move(executor))));
+                    std::move(channel), sensor::make_https_command_transport(*manager_connection), sensor::make_local_executor(std::move(executor)),
+                    sensor::make_https_command_transport(std::move(artifact_connection))));
                 std::fprintf(stderr, "panopticon-sensord: command channel %s\n", sensor::to_string(mode));
             }
         }

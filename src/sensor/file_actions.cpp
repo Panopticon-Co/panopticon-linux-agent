@@ -258,7 +258,12 @@ file_action_result collect_file(const std::string& path, const file_action_optio
         char target[maximum_path_bytes + 1U];
         const auto length = ::readlinkat(found.entry.get(), "", target, maximum_path_bytes);
         const std::string text = length > 0 ? printable(std::string_view{target, static_cast<std::size_t>(length)}, 160U) : std::string{};
-        return make("succeeded", "ok", facts_of(found.info) + " target=" + text, 1U);
+        auto result = make("succeeded", "ok", facts_of(found.info) + " target=" + text, 1U);
+        json_writer artifact;
+        artifact.begin_object().field("path", path).field("type", "symlink").field("link_target", text);
+        artifact.field("sha256_available", false).field("link_target_may_be_truncated", true).end_object();
+        result.artifact_json = artifact.take();
+        return result;
     }
     if (!S_ISREG(found.info.st_mode)) return make("rejected", "not_a_file", facts_of(found.info));
     if (static_cast<std::uint64_t>(found.info.st_size) > options.maximum_bytes) {
@@ -276,7 +281,16 @@ file_action_result collect_file(const std::string& path, const file_action_optio
     if (::fstat(reader.get(), &after) != 0 || after.st_size != opened.st_size || mtime_ns(after) != mtime_ns(opened) || ctime_ns(after) != ctime_ns(opened)) {
         return make("failed", "file_changed", "the file changed while it was read");
     }
-    return make("succeeded", "ok", facts_of(opened) + " sha256=" + digest.value.sha256, 1U);
+    auto result = make("succeeded", "ok", facts_of(opened) + " sha256=" + digest.value.sha256, 1U);
+    json_writer artifact;
+    artifact.begin_object().field("path", path).field("type", "regular_file");
+    artifact.field("size", std::to_string(opened.st_size)).field("inode", std::to_string(opened.st_ino));
+    artifact.field("device", std::to_string(opened.st_dev)).field("mode", static_cast<std::uint32_t>(opened.st_mode & 07777U));
+    artifact.field("uid", static_cast<std::uint32_t>(opened.st_uid)).field("gid", static_cast<std::uint32_t>(opened.st_gid));
+    artifact.field("mtime_ns", std::to_string(mtime_ns(opened))).field("ctime_ns", std::to_string(ctime_ns(opened)));
+    artifact.field("sha256", digest.value.sha256).field("hash_state", "computed").end_object();
+    result.artifact_json = artifact.take();
+    return result;
 }
 
 void remove_partial_quarantine_files(const std::filesystem::path& quarantine_dir) {

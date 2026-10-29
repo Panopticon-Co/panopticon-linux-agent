@@ -125,6 +125,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/sensor/fim.cpp
         src/sensor/hash_service.cpp
         src/sensor/control.cpp
+        src/sensor/artifact_outbox.cpp
         src/sensor/command_channel.cpp
         src/sensor/command_auth.cpp
         src/sensor/file_actions.cpp

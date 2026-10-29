@@ -660,6 +660,7 @@ private:
         out.reason = result.reason;
         out.detail = clean(result.detail);
         out.affected = result.affected;
+        if (!result.artifact_json.empty()) { out.artifact_json = result.artifact_json; out.artifact_kind = "file_metadata"; }
         return out;
     }
 
@@ -749,8 +750,26 @@ private:
         std::string detail = "name=" + clean(process.comm, 32U) + " exe=" + clean(process.executable.path, 160U) +
                              " ppid=" + std::to_string(process.ppid) + " uid=" + std::to_string(process.creds.uids[1]) +
                              " threads=" + std::to_string(process.threads);
-        // The full record (command line, ancestry, hashes) is the `response.action` event itself.
-        return {"succeeded", "ok", clean(detail), {}, 1U, {}};
+        json_writer artifact;
+        artifact.begin_object().field("scope", "procfs_process_metadata").field("pid", process.pid);
+        artifact.field("start_time_ticks", std::to_string(process.start_ticks)).field("ppid", process.ppid);
+        artifact.field("name", process.comm).field("state", std::string(1U, process.state));
+        artifact.field("thread_count", process.threads).field("uid", process.creds.uids[1]);
+        artifact.field("executable_path", process.executable.path).field("executable_kind", to_string(process.executable.kind));
+        artifact.field("executable_inode", std::to_string(process.executable.inode));
+        artifact.key("args").begin_array();
+        for (const auto& arg : process.args) artifact.value(arg);
+        artifact.end_array().field("args_truncated", process.args_truncated);
+        artifact.key("unavailable").begin_array();
+        for (const auto& missing : process.unavailable) {
+            artifact.begin_object().field("field", missing.field).field("reason", to_string(missing.reason)).end_object();
+        }
+        for (const auto field : {"thread_inventory", "instruction_trace", "memory_contents", "binary_contents"})
+            artifact.begin_object().field("field", field).field("reason", "not_collected_by_this_command").end_object();
+        artifact.end_array().end_object();
+        execution_result result{"succeeded", "ok", clean(detail), {}, 1U, {}};
+        result.artifact_json = artifact.take(); result.artifact_kind = "process_snapshot";
+        return result;
     }
 
     // Read-only: the socket tables now, each socket attributed to the process holding it where the
@@ -777,6 +796,23 @@ private:
         std::string detail = connection_summary(sockets, owners) + " snapshot=" + evidence->snapshot_id;
         if (truncated) detail += " truncated";
         execution_result result{"succeeded", "ok", clean(detail), {}, static_cast<std::uint32_t>(evidence->items.size()), {}};
+        json_writer artifact;
+        artifact.begin_object().field("scope", "bounded_native_socket_snapshot");
+        artifact.field("source_collected_items", static_cast<std::uint64_t>(evidence->items.size()));
+        artifact.field("snapshot_id", evidence->snapshot_id).field("mechanism", evidence->mechanism);
+        artifact.key("items").begin_array();
+        std::size_t included = 0U;
+        for (const auto& item : evidence->items) {
+            if (artifact.str().size() + item.size() > 850U * 1024U) break;
+            artifact.raw(item); ++included;
+        }
+        artifact.end_array().field("included_items", static_cast<std::uint64_t>(included));
+        artifact.field("artifact_truncated", included != evidence->items.size());
+        artifact.key("unavailable").begin_array();
+        for (const auto& missing : evidence->unavailable)
+            artifact.begin_object().field("field", missing.field).field("reason", to_string(missing.reason)).end_object();
+        artifact.end_array().end_object();
+        result.artifact_json = artifact.take(); result.artifact_kind = "network_snapshot";
         result.evidence = std::move(evidence);
         return result;
     }
@@ -906,6 +942,17 @@ command_outcome command_processor::handle(const endpoint_command& command) {
     result.dry_run = dry_run;
     result.executed = true;
     result.evidence = done.evidence;
+    if (done.outcome == "succeeded" && !done.artifact_json.empty() && options_.on_collected) {
+        try {
+            auto stored = options_.on_collected(command, done.artifact_kind, done.artifact_json);
+            if (succeeded(stored)) result.detail = clean(result.detail + " artifact=" + std::get<std::string>(stored));
+            else { result.outcome = "indeterminate"; result.reason = "artifact_commit_failed";
+                   result.detail = clean(std::get<error>(stored).message); }
+        } catch (const std::exception& failure) {
+            result.outcome = "indeterminate"; result.reason = "artifact_commit_failed";
+            result.detail = clean(failure.what());
+        }
+    }
     (void)ledger_.mark_done(command.command_id, result.outcome, result.reason, result.detail);
     return result;
 }
@@ -1026,8 +1073,10 @@ raw_response_action response_audit(const command_outcome& outcome) {
 // ---- provider -------------------------------------------------------------------------------
 
 command_channel_provider::command_channel_provider(command_channel_options options, std::unique_ptr<command_transport> transport,
-                                                   std::unique_ptr<command_executor> executor)
-    : options_{std::move(options)}, transport_{std::move(transport)}, executor_{std::move(executor)} {}
+                                                   std::unique_ptr<command_executor> executor,
+                                                   std::unique_ptr<command_transport> artifact_transport)
+    : options_{std::move(options)}, transport_{std::move(transport)}, executor_{std::move(executor)},
+      artifact_transport_{std::move(artifact_transport)} {}
 
 command_channel_provider::~command_channel_provider() { stop(); }
 
@@ -1063,6 +1112,21 @@ result<bool> command_channel_provider::prepare(record_queue& queue) {
         metrics_.last_error = "the command ledger was corrupt and was set aside; commands issued before now are refused";
     }
     auto processor_options = options_.processor;
+    auto artifact_store = artifact_outbox::open(options_.ledger_path.string() + ".artifacts",
+        processor_options.agent_id, processor_options.host_id);
+    if (succeeded(artifact_store)) artifacts_ = std::move(std::get<std::unique_ptr<artifact_outbox>>(artifact_store));
+    else { std::lock_guard lock{mutex_}; ++metrics_.artifact_failures; }
+    processor_options.on_collected = [this](const endpoint_command& command, const std::string& kind,
+                                           const std::string& data) -> result<std::string> {
+        if (!artifacts_) return error{error_code::io_failure, "artifact store unavailable; collection not durably retained"};
+        const auto payload = make_artifact_payload(command.command_id, command.correlation_id,
+            options_.processor.host_id, kind, data);
+        auto saved = artifacts_->save(payload);
+        if (!succeeded(saved)) { std::lock_guard lock{mutex_}; ++metrics_.artifact_failures; return std::get<error>(saved); }
+        { std::lock_guard lock{mutex_}; metrics_.artifacts_pending = artifacts_->pending(); }
+        const auto parsed = parse_json(payload, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
+        return std::string(*parsed->find("artifact_id")->as_string());
+    };
     auto* transport = transport_.get();
     // Tell the Manager the command is accepted once it is durably recorded and about to run. A failed
     // call changes nothing: the Manager takes a result straight from DISPATCHED.
@@ -1081,6 +1145,7 @@ result<bool> command_channel_provider::start(record_queue& queue) {
         state_ = "active";
     }
     thread_ = std::thread{[this] { run(); }};
+    if (artifacts_ && artifact_transport_) artifact_thread_ = std::thread{[this] { run_artifacts(); }};
     return true;
 }
 
@@ -1088,6 +1153,7 @@ void command_channel_provider::stop() {
     if (!running_.exchange(false)) return;
     wake_.notify_all();
     if (thread_.joinable()) thread_.join();
+    if (artifact_thread_.joinable()) artifact_thread_.join();
     std::lock_guard lock{mutex_};
     state_ = "stopped";
 }
@@ -1098,6 +1164,7 @@ provider_health command_channel_provider::health() const {
     health.name = "command_channel";
     health.state = state_;
     health.reason = metrics_.last_error;
+    if (metrics_.artifacts_pending) health.reason += " artifacts_pending=" + std::to_string(metrics_.artifacts_pending);
     health.capabilities = capabilities();
     health.events = metrics_.commands_seen;
     return health;
@@ -1106,6 +1173,35 @@ provider_health command_channel_provider::health() const {
 command_channel_metrics command_channel_provider::metrics() const {
     std::lock_guard lock{mutex_};
     return metrics_;
+}
+
+void command_channel_provider::run_artifacts() {
+    std::uint64_t delay = 1000U;
+    while (running_.load()) {
+        try {
+            auto flushed = artifacts_->flush([this](const std::string& payload) {
+                const auto parsed = parse_json(payload, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
+                const auto* field = parsed ? parsed->find("command_id") : nullptr;
+                if (!field || !field->as_string()) return std::string{};
+                const auto reply = artifact_transport_->submit_artifact(std::string(*field->as_string()), payload);
+                return reply.status == post_status::answered ? reply.body : std::string{};
+            });
+            const auto pending = artifacts_->pending();
+            const auto retired = succeeded(flushed) ? std::get<std::size_t>(flushed) : 0U;
+            {
+                std::lock_guard lock{mutex_};
+                metrics_.artifacts_pending = pending;
+                metrics_.artifacts_reported += retired;
+                if (!succeeded(flushed) || (pending && !retired)) ++metrics_.artifact_failures;
+            }
+            delay = pending && !retired ? std::min<std::uint64_t>(60000U, delay * 2U) : 1000U;
+        } catch (const std::exception&) {
+            std::lock_guard lock{mutex_}; ++metrics_.artifact_failures;
+            delay = std::min<std::uint64_t>(60000U, delay * 2U);
+        }
+        std::unique_lock lock{wait_mutex_};
+        wake_.wait_for(lock, std::chrono::milliseconds{delay}, [this] { return !running_.load(); });
+    }
 }
 
 void command_channel_provider::report(const command_outcome& outcome, record_queue& queue, const bool audit) {

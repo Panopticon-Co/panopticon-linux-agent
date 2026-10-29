@@ -78,6 +78,8 @@ void test_collect_regular_file() {
     require(result.detail.find(std::string{"sha256="} + hello_sha256) != std::string::npos, "the SHA-256 of the content");
     require(result.detail.find("type=regular size=6 mode=0750") != std::string::npos, "type, size and mode");
     require(result.affected == 1U, "one file");
+    const auto artifact = parse_json(result.artifact_json, json_limits{}, nullptr);
+    require(artifact && *artifact->find("sha256")->as_string() == hello_sha256, "held file metadata artifact keeps exact hash");
     write_file(box.work("empty"), "");
     const auto empty = collect_file(box.work("empty").string(), box.options);
     require_result(empty, "succeeded", "ok", "an empty file");

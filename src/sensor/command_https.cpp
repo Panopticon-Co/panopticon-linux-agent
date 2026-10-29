@@ -49,6 +49,11 @@ public:
         return exchange(true, base_ + "/commands/" + command_id + "/accept", {});
     }
 
+    post_response submit_artifact(const std::string& command_id, const std::string& payload) override {
+        if (!is_valid_identifier(command_id)) return refused("artifact command id is invalid");
+        return exchange(true, base_ + "/commands/" + command_id + "/artifacts", payload);
+    }
+
     post_response submit(const std::string& result_json) override {
         if (result_json.empty()) return refused("there is no result to send");
         return exchange(true, base_ + "/command-results", result_json);
