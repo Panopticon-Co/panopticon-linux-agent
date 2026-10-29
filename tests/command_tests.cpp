@@ -632,8 +632,11 @@ void test_runtime_profile() {
     options.policy.require_boot_binding = true;
     options.policy.require_signature = true;
     const auto text = response_profile_json(options);
+    require(response_profile_json(options) == text, "repeated capability reports do not invent a new identity or protocol");
     const auto doc = parse_json(text, json_limits{}, nullptr);
     require(doc && doc->is_object(), "current runtime profile is JSON");
+    require(*doc->find("schema_version")->as_string() == "2", "artifact capability uses versioned profile");
+    require(*doc->find("artifact_protocol")->as_string() == "signed-json-v2-resume-v1", "signed durable artifact delivery is explicit");
     require(*doc->find("mode")->as_string() == "dry_run", "mode comes from loaded policy");
     require(doc->find("implemented_actions")->items().size() == 7U, "closed native action support");
     require(doc->find("allowed_actions")->items().size() == 1U, "policy subset is distinct");
@@ -650,6 +653,7 @@ void test_runtime_profile() {
     const auto off = parse_json(response_profile_json(options), json_limits{}, nullptr);
     require(off->find("boot_id")->type() == json_value::kind::null, "unknown boot is never fabricated");
     require(*off->find("mode")->as_string() == "off", "off policy stays explicit");
+    require(*off->find("artifact_protocol")->as_string() == "signed-json-v2-resume-v1", "protocol capability does not fabricate policy permission");
 }
 
 void test_artifact_outbox() {
@@ -1865,6 +1869,16 @@ void test_resumable_signed_artifact() {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view{argv[1]} == "--emit-response-profile-fixture") {
+        command_processor_options options;
+        options.host_id = "host-1";
+        options.boot_digest = "boot_" + std::string(64U, 'a');
+        options.policy.mode = response_mode::enforce;
+        options.policy.allowed = {command_action::collect_process_info,
+            command_action::collect_network_connections, command_action::collect_file};
+        std::puts(response_profile_json(options).c_str());
+        return 0;
+    }
     if (argc == 2 && std::string_view{argv[1]} == "--emit-signed-artifact-fixture") {
         const auto key = generate_ec_p256_keypair();
         if (!succeeded(key)) return 2;

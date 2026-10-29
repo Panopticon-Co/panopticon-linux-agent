@@ -998,8 +998,9 @@ command_outcome command_processor::unreadable(const command_unreadable& failure)
 std::string response_profile_json(const command_processor_options& options) {
     json_writer out;
     out.begin_object();
-    out.field("schema_version", "1");
+    out.field("schema_version", "2");
     out.field("platform", "linux");
+    out.field("artifact_protocol", "signed-json-v2-resume-v1");
     out.field("host_id", options.host_id);
     if (options.boot_digest.empty()) out.field_null("boot_id");
     else out.field("boot_id", options.boot_digest);
