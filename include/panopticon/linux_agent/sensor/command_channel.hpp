@@ -329,6 +329,7 @@ struct command_channel_options {
     std::size_t maximum_ledger_entries{4096U};
     std::uint64_t poll_interval_ms{5000U};
     std::uint64_t maximum_backoff_ms{60'000U};
+    std::filesystem::path artifact_key_path{};
 };
 
 struct command_channel_metrics {
@@ -379,6 +380,7 @@ private:
     std::unique_ptr<command_executor> executor_;
     std::unique_ptr<command_transport> artifact_transport_;
     std::unique_ptr<artifact_outbox> artifacts_;
+    std::optional<ec_keypair> artifact_key_;
     std::unique_ptr<command_ledger> ledger_;
     std::unique_ptr<command_processor> processor_;
     record_queue* queue_{nullptr};

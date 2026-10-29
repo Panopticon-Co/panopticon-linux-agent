@@ -1,6 +1,7 @@
 #pragma once
 
 #include "panopticon/linux_agent/sensor/wal.hpp"
+#include "panopticon/linux_agent/keypair.hpp"
 #include <functional>
 #include <mutex>
 #include <string>
@@ -11,6 +12,9 @@ namespace panopticon::linux_agent::sensor {
     const std::string& correlation_id, const std::string& host_id,
     const std::string& kind, const std::string& content);
 [[nodiscard]] bool valid_artifact_ack(std::string_view payload, std::string_view receipt);
+[[nodiscard]] result<std::string> artifact_manifest_signing_input(std::string_view manifest);
+[[nodiscard]] result<std::string> sign_artifact_payload(const std::string& payload,
+    const std::string& agent, const ec_keypair& keypair, std::uint64_t produced_at_unix);
 
 // Private, identity-scoped WAL; admission prevents quota eviction of originals.
 class artifact_outbox {

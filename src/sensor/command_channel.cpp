@@ -1112,20 +1112,32 @@ result<bool> command_channel_provider::prepare(record_queue& queue) {
         metrics_.last_error = "the command ledger was corrupt and was set aside; commands issued before now are refused";
     }
     auto processor_options = options_.processor;
-    auto artifact_store = artifact_outbox::open(options_.ledger_path.string() + ".artifacts",
+    auto artifact_store = artifact_outbox::open(options_.ledger_path.string() + ".artifacts.v2",
         processor_options.agent_id, processor_options.host_id);
     if (succeeded(artifact_store)) artifacts_ = std::move(std::get<std::unique_ptr<artifact_outbox>>(artifact_store));
     else { std::lock_guard lock{mutex_}; ++metrics_.artifact_failures; }
+    if (!options_.artifact_key_path.empty()) {
+        auto key = load_ec_keypair(options_.artifact_key_path);
+        if (succeeded(key)) artifact_key_ = std::move(std::get<ec_keypair>(key));
+        else { std::lock_guard lock{mutex_}; ++metrics_.artifact_failures; }
+    }
     processor_options.on_collected = [this](const endpoint_command& command, const std::string& kind,
                                            const std::string& data) -> result<std::string> {
         if (!artifacts_) return error{error_code::io_failure, "artifact store unavailable; collection not durably retained"};
-        const auto payload = make_artifact_payload(command.command_id, command.correlation_id,
+        if (!artifact_key_) return error{error_code::io_failure, "enrolled artifact signing key unavailable"};
+        const auto unsigned_payload = make_artifact_payload(command.command_id, command.correlation_id,
             options_.processor.host_id, kind, data);
+        const auto now = options_.processor.now_unix ? options_.processor.now_unix() : system_now_unix();
+        if (now < 0) return error{error_code::invalid_input, "invalid artifact signing time"};
+        auto signed_payload = sign_artifact_payload(unsigned_payload, options_.processor.agent_id,
+            *artifact_key_, static_cast<std::uint64_t>(now));
+        if (!succeeded(signed_payload)) return std::get<error>(signed_payload);
+        const auto payload = std::get<std::string>(std::move(signed_payload));
         auto saved = artifacts_->save(payload);
         if (!succeeded(saved)) { std::lock_guard lock{mutex_}; ++metrics_.artifact_failures; return std::get<error>(saved); }
         { std::lock_guard lock{mutex_}; metrics_.artifacts_pending = artifacts_->pending(); }
         const auto parsed = parse_json(payload, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
-        return std::string(*parsed->find("artifact_id")->as_string());
+        return std::string(*parsed->find("manifest")->find("artifact_id")->as_string());
     };
     auto* transport = transport_.get();
     // Tell the Manager the command is accepted once it is durably recorded and about to run. A failed
@@ -1181,7 +1193,8 @@ void command_channel_provider::run_artifacts() {
         try {
             auto flushed = artifacts_->flush([this](const std::string& payload) {
                 const auto parsed = parse_json(payload, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
-                const auto* field = parsed ? parsed->find("command_id") : nullptr;
+                const auto* manifest = parsed ? parsed->find("manifest") : nullptr;
+                const auto* field = manifest ? manifest->find("command_id") : nullptr;
                 if (!field || !field->as_string()) return std::string{};
                 const auto reply = artifact_transport_->submit_artifact(std::string(*field->as_string()), payload);
                 return reply.status == post_status::answered ? reply.body : std::string{};

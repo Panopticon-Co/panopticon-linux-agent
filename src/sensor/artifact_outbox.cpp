@@ -37,14 +37,72 @@ std::string make_artifact_payload(const std::string& command_id, const std::stri
     return out.take();
 }
 
+result<std::string> artifact_manifest_signing_input(const std::string_view manifest) {
+    const auto document = parse_json(manifest, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
+    const auto* value = document ? document->find("manifest") : nullptr;
+    if (!value && document) value = &*document;
+    const auto* auth = value ? value->find("authorization") : nullptr;
+    if (!value || value->keys().size() != 12U || text(*value, "schema_version") != "2" ||
+        !auth || auth->keys().size() != 3U || text(*auth, "algorithm") != "ES256")
+        return error{error_code::invalid_input, "invalid closed artifact manifest"};
+    std::string result = "panopticon-response-artifact-auth/2\n";
+    for (const auto* name : {"schema_version", "artifact_id", "agent_id", "host_id", "command_id",
+        "correlation_id", "kind", "media_type", "content_bytes", "sha256", "produced_at_unix", "algorithm", "key_id"}) {
+        const bool authorization = std::string_view{name} == "algorithm" || std::string_view{name} == "key_id";
+        const auto* field = (authorization ? auth : &*value)->find(name);
+        if (!field) return error{error_code::invalid_input, "missing artifact signing field"};
+        const bool numeric = std::string_view{name} == "content_bytes" || std::string_view{name} == "produced_at_unix";
+        if (numeric ? !field->as_unsigned().has_value() : !field->as_string().has_value())
+            return error{error_code::invalid_input, "invalid artifact signing field type"};
+        const auto data = numeric ? std::to_string(*field->as_unsigned()) : std::string(*field->as_string());
+        result += std::string{name} + ":" + std::to_string(data.size()) + ":" + data + "\n";
+    }
+    return result;
+}
+
+result<std::string> sign_artifact_payload(const std::string& payload, const std::string& agent,
+    const ec_keypair& keypair, const std::uint64_t produced_at_unix) {
+    const auto value = parse_json(payload, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
+    if (!value || text(*value, "schema_version") != "1" || !is_valid_identifier(agent))
+        return error{error_code::invalid_input, "invalid unsigned collection envelope"};
+    const auto* count = value->find("content_bytes");
+    if (!count || !count->as_unsigned() || *count->as_unsigned() > 1024U * 1024U)
+        return error{error_code::invalid_input, "invalid artifact content bound"};
+    const auto key_id = sha256_hex(std::string{reinterpret_cast<const char*>(keypair.public_point.data()),
+                                             keypair.public_point.size()}).substr(0U, 16U);
+    const auto manifest = [&](const std::string& signature) {
+        json_writer out;
+        out.begin_object().field("schema_version", "2").field("agent_id", agent);
+        for (const auto* name : {"artifact_id", "host_id", "command_id", "correlation_id", "kind", "media_type", "sha256"})
+            out.field(name, text(*value, name));
+        out.field("content_bytes", *count->as_unsigned()).field("produced_at_unix", produced_at_unix);
+        out.key("authorization").begin_object().field("algorithm", "ES256").field("key_id", key_id);
+        out.field("signature", signature).end_object().end_object();
+        return out.take();
+    };
+    const auto input = artifact_manifest_signing_input(manifest(response_profile_header(std::string(64U, '\0'))));
+    if (!succeeded(input)) return std::get<error>(input);
+    const auto& data = std::get<std::string>(input);
+    const auto signed_bytes = sign_raw(keypair, std::vector<std::uint8_t>(data.begin(), data.end()));
+    if (!succeeded(signed_bytes)) return std::get<error>(signed_bytes);
+    const auto& raw = std::get<ec_raw_signature>(signed_bytes);
+    json_writer out;
+    out.begin_object().key("manifest").raw(manifest(response_profile_header(
+        std::string_view{reinterpret_cast<const char*>(raw.data()), raw.size()})));
+    out.field("content_base64", text(*value, "content_base64")).end_object();
+    return out.take();
+}
+
 bool valid_artifact_ack(const std::string_view payload, const std::string_view receipt) {
     const auto sent = parse_json(payload, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
     const auto ack = parse_json(receipt, json_limits{4096U, 4U, 16U}, nullptr);
     if (!sent || !ack || !ack->is_object() || ack->keys().size() != 3U) return false;
+    const auto* manifest = sent->find("manifest");
+    if (!manifest) manifest = &*sent;
     const auto* retained = ack->find("retained");
-    return retained && retained->as_boolean() == true && !text(*sent, "artifact_id").empty()
-        && text(*ack, "artifact_id") == text(*sent, "artifact_id")
-        && !text(*sent, "sha256").empty() && text(*ack, "sha256") == text(*sent, "sha256");
+    return retained && retained->as_boolean() == true && !text(*manifest, "artifact_id").empty()
+        && text(*ack, "artifact_id") == text(*manifest, "artifact_id")
+        && !text(*manifest, "sha256").empty() && text(*ack, "sha256") == text(*manifest, "sha256");
 }
 
 artifact_outbox::artifact_outbox(std::unique_ptr<write_ahead_log> log, std::string agent,
@@ -69,9 +127,13 @@ result<std::unique_ptr<artifact_outbox>> artifact_outbox::open(const std::filesy
 
 result<bool> artifact_outbox::save(const std::string& payload) {
     const auto value = parse_json(payload, json_limits{1500U * 1024U, 4U, 64U}, nullptr);
-    if (!value || text(*value, "schema_version") != "1" || text(*value, "host_id") != host_
-        || !is_valid_identifier(text(*value, "command_id"))
-        || text(*value, "artifact_id").size() != 68U || text(*value, "sha256").size() != 64U)
+    const auto* manifest = value ? value->find("manifest") : nullptr;
+    if (!manifest && value) manifest = &*value;
+    if (!manifest || (text(*manifest, "schema_version") != "1" && text(*manifest, "schema_version") != "2") ||
+        text(*manifest, "host_id") != host_ ||
+        (value->find("manifest") && text(*manifest, "agent_id") != agent_) ||
+        !is_valid_identifier(text(*manifest, "command_id")) ||
+        text(*manifest, "artifact_id").size() != 68U || text(*manifest, "sha256").size() != 64U)
         return error{error_code::invalid_input, "artifact scope/schema disagreement"};
     json_writer wrapper;
     wrapper.begin_object().field("agent_id", agent_).field("host_id", host_).field("artifact", payload).end_object();

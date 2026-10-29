@@ -724,6 +724,52 @@ void test_artifact_commit_precedes_success() {
     require(w.executor.calls.size() == 1U, "artifact failure never reruns an accepted command");
 }
 
+void test_signed_artifact_manifest() {
+    const auto generated = generate_ec_p256_keypair();
+    require(succeeded(generated), "artifact signing identity");
+    const auto& key = std::get<ec_keypair>(generated);
+    const auto unsigned_payload = make_artifact_payload("command-1", "correlation-1", "host-1", "process_snapshot", "{\"pid\":42}");
+    const auto signed_value = sign_artifact_payload(unsigned_payload, "agent-1", key, 1793232000U);
+    require(succeeded(signed_value), "collection manifest signed before outbox commit");
+    const auto& payload = std::get<std::string>(signed_value);
+    const auto value = parse_json(payload, json_limits{}, nullptr);
+    require(value.has_value(), "signed envelope parses");
+    const auto* manifest = value->find("manifest");
+    require(manifest && manifest->find("schema_version")->as_string() == "2", "manifest version 2");
+    const auto input = artifact_manifest_signing_input(payload);
+    require(succeeded(input), "artifact domain-separated signing input");
+    const auto& data = std::get<std::string>(input);
+    const auto signature = decode_base64(*manifest->find("authorization")->find("signature")->as_string());
+    require(signature && signature->size() == 64U, "raw P-256 r/s signature");
+    ec_raw_signature raw{};
+    std::copy(signature->begin(), signature->end(), raw.begin());
+    const auto verified = verify_raw(key.public_point, std::vector<std::uint8_t>(data.begin(), data.end()), raw);
+    require(succeeded(verified) && std::get<bool>(verified), "signature verifies against endpoint public key");
+    auto edited = data; edited.push_back('x');
+    const auto invalid = verify_raw(key.public_point, std::vector<std::uint8_t>(edited.begin(), edited.end()), raw);
+    require(succeeded(invalid) && !std::get<bool>(invalid), "signature rejects edited manifest bytes");
+    const auto id = std::string(*manifest->find("artifact_id")->as_string());
+    const auto digest = std::string(*manifest->find("sha256")->as_string());
+    const auto ack = "{\"artifact_id\":\"" + id + "\",\"sha256\":\"" + digest + "\",\"retained\":true}";
+    const auto dir = scratch("signed-artifacts");
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "signed outbox opens");
+        auto& box = std::get<std::unique_ptr<artifact_outbox>>(opened);
+        require(succeeded(box->save(payload)), "signed artifact durably saved");
+    }
+    {
+        auto opened = artifact_outbox::open(dir / "outbox", "agent-1", "host-1");
+        require(succeeded(opened), "signed outbox recovers");
+        auto& box = std::get<std::unique_ptr<artifact_outbox>>(opened);
+        const auto retired = box->flush([&](const std::string& retry) {
+            require(retry == payload, "restart retries exact signed envelope without recollection or resigning"); return ack;
+        });
+        require(succeeded(retired) && std::get<std::size_t>(retired) == 1U, "signed exact receipt retires artifact");
+    }
+    std::filesystem::remove_all(dir);
+}
+
 void test_result_json() {
     command_outcome outcome;
     outcome.command_id = "c1";
@@ -1732,6 +1778,22 @@ void test_configuration() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view{argv[1]} == "--emit-signed-artifact-fixture") {
+        const auto key = generate_ec_p256_keypair();
+        if (!succeeded(key)) return 2;
+        const auto payload = make_artifact_payload("fixture-command", "fixture-correlation", "host-1", "process_snapshot",
+            "{\"pid\":42,\"start_time_ticks\":\"18446744073709551615\"}\n");
+        const auto signed_payload = sign_artifact_payload(payload, "agent-1", std::get<ec_keypair>(key), 1793232000U);
+        if (!succeeded(signed_payload)) return 2;
+        auto result = std::get<std::string>(signed_payload);
+        result.pop_back();
+        static constexpr char digits[] = "0123456789abcdef";
+        std::string point;
+        for (const auto byte : std::get<ec_keypair>(key).public_point) { point += digits[byte >> 4]; point += digits[byte & 15U]; }
+        result += ",\"test_public_point_hex\":\"" + point + "\"}";
+        std::puts(result.c_str());
+        return 0;
+    }
     if (argc == 2 && std::string_view{argv[1]} == "--emit-artifact-fixture") {
         std::puts(make_artifact_payload("fixture-command", "fixture-correlation", "host-1", "process_snapshot",
             "{\"pid\":42,\"start_time_ticks\":\"18446744073709551615\"}\n").c_str());
@@ -1765,6 +1827,7 @@ int main(int argc, char** argv) {
         {"processor_unreadable", test_processor_unreadable},
         {"runtime_profile", test_runtime_profile},
         {"artifact_outbox", test_artifact_outbox},
+        {"signed_artifact_manifest", test_signed_artifact_manifest},
         {"artifact_commit_precedes_success", test_artifact_commit_precedes_success},
         {"result_json", test_result_json},
         {"response_record_shape", test_response_record_shape},

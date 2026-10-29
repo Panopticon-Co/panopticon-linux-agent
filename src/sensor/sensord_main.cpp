@@ -252,6 +252,7 @@ int main(int argc, char** argv) {
         } else {
             sensor::command_channel_options channel;
             channel.processor.agent_id = manager_connection->identity.agent_id;
+            channel.artifact_key_path = std::filesystem::path{config.identity_path}.concat(".key");
             channel.processor.host_id = config.host_id;
             channel.processor.boot_digest = sensor::linux_boot_digest(observation.boot_id);
             channel.processor.policy.require_boot_binding = config.response_require_boot_binding;
@@ -292,7 +293,9 @@ int main(int argc, char** argv) {
             const std::vector<std::filesystem::path> own_files{std::filesystem::path{config_path}, config.identity_path, config.ca_bundle,
                                                                 config.response_signing_keys, channel.ledger_path, config.wal_path,
                                                                 std::filesystem::path{config.wal_path.string() + ".commands"},
-                                                                std::filesystem::path{channel.ledger_path.string() + ".artifacts"}};
+                                                                std::filesystem::path{channel.ledger_path.string() + ".artifacts"},
+                                                                std::filesystem::path{channel.ledger_path.string() + ".artifacts.v2"},
+                                                                channel.artifact_key_path};
             for (const auto& own : own_files) {
                 if (!own.empty()) executor.files.protected_paths.push_back(own);
             }
