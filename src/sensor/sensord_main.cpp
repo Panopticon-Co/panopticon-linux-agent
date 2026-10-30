@@ -300,6 +300,7 @@ int main(int argc, char** argv) {
                 if (!own.empty()) executor.files.protected_paths.push_back(own);
             }
             if (keys_ok) {
+                channel.processor.require_collection_acceptance = true;
                 manager_connection->response_profile = sensor::response_profile_header(
                     sensor::response_profile_json(channel.processor));
                 auto artifact_connection = *manager_connection;

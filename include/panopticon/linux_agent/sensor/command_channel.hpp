@@ -267,6 +267,10 @@ struct command_processor_options {
     // Called once a command has passed every check and its intent is durably recorded, just before it
     // is carried out (the Manager's DISPATCHED to ACCEPTED step). Failures here never block execution.
     std::function<void(const endpoint_command&)> on_accepted;
+    // Production collection requires a fresh Manager authorization acknowledgement.
+    // Isolated/offline processor users do not advertise this gate by default.
+    bool require_collection_acceptance{false};
+    std::function<bool(const endpoint_command&)> on_collection_authorized;
     std::function<result<std::string>(const endpoint_command&, const std::string&, const std::string&)> on_collected{};
 };
 
@@ -308,6 +312,7 @@ private:
 
 // Current loaded policy, sent directly with each authenticated poll (never via the WAL).
 [[nodiscard]] std::string response_profile_json(const command_processor_options& options);
+[[nodiscard]] bool valid_collection_accept_ack(const std::string& command_id, const post_response& reply);
 [[nodiscard]] std::string response_profile_header(std::string_view json);
 
 // The seam between the channel and the network, so the channel is tested without a socket.
