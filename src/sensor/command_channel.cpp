@@ -932,7 +932,19 @@ command_outcome command_processor::handle(const endpoint_command& command) {
     if (!succeeded(made)) return describe(command, "rejected", "ledger_unavailable", "the replay ledger cannot record the command");
     if (!std::get<bool>(made)) return describe(command, "rejected", "replay", "the command id was handled before");
 
-    if (options_.on_accepted) options_.on_accepted(command);
+    const bool collection = command.action == command_action::collect_process_info ||
+        command.action == command_action::collect_network_connections || command.action == command_action::collect_file;
+    if (collection && options_.require_collection_acceptance) {
+        bool authorized = false;
+        try { authorized = options_.on_collection_authorized && options_.on_collection_authorized(command); }
+        catch (...) { authorized = false; }
+        if (!authorized) {
+            auto refusal = describe(command, "rejected", "manager_acceptance_required",
+                "collection not executed: Manager acceptance was refused or unavailable");
+            (void)ledger_.mark_done(command.command_id, refusal.outcome, refusal.reason, refusal.detail);
+            return refusal;
+        }
+    } else if (options_.on_accepted) options_.on_accepted(command);
     if (changes && !dry_run) change_times_.push_back(current);
 
     const auto done = executor_.execute(command, dry_run);
@@ -995,12 +1007,23 @@ command_outcome command_processor::unreadable(const command_unreadable& failure)
     return result;
 }
 
+bool valid_collection_accept_ack(const std::string& command_id, const post_response& reply) {
+    if (reply.status != post_status::answered || reply.http_status != 200 || reply.body.size() > 4096U) return false;
+    const auto value = parse_json(reply.body, json_limits{4096U, 2U, 8U}, nullptr);
+    if (!value || !value->is_object() || value->keys().size() != 2U) return false;
+    const auto* id = value->find("command_id");
+    const auto* accepted = value->find("accepted");
+    return id && id->as_string() && *id->as_string() == command_id &&
+        accepted && accepted->as_boolean() && *accepted->as_boolean();
+}
+
 std::string response_profile_json(const command_processor_options& options) {
     json_writer out;
     out.begin_object();
     out.field("schema_version", "2");
     out.field("platform", "linux");
     out.field("artifact_protocol", "signed-json-v2-resume-v1");
+    out.field("require_collection_acceptance", options.require_collection_acceptance);
     out.field("host_id", options.host_id);
     if (options.boot_digest.empty()) out.field_null("boot_id");
     else out.field("boot_id", options.boot_digest);
@@ -1141,9 +1164,13 @@ result<bool> command_channel_provider::prepare(record_queue& queue) {
         return std::string(*parsed->find("manifest")->find("artifact_id")->as_string());
     };
     auto* transport = transport_.get();
-    // Tell the Manager the command is accepted once it is durably recorded and about to run. A failed
-    // call changes nothing: the Manager takes a result straight from DISPATCHED.
+    // Preserve changing-action acknowledgement behavior. Collection execution
+    // additionally requires a valid current Manager acceptance response.
     processor_options.on_accepted = [transport](const endpoint_command& command) { (void)transport->accept(command.command_id); };
+    processor_options.require_collection_acceptance = true;
+    processor_options.on_collection_authorized = [transport](const endpoint_command& command) {
+        return valid_collection_accept_ack(command.command_id, transport->accept(command.command_id));
+    };
     processor_ = std::make_unique<command_processor>(std::move(processor_options), *ledger_, *executor_);
     queue_ = &queue;
     return true;

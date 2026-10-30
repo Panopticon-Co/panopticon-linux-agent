@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Panopticon-Co/panopticon-contracts
-          ref: "2b42f108ed3ead2c5c8556e174fcb8e6b5a21ef5"
+          ref: "9cb1ab8a8d9e3c509f5b6f0dfeeced7e97b70d58"
           path: artifact-contracts
       - uses: actions/setup-python@v5
         with:

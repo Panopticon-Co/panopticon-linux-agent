@@ -631,6 +631,7 @@ void test_runtime_profile() {
     options.policy.allowed = {command_action::collect_process_info};
     options.policy.require_boot_binding = true;
     options.policy.require_signature = true;
+    options.require_collection_acceptance = true;
     const auto text = response_profile_json(options);
     require(response_profile_json(options) == text, "repeated capability reports do not invent a new identity or protocol");
     const auto doc = parse_json(text, json_limits{}, nullptr);
@@ -641,6 +642,7 @@ void test_runtime_profile() {
     require(doc->find("implemented_actions")->items().size() == 7U, "closed native action support");
     require(doc->find("allowed_actions")->items().size() == 1U, "policy subset is distinct");
     require(*doc->find("require_signature")->as_boolean(), "signature requirement is explicit");
+    require(*doc->find("require_collection_acceptance")->as_boolean(), "collection execution-time gate is explicit");
     require(*doc->find("require_boot_binding")->as_boolean(), "boot requirement is explicit");
     const auto decoded = decode_base64(response_profile_header(text));
     require(decoded && std::string(decoded->begin(), decoded->end()) == text, "HTTP header round trip");
@@ -1009,6 +1011,8 @@ struct fake_manager final : command_transport {
     std::vector<std::string> log;
     std::vector<std::string> results;
     post_status submit_status{post_status::answered};
+    post_status accept_status{post_status::answered};
+    std::optional<std::string> accept_body;
     post_response poll() override {
         log.push_back("poll");
         if (poll_replies.empty()) {
@@ -1024,7 +1028,11 @@ struct fake_manager final : command_transport {
     post_response accept(const std::string& id) override {
         log.push_back("accept:" + id);
         post_response reply;
-        reply.status = post_status::answered;
+        reply.status = accept_status;
+        reply.http_status = accept_status == post_status::answered ? 200 : 403;
+        json_writer body;
+        body.begin_object().field("command_id", id).field("accepted", true).end_object();
+        reply.body = accept_body.value_or(body.take());
         return reply;
     }
     post_response submit(const std::string& result) override {
@@ -1085,6 +1093,51 @@ std::string listing(const std::vector<std::string>& commands) {
 }
 
 const std::string valid_command = envelope("c1", "KILL_PROCESS", kill_target, "2027-01-15T08:05:00+00:00", "2027-01-15T08:00:00+00:00");
+
+void test_collection_acceptance_is_mandatory_and_not_replayed() {
+    for (const auto status : {post_status::unauthorized, post_status::refused, post_status::retry}) {
+        channel_world w{"collection-acceptance-" + std::to_string(static_cast<int>(status))};
+        w.manager->accept_status = status;
+        const auto command = envelope("collect-1", "COLLECT_NETWORK_CONNECTIONS", "{}",
+            zulu(now_fixed + 300), zulu(now_fixed));
+        w.manager->poll_replies.push_back(answered(listing({command})));
+        (void)w.channel->step(w.queue);
+        require(w.executor->calls.empty(), "refused or unavailable Manager acceptance must prevent collection");
+        require(w.manager->results.size() == 1U, "refusal is retained and reported");
+        const auto result = parse_json(w.manager->results[0], json_limits{}, nullptr);
+        require(result && *result->find("outcome")->as_string() == "rejected", "collection refusal is explicit");
+        require(result->find("detail")->as_string()->find("manager_acceptance_required") != std::string_view::npos,
+            "collection refusal distinguishes the Manager execution gate");
+        const auto audit = w.drain();
+        require(audit.size() == 1U && !audit[0].executed, "refused collection audit never claims execution");
+        w.manager->accept_status = post_status::answered;
+        w.manager->poll_replies.push_back(answered(listing({command})));
+        (void)w.channel->step(w.queue);
+        require(w.executor->calls.empty(), "later acceptance cannot replay a refused collection");
+    }
+    channel_world w{"collection-malformed-acceptance"};
+    w.manager->accept_body = "{\"command_id\":\"wrong\",\"accepted\":true}";
+    w.manager->poll_replies.push_back(answered(listing({envelope("collect-1", "COLLECT_NETWORK_CONNECTIONS", "{}",
+        zulu(now_fixed + 300), zulu(now_fixed))})));
+    (void)w.channel->step(w.queue);
+    require(w.executor->calls.empty(), "HTTP200 with a wrong acknowledgement cannot collect");
+    channel_world allowed{"collection-valid-acceptance"};
+    allowed.manager->poll_replies.push_back(answered(listing({envelope("collect-ok", "COLLECT_NETWORK_CONNECTIONS", "{}",
+        zulu(now_fixed + 300), zulu(now_fixed))})));
+    (void)allowed.channel->step(allowed.queue);
+    require(allowed.executor->calls == std::vector<std::string>{"collect-ok"}, "an exact fresh acknowledgement permits collection once");
+}
+
+void test_collection_acceptance_ack_shape() {
+    require(valid_collection_accept_ack("c1", answered("{\"command_id\":\"c1\",\"accepted\":true}")), "exact collection acknowledgement");
+    for (const auto body : {"{}", "{\"command_id\":\"c2\",\"accepted\":true}",
+         "{\"command_id\":\"c1\",\"accepted\":1}", "{\"command_id\":\"c1\",\"accepted\":false}",
+         "{\"command_id\":\"c1\",\"accepted\":true,\"extra\":1}",
+         "{\"command_id\":\"c1\",\"accepted\":false,\"accepted\":true}"}) {
+        require(!valid_collection_accept_ack("c1", answered(body)), "malformed acknowledgement is refused");
+    }
+    require(!valid_collection_accept_ack("c1", answered(std::string(4097U, 'x'))), "oversized acknowledgement is refused");
+}
 
 void test_channel_round_trip() {
     channel_world w{"round-trip"};
@@ -1874,6 +1927,7 @@ int main(int argc, char** argv) {
         options.host_id = "host-1";
         options.boot_digest = "boot_" + std::string(64U, 'a');
         options.policy.mode = response_mode::enforce;
+        options.require_collection_acceptance = true;
         options.policy.allowed = {command_action::collect_process_info,
             command_action::collect_network_connections, command_action::collect_file};
         std::puts(response_profile_json(options).c_str());
@@ -1938,6 +1992,8 @@ int main(int argc, char** argv) {
         {"local_executor_collects_connections", test_local_executor_collects_connections},
         {"executor_survives_pid_reuse_race", test_executor_survives_pid_reuse_race},
         {"channel_round_trip", test_channel_round_trip},
+        {"collection_acceptance_gate", test_collection_acceptance_is_mandatory_and_not_replayed},
+        {"collection_acceptance_ack", test_collection_acceptance_ack_shape},
         {"channel_retries_the_result", test_channel_retries_the_result},
         {"channel_refused_result_is_not_retried_forever", test_channel_refused_result_is_not_retried_forever},
         {"channel_restart_does_not_rerun", test_channel_restart_does_not_rerun},
